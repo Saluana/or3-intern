@@ -184,7 +184,7 @@ func (s *serviceServer) runDoctorInternalAdminBrainTurnWithObserver(ctx context.
 	}
 	allowedTools := doctorAdminBrainAllowedTools(s.runtime.Tools)
 	toolBudget := agent.DoctorAdminBrainToolBudget()
-	return s.app().RunTurn(ctx, app.TurnRequest{
+	_, err := s.app().RunTurn(ctx, app.TurnRequest{
 		SessionKey:          req.sessionKey,
 		Message:             req.content,
 		SystemPrompt:        s.buildDoctorAdminBrainContext(ctx),
@@ -200,4 +200,5 @@ func (s *serviceServer) runDoctorInternalAdminBrainTurnWithObserver(ctx context.
 		ProfileName:         "",
 		ToolBudgetOverrides: &toolBudget,
 	})
+	return err
 }

@@ -130,11 +130,8 @@ func (s *serviceServer) syncDoctorSessionRunnerMeta(ctx context.Context, meta db
 	if runnerID == "" {
 		runnerID = strings.TrimSpace(adminBrain.RunnerID)
 	}
-	if adminBrain.Kind == adminflow.AdminBrainAPIKeyProvider && doctorUsesRunnerChat(runnerID) {
-		runnerID = string(agentcli.RunnerOR3)
-	}
-	if runnerID == "" && adminBrain.Kind == adminflow.AdminBrainAPIKeyProvider {
-		runnerID = string(agentcli.RunnerOR3)
+	if runnerID == "" && s.config.AgentCLI.Enabled {
+		runnerID = string(agentcli.ResolveDefaultRunner(s.config))
 	}
 	if runnerID != "" {
 		meta.RunnerID = runnerID

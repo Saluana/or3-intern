@@ -151,8 +151,11 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.Subagents.TaskTimeoutSeconds != 300 {
 		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
-	if cfg.AgentCLI.Enabled {
-		t.Error("expected AgentCLI.Enabled=false by default")
+	if !cfg.AgentCLI.Enabled {
+		t.Error("expected AgentCLI.Enabled=true by default")
+	}
+	if cfg.AgentCLI.DefaultRunner != "opencode" {
+		t.Errorf("expected AgentCLI.DefaultRunner=opencode, got %q", cfg.AgentCLI.DefaultRunner)
 	}
 	if cfg.AgentCLI.MaxConcurrent != 1 {
 		t.Errorf("expected AgentCLI.MaxConcurrent=1, got %d", cfg.AgentCLI.MaxConcurrent)
@@ -1368,7 +1371,9 @@ func TestLoad_AgentCLIDisabledRunnersEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	b, _ := json.MarshalIndent(Default(), "", "  ")
+	input := Default()
+	input.AgentCLI.DefaultRunner = "gemini"
+	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 
 	t.Setenv("OR3_AGENT_CLI_DISABLED_RUNNERS", "opencode,codex, claude ")
@@ -1431,6 +1436,55 @@ func TestLoad_AgentCLIEnvOverrides(t *testing.T) {
 	}
 	if cfg.AgentCLI.DefaultIsolation != "host_readonly" {
 		t.Errorf("expected DefaultIsolation=host_readonly, got %q", cfg.AgentCLI.DefaultIsolation)
+	}
+}
+
+func TestLoad_AgentCLIDefaultRunnerEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultRunner = "codex"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	t.Setenv("OR3_AGENT_CLI_DEFAULT_RUNNER", "claude")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.DefaultRunner != "claude" {
+		t.Errorf("expected env override claude, got %q", cfg.AgentCLI.DefaultRunner)
+	}
+}
+
+func TestLoad_AgentCLIRejectsInvalidDefaultRunner(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.DefaultRunner = "or3-intern"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "defaultRunner") {
+		t.Fatalf("expected defaultRunner validation error, got %v", err)
+	}
+}
+
+func TestLoad_AgentCLIPreservesExplicitDisabledConfig(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.Enabled = false
+	input.AgentCLI.DefaultRunner = ""
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.Enabled {
+		t.Fatal("expected existing disabled agentCLI config to remain disabled")
 	}
 }
 

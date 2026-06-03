@@ -773,14 +773,11 @@ func (s *serviceServer) handleDoctorSessionCreate(w http.ResponseWriter, r *http
 	}
 	adminBrain := s.detectAdminBrainProvider(r.Context())
 	runnerID := strings.TrimSpace(req.RunnerID)
-	if adminBrain.Kind == adminflow.AdminBrainAPIKeyProvider && doctorUsesRunnerChat(runnerID) {
-		runnerID = string(agentcli.RunnerOR3)
-	}
 	if runnerID == "" {
 		runnerID = adminBrain.RunnerID
 	}
-	if runnerID == "" && adminBrain.Kind == adminflow.AdminBrainAPIKeyProvider {
-		runnerID = string(agentcli.RunnerOR3)
+	if runnerID == "" && s.config.AgentCLI.Enabled {
+		runnerID = string(agentcli.ResolveDefaultRunner(s.config))
 	}
 	meta := db.ChatSessionMeta{
 		SessionKey:  sessionKey,

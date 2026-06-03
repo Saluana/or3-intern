@@ -152,7 +152,10 @@ type BackgroundRunResult struct {
 	ArtifactID string
 }
 
-// Handle routes a published event into the runtime turn pipeline.
+// Handle routes a published event into the built-in provider/tool-loop pipeline.
+// Primary chat, channel, cron, and service turns should use runner orchestration
+// (agentcli.ChatManager) instead; Handle remains for doctor admin brain, tests,
+// and compatibility-only callers.
 func (r *Runtime) Handle(ctx context.Context, ev bus.Event) error {
 	ctx = ContextWithConversationSession(ctx, ev.SessionKey)
 	ctx = r.contextWithEventProfile(ctx, ev)

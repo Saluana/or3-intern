@@ -2,6 +2,7 @@ package cronrunner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,9 @@ import (
 	"or3-intern/internal/db"
 )
 
+// ErrLegacyCronAgentTurn is returned when legacy agent_turn cron payloads cannot run.
+var ErrLegacyCronAgentTurn = errors.New("legacy cron agent_turn requires agentCLI.enabled; use agent_cli_run for runner jobs")
+
 type AgentCLIEnqueuer interface {
 	Enqueue(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error)
 }
@@ -19,13 +23,14 @@ type Dispatcher struct {
 	Bus               *bus.Bus
 	DefaultSessionKey string
 	AgentCLI          AgentCLIEnqueuer
+	AgentCLIEnabled   bool
 }
 
-func New(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqueuer) cron.Runner {
+func New(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqueuer, agentCLIEnabled bool) cron.Runner {
 	if b == nil {
 		panic("cronrunner dispatcher event bus not configured")
 	}
-	d := Dispatcher{Bus: b, DefaultSessionKey: defaultSessionKey, AgentCLI: agentCLI}
+	d := Dispatcher{Bus: b, DefaultSessionKey: defaultSessionKey, AgentCLI: agentCLI, AgentCLIEnabled: agentCLIEnabled}
 	return d.Run
 }
 
@@ -41,6 +46,9 @@ func (d Dispatcher) Run(ctx context.Context, job cron.CronJob) (cron.RunResult, 
 }
 
 func (d Dispatcher) publishAgentTurn(job cron.CronJob, payload cron.CronPayload) (cron.RunResult, error) {
+	if !d.AgentCLIEnabled {
+		return cron.RunResult{}, fmt.Errorf("%w: recreate the job as agent_cli_run or enable agentCLI.enabled", ErrLegacyCronAgentTurn)
+	}
 	msg := payload.Message
 	if strings.TrimSpace(msg) == "" {
 		msg = "cron job: " + job.Name
@@ -55,7 +63,11 @@ func (d Dispatcher) publishAgentTurn(job cron.CronJob, payload cron.CronPayload)
 		Channel:    payload.Channel,
 		From:       payload.To,
 		Message:    msg,
-		Meta:       map[string]any{"job_id": job.ID},
+		Meta: map[string]any{
+			"job_id":            job.ID,
+			"cron_payload_kind": payload.Kind,
+			"runner_first":      true,
+		},
 	}
 	if ok := d.Bus.Publish(ev); !ok {
 		return cron.RunResult{}, fmt.Errorf("event bus full")

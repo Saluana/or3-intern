@@ -18,7 +18,7 @@ import (
 const serviceChatSessionsBodyLimit = 64 * 1024
 
 // handleChatRunners exposes runner-discovery filtered/decorated for the chat
-// transport selector. or3-intern is always present and reported available.
+// transport selector.
 //
 //	GET /internal/v1/chat-runners
 func (s *serviceServer) handleChatRunners(w http.ResponseWriter, r *http.Request) {
@@ -36,19 +36,22 @@ func (s *serviceServer) handleChatRunners(w http.ResponseWriter, r *http.Request
 	for _, info := range detected {
 		infoByID[info.ID] = info
 	}
-	specs := agentcli.AllRunners()
+	specs := agentcli.SelectableRunners()
+	if s.agentCLIManager == nil {
+		specs = nil
+	}
+	defaultRunner := string(agentcli.ResolveDefaultRunner(s.config))
+	defaultModel := strings.TrimSpace(s.config.AgentCLI.DefaultModels[defaultRunner])
+	defaultMode := strings.TrimSpace(s.config.AgentCLI.DefaultMode)
+	defaultIsolation := strings.TrimSpace(s.config.AgentCLI.DefaultIsolation)
 	out := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
-		if !spec.Supports.Chat.ChatSelectable {
-			continue
-		}
-		if s.agentCLIManager == nil && spec.ID != agentcli.RunnerOR3 {
-			continue
-		}
 		info := infoByID[string(spec.ID)]
-		out = append(out, controlplane.BuildChatRunner(spec, info, "", "", "", ""))
+		out = append(out, controlplane.BuildChatRunner(spec, info, defaultModel, defaultMode, defaultIsolation, ""))
 	}
-	writeServiceValue(w, http.StatusOK, map[string]any{"runners": out})
+	payload := controlplane.BuildChatRunnerListResponse(out)
+	payload["default_runner"] = defaultRunner
+	writeServiceValue(w, http.StatusOK, payload)
 }
 
 // chatSessionsCreateRequest is the body for POST /chat-sessions.

@@ -21,15 +21,6 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 	}
 	status := info.Status
 	authStatus := info.AuthStatus
-	if string(spec.ID) == string(agentcli.RunnerOR3) {
-		// or3-intern is always available.
-		if status == "" {
-			status = agentcli.RunnerStatusAvailable
-		}
-		if authStatus == "" {
-			authStatus = agentcli.AuthReady
-		}
-	}
 	out := map[string]any{
 		"id":                id,
 		"display_name":      display,
@@ -203,12 +194,21 @@ func BuildRunnerChatEventListResponse(events []db.RunnerChatEvent) map[string]an
 
 // BuildChatSessionMetaResponse converts a chat_session_meta row.
 func BuildChatSessionMetaResponse(m db.ChatSessionMeta) map[string]any {
-	return map[string]any{
+	runnerID := m.RunnerID
+	runnerLabel := m.RunnerLabel
+	var legacyRunnerID string
+	if agentcli.IsLegacyRunnerID(runnerID) {
+		legacyRunnerID = runnerID
+		if strings.TrimSpace(runnerLabel) == "" {
+			runnerLabel = agentcli.LegacyRunnerLabel
+		}
+	}
+	out := map[string]any{
 		"session_key":              m.SessionKey,
 		"host_id":                  m.HostID,
 		"title":                    m.Title,
-		"runner_id":                m.RunnerID,
-		"runner_label":             m.RunnerLabel,
+		"runner_id":                runnerID,
+		"runner_label":             runnerLabel,
 		"runner_chat_session_id":   m.RunnerChatSessionID,
 		"runner_continuation_mode": m.RunnerContinuationMode,
 		"runner_model":             m.RunnerModel,
@@ -226,6 +226,11 @@ func BuildChatSessionMetaResponse(m db.ChatSessionMeta) map[string]any {
 		"created_at":               m.CreatedAt,
 		"updated_at":               m.UpdatedAt,
 	}
+	if legacyRunnerID != "" {
+		out["legacy_runner_id"] = legacyRunnerID
+		out["runner_selectable"] = false
+	}
+	return out
 }
 
 // BuildChatSessionListResponse renders the chat sessions listing.

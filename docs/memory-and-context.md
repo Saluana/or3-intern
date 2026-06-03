@@ -12,6 +12,14 @@ The README describes the retrieval stack as:
 
 This is meant to keep retrieval precise without needing to scan full histories on every turn.
 
+## Runner-first prompts
+
+Chat, channels, and automation turns build runner prompts in OR3 before delegating
+to an external CLI. Trusted bootstrap text is separated from the user task.
+Retrieved memory and indexed doc excerpts are injected into `<or3_context>` when
+configured. Session replay for multi-turn runner chat is handled by
+`agentcli.ChatManager` using persisted `runner_chat_turns`.
+
 ## Context sources
 
 A turn can draw context from several places:

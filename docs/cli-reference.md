@@ -14,7 +14,7 @@ If you are running directly from a checkout without installing, replace `or3-int
 | Command | Purpose |
 | --- | --- |
 | `or3-intern setup` | Guided first-run setup with scenario and safety choices |
-| `or3-intern chat` | Interactive CLI session |
+| `or3-intern chat` | Interactive CLI session (runner-backed; default OpenCode) |
 | `or3-intern health [--check|--fix|--json]` | Checks readiness and applies safe repairs |
 | `or3-intern pair --auto [--name ...] [--role viewer|operator|admin]` | Pairs a phone or other device with readiness checks |
 | `or3-intern status [--advanced]` | Shows a plain-language safety, access, and problems summary |
@@ -26,7 +26,7 @@ If you are running directly from a checkout without installing, replace `or3-int
 | `or3-intern config-path` | Prints the resolved config.json path |
 | `or3-intern serve` | Starts enabled channels, triggers, heartbeat, cron, and the shared worker runtime |
 | `or3-intern service` | Starts the authenticated internal HTTP API |
-| `or3-intern agent -m "..."` | Runs a one-shot foreground turn |
+| `or3-intern agent -m "..."` | Enqueues a one-shot runner chat turn (built-in agent loop deprecated) |
 | `or3-intern version` | Prints the binary version |
 | `or3-intern help [command]` | Shows root help or command-specific help |
 

@@ -138,7 +138,8 @@ func defaultSubagentsConfig() SubagentsConfig {
 
 func defaultAgentCLIConfig() AgentCLIConfig {
 	return AgentCLIConfig{
-		Enabled:                    false,
+		Enabled:                    true,
+		DefaultRunner:              "opencode",
 		DisabledRunners:            []string{},
 		RuntimeMode:                map[string]string{"opencode": "auto", "codex": "auto"},
 		DefaultModels:              map[string]string{},

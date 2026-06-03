@@ -31,7 +31,7 @@ func TestDispatcherPublishesLegacyCronEvent(t *testing.T) {
 	b := bus.New(1)
 	events, unsubscribe := b.Subscribe()
 	defer unsubscribe()
-	runner := New(b, "default-session", nil)
+	runner := New(b, "default-session", nil, true)
 
 	_, err := runner(context.Background(), cron.CronJob{
 		ID:   "legacy",
@@ -56,6 +56,9 @@ func TestDispatcherPublishesLegacyCronEvent(t *testing.T) {
 		if ev.Message != "run this" {
 			t.Fatalf("expected message, got %q", ev.Message)
 		}
+		if ev.Meta["runner_first"] != true {
+			t.Fatalf("expected runner_first meta, got %#v", ev.Meta)
+		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timeout waiting for cron event")
 	}
@@ -65,7 +68,7 @@ func TestDispatcherEnqueuesAgentCLIRun(t *testing.T) {
 	enqueuer := &fakeAgentCLIEnqueuer{
 		run: db.AgentCLIRun{ID: "acr_123", JobID: "job-agentcli-123"},
 	}
-	runner := New(bus.New(1), "default-session", enqueuer)
+	runner := New(bus.New(1), "default-session", enqueuer, true)
 
 	result, err := runner(context.Background(), cron.CronJob{
 		ID: "agent-cron",
@@ -101,7 +104,7 @@ func TestDispatcherEnqueuesAgentCLIRun(t *testing.T) {
 }
 
 func TestDispatcherAgentCLIRunUnavailable(t *testing.T) {
-	runner := New(bus.New(1), "default-session", nil)
+	runner := New(bus.New(1), "default-session", nil, true)
 	_, err := runner(context.Background(), cron.CronJob{
 		Payload: cron.CronPayload{
 			Kind:     cron.PayloadAgentCLIRun,
@@ -113,8 +116,18 @@ func TestDispatcherAgentCLIRunUnavailable(t *testing.T) {
 	}
 }
 
+func TestDispatcherRejectsLegacyCronWhenAgentCLIDisabled(t *testing.T) {
+	runner := New(bus.New(1), "default-session", nil, false)
+	_, err := runner(context.Background(), cron.CronJob{
+		Payload: cron.CronPayload{Kind: cron.PayloadAgentTurn, Message: "legacy"},
+	})
+	if err == nil || !errors.Is(err, ErrLegacyCronAgentTurn) {
+		t.Fatalf("expected legacy cron error, got %v", err)
+	}
+}
+
 func TestDispatcherPropagatesAgentCLIEnqueueError(t *testing.T) {
-	runner := New(bus.New(1), "default-session", &fakeAgentCLIEnqueuer{err: errors.New("agent CLI delegation is disabled")})
+	runner := New(bus.New(1), "default-session", &fakeAgentCLIEnqueuer{err: errors.New("agent CLI delegation is disabled")}, true)
 	_, err := runner(context.Background(), cron.CronJob{
 		Payload: cron.CronPayload{
 			Kind:     cron.PayloadAgentCLIRun,

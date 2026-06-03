@@ -268,12 +268,16 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	}
 	chatPayload := decodeServiceResponseMap(t, chatResp)
 
-	or3Runner := findRunnerByID(t, chatPayload, string(agentcli.RunnerOR3))
-	if or3Runner["status"] != string(agentcli.RunnerStatusAvailable) || or3Runner["auth_status"] != string(agentcli.AuthReady) {
-		t.Fatalf("expected OR3 always available/ready, got %#v", or3Runner)
+	if _, ok := chatPayload["default_runner"]; !ok {
+		t.Fatalf("expected default_runner in response, got %#v", chatPayload)
 	}
-	if _, ok := or3Runner["chat_capabilities"]; !ok {
-		t.Fatalf("expected chat_capabilities decoration, got %#v", or3Runner)
+	if got := chatPayload["default_runner"]; got != string(agentcli.RunnerOpenCode) {
+		t.Fatalf("expected default_runner=opencode, got %#v", got)
+	}
+	for _, raw := range chatPayload["runners"].([]any) {
+		if item, ok := raw.(map[string]any); ok && item["id"] == string(agentcli.RunnerOR3) {
+			t.Fatalf("OR3 runner must not be chat-selectable, got %#v", chatPayload)
+		}
 	}
 	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerOpenCode))["status"]; got != string(agentcli.RunnerStatusAuthMissing) {
 		t.Fatalf("expected OpenCode auth_missing, got %#v", got)
@@ -333,11 +337,8 @@ func TestServiceChatRunners_HidesExternalWhenAgentCLIDisabled(t *testing.T) {
 	}
 	payload := decodeServiceResponseMap(t, resp)
 	runners := payload["runners"].([]any)
-	if len(runners) != 1 {
-		t.Fatalf("expected only OR3 runner when CLI disabled, got %#v", payload)
-	}
-	if got := runners[0].(map[string]any)["id"]; got != string(agentcli.RunnerOR3) {
-		t.Fatalf("expected OR3 runner, got %#v", got)
+	if len(runners) != 0 {
+		t.Fatalf("expected no selectable runners when CLI disabled, got %#v", payload)
 	}
 }
 

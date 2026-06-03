@@ -420,6 +420,14 @@ func TestNewOpenCodeAdapter_WiredWithSpec(t *testing.T) {
 	}
 }
 
+func TestSelectableRunners_ExcludesOR3(t *testing.T) {
+	for _, spec := range SelectableRunners() {
+		if spec.ID == RunnerOR3 {
+			t.Fatalf("OR3 must not be selectable")
+		}
+	}
+}
+
 func TestAllRunners_IncludesAllAdapterIDs(t *testing.T) {
 	all := AllRunners()
 	ids := make(map[RunnerID]bool)

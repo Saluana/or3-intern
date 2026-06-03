@@ -15,6 +15,7 @@ import (
 
 	"or3-intern/internal/agent"
 	"or3-intern/internal/agentcli"
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
@@ -587,6 +588,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	chatManager := buildRuntimeChatManager(cfg, d, agentCLIManager, serviceJobs, approvalBroker)
+	turnOrchestrator := buildRunnerTurnOrchestrator(cfg, chatManager, d, ret, docRetriever, embedProv)
 
 	// cron service + tool
 	cronSvc = buildRuntimeCronService(cfg, b, agentCLIManager)
@@ -664,13 +667,13 @@ func main() {
 	case "chat":
 		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, rt, cfg.WorkerCount, del, channelManager, nil)
+		runWorkers(ctx, b, turnOrchestrator, rt, cfg.WorkerCount, del, channelManager, nil)
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, rt, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: rt, Broker: approvalBroker, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, rt, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: rt, Broker: approvalBroker, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -696,17 +699,17 @@ func main() {
 		<-ctx.Done()
 	case "service":
 		channelRuntime := channelWorkerRuntime(rt, delivererFunc(channelManager.Deliver))
-		runWorkers(ctx, b, channelRuntime, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: channelRuntime, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, channelRuntime, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: channelRuntime, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
 		}
-		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager, channelManager); err != nil {
+		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, chatManager, turnOrchestrator, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager, channelManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
 	case "agent":
-		// one-shot: or3-intern agent -m "hello"
+		// one-shot: or3-intern agent -m "hello" (runner-backed; built-in agent loop deprecated)
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
 		var msg string
 		var session string
@@ -719,8 +722,26 @@ func main() {
 			fmt.Fprintln(os.Stderr, "missing -m message")
 			os.Exit(2)
 		}
+		fmt.Fprintln(os.Stderr, "note: `or3-intern agent` now enqueues a runner chat turn; use `or3-intern chat` for interactive sessions")
 		agentCtx := tools.ContextWithApprovalToken(ctx, approvalToken)
 		agentCtx = tools.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
+		if turnOrchestrator != nil {
+			_, err := turnOrchestrator.StartTurn(agentCtx, app.RunnerTurnRequest{
+				SessionKey:    session,
+				Channel:       "cli",
+				From:          "local",
+				Message:       msg,
+				TriggerKind:   "user_message",
+				ApprovalToken: approvalToken,
+				Actor:         "cli",
+				Role:          approval.RoleOperator,
+			})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "agent error:", err)
+				os.Exit(1)
+			}
+			break
+		}
 		if err := rt.Handle(agentCtx, bus.Event{Type: bus.EventUserMessage, SessionKey: session, Channel: "cli", From: "local", Message: msg}); err != nil {
 			fmt.Fprintln(os.Stderr, "agent error:", err)
 			os.Exit(1)
@@ -1131,7 +1152,7 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler) {
+func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTurnOrchestrator, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler) {
 	if n <= 0 {
 		n = 4
 	}
@@ -1157,7 +1178,15 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 						cctx = agent.ContextWithConversationObserver(cctx, observer)
 					}
 				}
-				if err := rt.Handle(cctx, ev); err != nil {
+				var err error
+				if turnOrchestrator != nil {
+					err = turnOrchestrator.HandleBusEvent(cctx, ev)
+				} else if rt != nil {
+					err = rt.Handle(cctx, ev)
+				} else {
+					err = app.ErrRunnerTurnsDisabled
+				}
+				if err != nil {
 					if ev.Channel == "cli" {
 						if cliDeliverer != nil {
 							cliDeliverer.ShowErrorForSession(ev.SessionKey, err)

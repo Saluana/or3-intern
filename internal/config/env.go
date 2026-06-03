@@ -75,6 +75,7 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvInt("OR3_SUBAGENTS_MAX_QUEUED", &cfg.Subagents.MaxQueued)
 	applyEnvInt("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", &cfg.Subagents.TaskTimeoutSeconds)
 	applyEnvBool("OR3_AGENT_CLI_ENABLED", &cfg.AgentCLI.Enabled)
+	applyEnvString("OR3_AGENT_CLI_DEFAULT_RUNNER", &cfg.AgentCLI.DefaultRunner)
 	if v := os.Getenv("OR3_AGENT_CLI_DISABLED_RUNNERS"); v != "" {
 		cfg.AgentCLI.DisabledRunners = compactStrings(strings.Split(v, ","))
 	}

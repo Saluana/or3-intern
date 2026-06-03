@@ -369,7 +369,8 @@ Controls the external agent CLI delegation subsystem. All fields are under the `
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Feature gate. Must be `true` for any agent CLI functionality. |
+| `enabled` | bool | `true` | Feature gate. Must be `true` for chat, channel, and automation turns via external runners. |
+| `defaultRunner` | string | `"opencode"` | Default runner for new chat/automation turns (`opencode`, `codex`, `claude`, `gemini`). |
 | `disabledRunners` | string[] | `[]` | Runner IDs to block from discovery and execution (e.g. `["opencode", "gemini"]`). |
 | `maxConcurrent` | int | `1` | Maximum worker goroutines running external CLIs simultaneously. |
 | `maxQueued` | int | `16` | Maximum queued runs before the endpoint returns `429`. |
@@ -388,6 +389,7 @@ Environment variable overrides follow the existing `OR3_*` pattern:
 | Env var | Maps to |
 |---------|---------|
 | `OR3_AGENT_CLI_ENABLED` | `agentCLI.enabled` (bool) |
+| `OR3_AGENT_CLI_DEFAULT_RUNNER` | `agentCLI.defaultRunner` (string) |
 | `OR3_AGENT_CLI_DISABLED_RUNNERS` | `agentCLI.disabledRunners` (comma-separated string) |
 | `OR3_AGENT_CLI_MAX_CONCURRENT` | `agentCLI.maxConcurrent` (int) |
 | `OR3_AGENT_CLI_MAX_QUEUED` | `agentCLI.maxQueued` (int) |
@@ -403,6 +405,7 @@ Example minimal enablement:
 {
   "agentCLI": {
     "enabled": true,
+    "defaultRunner": "opencode",
     "maxConcurrent": 2
   }
 }

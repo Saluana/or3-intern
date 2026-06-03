@@ -130,7 +130,7 @@ func TestRunTurn_UsesSystemPromptWithoutPersistingIt(t *testing.T) {
 	}
 	app := &ServiceApp{runtime: runtime}
 
-	err = app.RunTurn(context.Background(), TurnRequest{
+	_, err = app.RunTurn(context.Background(), TurnRequest{
 		SessionKey:   "doctor:test",
 		Message:      "visible user words",
 		SystemPrompt: "trusted doctor context secret-marker",

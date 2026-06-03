@@ -126,12 +126,22 @@ func AllRunners() []RunnerSpec {
 				DangerousBypassFlag: false,
 				StdinPrompt:         false,
 				Chat: RunnerChatCapabilities{
-					ChatSelectable: true,
+					ChatSelectable: false,
 					ChatReplay:     true,
 				},
 			},
 		},
 	}
+}
+
+// LegacyRunnerSpec returns the built-in OR3 runner spec for read-only metadata.
+func LegacyRunnerSpec() RunnerSpec {
+	for _, spec := range AllRunners() {
+		if spec.ID == RunnerOR3 {
+			return spec
+		}
+	}
+	return RunnerSpec{ID: RunnerOR3, DisplayName: "OR3 Intern (legacy)"}
 }
 
 // RunnerRegistry maps runner IDs to their specs and adapters.

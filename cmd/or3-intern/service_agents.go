@@ -86,6 +86,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(req.SessionKey, req.Meta, map[string]any{"status": "running"}))
 	observer := &serviceObserver{ConversationObserver: s.jobs.Observer(jobID)}
 	profileName := s.effectiveServiceProfileName(req.ProfileName)
+	var turnResult app.TurnResult
 	var err error
 	if req.ReplayToolCall != nil {
 		_, err = s.app().ReplayToolCall(ctx, app.ReplayToolCallRequest{
@@ -102,7 +103,7 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 			Observer:      observer,
 		})
 	} else {
-		err = s.app().RunTurn(ctx, app.TurnRequest{
+		turnResult, err = s.app().RunTurn(ctx, app.TurnRequest{
 			SessionKey:    req.SessionKey,
 			Message:       req.Message,
 			Model:         req.Model,
@@ -124,6 +125,10 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		s.completeTurnJobWithError(ctx, jobID, err, observer, req.SessionKey, req.Meta)
 		return
 	}
+	if turnResult.RunnerTurn != nil {
+		s.completeTurnJobFromRunner(ctx, jobID, req, *turnResult.RunnerTurn)
+		return
+	}
 	finalText, recoveredEmpty := observer.finalTextForCompletion("or3-intern completed without a final response.")
 	if recoveredEmpty {
 		log.Printf("service_turn: completed_empty_final job=%s session=%s trace=%s saw_tool=%t last_tool=%s last_tool_status=%s", jobID, req.SessionKey, serviceMetaText(req.Meta, "trace_id"), observer.sawToolActivity(), observer.lastToolName, observer.lastToolStatus)
@@ -135,6 +140,79 @@ func (s *serviceServer) runTurnJob(ctx context.Context, jobID string, req servic
 		payload["empty_final_text_recovered"] = true
 	}
 	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(req.SessionKey, req.Meta, payload))
+}
+
+func (s *serviceServer) completeTurnJobFromRunner(ctx context.Context, jobID string, req serviceTurnRequest, runner app.RunnerTurnResult) {
+	payload := map[string]any{
+		"runner_chat_session_id": runner.RunnerChatSessionID,
+		"runner_chat_turn_id":    runner.RunnerChatTurnID,
+		"agent_cli_run_id":       runner.AgentCLIRunID,
+		"agent_cli_job_id":       runner.AgentCLIJobID,
+		"status":                 "running",
+	}
+	s.jobs.Publish(jobID, "runner_started", serviceLifecyclePayload(req.SessionKey, req.Meta, payload))
+	if strings.TrimSpace(runner.AgentCLIJobID) == "" {
+		s.completeTurnJobWithError(ctx, jobID, fmt.Errorf("runner turn did not return an agent CLI job id"), nil, req.SessionKey, req.Meta)
+		return
+	}
+	snapshot, ok := s.jobs.Wait(ctx, runner.AgentCLIJobID)
+	if !ok {
+		s.completeTurnJobWithError(ctx, jobID, fmt.Errorf("runner job timed out"), nil, req.SessionKey, req.Meta)
+		return
+	}
+	finalText := finalTextFromJobSnapshot(snapshot)
+	status := "completed"
+	if snapshot.Status == "failed" || snapshot.Status == "timed_out" || snapshot.Status == "aborted" {
+		status = "failed"
+		if finalText == "" {
+			finalText = errorTextFromJobSnapshot(snapshot)
+		}
+	}
+	if finalText == "" {
+		finalText = "Runner completed without a final response."
+	}
+	completePayload := map[string]any{
+		"final_text":             finalText,
+		"runner_chat_session_id": runner.RunnerChatSessionID,
+		"runner_chat_turn_id":    runner.RunnerChatTurnID,
+		"agent_cli_run_id":       runner.AgentCLIRunID,
+		"agent_cli_job_id":       runner.AgentCLIJobID,
+		"runner_status":          snapshot.Status,
+	}
+	if status == "failed" {
+		completePayload["error"] = finalText
+	}
+	s.jobs.Complete(jobID, status, serviceLifecyclePayload(req.SessionKey, req.Meta, completePayload))
+}
+
+func finalTextFromJobSnapshot(snapshot agent.JobSnapshot) string {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		data := snapshot.Events[i].Data
+		if data == nil {
+			continue
+		}
+		for _, key := range []string{"final_text", "final_text_preview", "stdout_preview"} {
+			if value, ok := data[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func errorTextFromJobSnapshot(snapshot agent.JobSnapshot) string {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		data := snapshot.Events[i].Data
+		if data == nil {
+			continue
+		}
+		for _, key := range []string{"error", "message", "stderr_preview"} {
+			if value, ok := data[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return strings.TrimSpace(snapshot.Status)
 }
 
 func (s *serviceServer) effectiveServiceProfileName(requested string) string {

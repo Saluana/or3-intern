@@ -234,6 +234,11 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if len(cfg.AgentCLI.ChildEnvAllowlist) == 0 {
 		cfg.AgentCLI.ChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
 	}
+	if trimmed := strings.ToLower(strings.TrimSpace(cfg.AgentCLI.DefaultRunner)); trimmed == "" {
+		cfg.AgentCLI.DefaultRunner = "opencode"
+	} else {
+		cfg.AgentCLI.DefaultRunner = trimmed
+	}
 	if strings.TrimSpace(cfg.Service.Listen) == "" {
 		cfg.Service.Listen = Default().Service.Listen
 	}

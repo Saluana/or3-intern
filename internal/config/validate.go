@@ -625,6 +625,22 @@ func networkAllowlistTooBroad(hosts []string) bool {
 }
 
 func validateAgentCLIConfig(cfg AgentCLIConfig) error {
+	if cfg.Enabled {
+		defaultRunner := strings.ToLower(strings.TrimSpace(cfg.DefaultRunner))
+		if defaultRunner == "" {
+			return errors.New("agentCLI.defaultRunner is required when agentCLI is enabled")
+		}
+		switch defaultRunner {
+		case "opencode", "codex", "claude", "gemini":
+		default:
+			return fmt.Errorf("agentCLI.defaultRunner must be opencode, codex, claude, or gemini (got %q)", cfg.DefaultRunner)
+		}
+		for _, disabled := range cfg.DisabledRunners {
+			if strings.EqualFold(strings.TrimSpace(disabled), defaultRunner) {
+				return fmt.Errorf("agentCLI.defaultRunner %q is listed in agentCLI.disabledRunners", cfg.DefaultRunner)
+			}
+		}
+	}
 	mode := strings.TrimSpace(cfg.DefaultMode)
 	switch mode {
 	case "review", "safe_edit", "sandbox_auto":

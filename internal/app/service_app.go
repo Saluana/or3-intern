@@ -24,13 +24,14 @@ import (
 )
 
 type ServiceApp struct {
-	cfg             config.Config
-	runtime         *agent.Runtime
-	jobs            *agent.JobRegistry
-	subagentManager *agent.SubagentManager
-	agentCLIManager *agentcli.Manager
-	control         *controlplane.Service
-	auth            *auth.Service
+	cfg              config.Config
+	runtime          *agent.Runtime
+	jobs             *agent.JobRegistry
+	subagentManager  *agent.SubagentManager
+	agentCLIManager  *agentcli.Manager
+	turnOrchestrator *RunnerTurnOrchestrator
+	control          *controlplane.Service
+	auth             *auth.Service
 }
 
 func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, control *controlplane.Service) *ServiceApp {
@@ -38,7 +39,11 @@ func NewServiceApp(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobReg
 }
 
 func NewServiceAppWithAgentCLI(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, control: control}
+	return NewServiceAppWithRunnerTurns(cfg, runtime, jobs, subagentManager, agentCLIManager, nil, control)
+}
+
+func NewServiceAppWithRunnerTurns(cfg config.Config, runtime *agent.Runtime, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, turnOrchestrator *RunnerTurnOrchestrator, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{cfg: cfg, runtime: runtime, jobs: jobs, subagentManager: subagentManager, agentCLIManager: agentCLIManager, turnOrchestrator: turnOrchestrator, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
 			app.auth = authSvc
@@ -78,6 +83,10 @@ type TurnRequest struct {
 	ToolBudgetOverrides *agent.ToolBudgetOverrides
 }
 
+type TurnResult struct {
+	RunnerTurn *RunnerTurnResult
+}
+
 func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer agent.ConversationObserver, streamer channels.StreamingChannel) context.Context {
 	runCtx := tools.ContextWithRequestSource(ctx, tools.RequestSourceService)
 	runCtx = tools.ContextWithSession(runCtx, strings.TrimSpace(sessionKey))
@@ -111,9 +120,38 @@ func (a *ServiceApp) serviceToolRegistry(allowedTools []string, restrictTools bo
 	return filtered
 }
 
-func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
-	if a == nil || a.runtime == nil {
-		return errors.New("runtime unavailable")
+func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, error) {
+	if a == nil {
+		return TurnResult{}, errors.New("service unavailable")
+	}
+	if a.turnOrchestrator != nil && !doctorTurnUsesBuiltInRuntime(req.Meta) {
+		runnerReq := RunnerTurnRequest{
+			SessionKey:    strings.TrimSpace(req.SessionKey),
+			Channel:       "service",
+			From:          "or3-net",
+			Message:       strings.TrimSpace(req.Message),
+			TriggerKind:   "user_message",
+			Model:         strings.TrimSpace(req.Model),
+			Attachments:   req.Attachments,
+			Meta:          cloneServiceMeta(req.Meta),
+			ApprovalToken: strings.TrimSpace(req.ApprovalToken),
+			Actor:         strings.TrimSpace(req.Actor),
+			Role:          strings.TrimSpace(req.Role),
+			ProfileName:   strings.TrimSpace(req.ProfileName),
+			Capability:    req.Capability,
+		}
+		if raw, ok := req.Meta["runner_id"].(string); ok {
+			runnerReq.RunnerID = strings.TrimSpace(raw)
+		}
+		runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
+		result, err := a.turnOrchestrator.StartTurn(runCtx, runnerReq)
+		if err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{RunnerTurn: &result}, nil
+	}
+	if a.runtime == nil {
+		return TurnResult{}, errors.New("runtime unavailable")
 	}
 	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
 	if strings.TrimSpace(req.SystemPrompt) != "" {
@@ -136,7 +174,7 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 	if model := strings.TrimSpace(req.Model); model != "" {
 		runCtx = agent.ContextWithTurnModelOverride(runCtx, model)
 	}
-	return a.runtime.Handle(runCtx, bus.Event{
+	err := a.runtime.Handle(runCtx, bus.Event{
 		Type:       bus.EventUserMessage,
 		SessionKey: strings.TrimSpace(req.SessionKey),
 		Channel:    "service",
@@ -144,6 +182,33 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) error {
 		Message:    strings.TrimSpace(req.Message),
 		Meta:       meta,
 	})
+	return TurnResult{}, err
+}
+
+func doctorTurnUsesBuiltInRuntime(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	if v, ok := meta["doctor_admin_brain"].(string); ok && strings.TrimSpace(v) == "internal" {
+		return true
+	}
+	if v, ok := meta["doctor_session"].(bool); ok && v {
+		if brain, ok := meta["doctor_admin_brain"].(string); ok && strings.TrimSpace(brain) == "internal" {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneServiceMeta(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 type ReplayToolCallRequest struct {

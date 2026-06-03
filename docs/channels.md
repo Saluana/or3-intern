@@ -26,12 +26,14 @@ Run configured external channels with:
 go run ./cmd/or3-intern serve
 ```
 
-`serve` starts the shared runtime plus any enabled channel workers.
+`serve` starts channel workers and routes inbound messages to external runners
+(OpenCode by default) via the runner turn orchestrator.
 
 ## Common behavior
 
 - inbound traffic is mapped to session keys per platform
-- outbound sending uses the same shared runtime and tool loop
+- outbound replies follow runner chat turns persisted to SQLite (`messages` + runner events)
+- channel `/approve` and `/deny` commands resolve pending approvals without starting a model turn
 - `hardening.isolateChannelPeers=true` can isolate senders inside shared channels
 - channels can use `inboundPolicy=allowlist`, `pairing`, or `deny`; when omitted, legacy `openAccess` behavior still applies
 - most channels support a default outbound destination for `send_message`

@@ -46,9 +46,10 @@ or3-intern version
 
     Then pair from OR3 App at `/settings/pair`, or start from the computer with `or3-intern pair --auto` and enter the printed code in the app. See docs/v1/user-guide/app-integration/or3-app-connection-guide.md for the full web, Electron, iOS, Android, pairing, disconnect, and troubleshooting flow.
 
-4. Check readiness any time:
+4. Install and authenticate a runner (OpenCode recommended), then check readiness:
 
     ```bash
+    opencode auth login   # or your chosen runner's auth flow
     or3-intern health
     ```
 
@@ -70,7 +71,8 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 
 ## Core features
 
-- Shared agent runtime for CLI, service mode, connected apps, and autonomous jobs
+- Runner-first execution (OpenCode by default) with OR3 orchestration for CLI, service, channels, and automation
+- External runners: OpenCode, Codex, Claude Code, Gemini (`agentCLI.defaultRunner`)
 - SQLite-backed history with hybrid memory retrieval and document indexing
 - Connected apps for Telegram, Slack, Discord, Email, and a local WhatsApp bridge
 - ClawHub/OpenClaw-compatible skills with trust and quarantine controls

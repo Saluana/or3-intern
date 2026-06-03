@@ -432,6 +432,7 @@ type SubagentsConfig struct {
 // AgentCLIConfig controls the external agent CLI delegation subsystem.
 type AgentCLIConfig struct {
 	Enabled                    bool              `json:"enabled"`
+	DefaultRunner              string            `json:"defaultRunner,omitempty"`
 	DisabledRunners            []string          `json:"disabledRunners"`
 	RuntimeMode                map[string]string `json:"runtimeMode,omitempty"`
 	DefaultModels              map[string]string `json:"defaultModels,omitempty"`

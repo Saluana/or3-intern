@@ -1,80 +1,67 @@
-# Agent runtime
+# Runner-first execution
 
-## Shared runtime model
+`or3-intern` is a runner-first host: external agent CLIs (OpenCode by default)
+execute turns while OR3 handles orchestration, memory, channels, approvals,
+artifacts, and persistence.
 
-`or3-intern` uses one shared runtime model across:
+## What runs where
 
-- `chat`
-- `agent`
-- `serve`
-- `service`
-- channel adapters
-- autonomous triggers
-- subagent jobs
+| Layer | Responsibility |
+| --- | --- |
+| **Runners** (OpenCode, Codex, Claude Code, Gemini) | Model reasoning, tools, workspace edits inside runner isolation |
+| **OR3** (`RunnerTurnOrchestrator`, `agentcli.ChatManager`) | Session keys, prompts, queueing, history, delivery, memory/doc context |
+| **Built-in `agent.Runtime`** | Compatibility only: doctor internal admin brain, tests, legacy tooling |
 
-That means turns, tool calls, memory retrieval, quotas, and session handling behave consistently no matter how a task enters the system.
+## Turn flow
 
-## High-level flow
+1. Ingress (CLI, service, channel, cron bus event, heartbeat, webhook, file-watch)
+2. `RunnerTurnOrchestrator` resolves runner, session, and trigger metadata
+3. Bounded prompt built with trusted bootstrap blocks, memory/doc snippets, and delimited user task text
+4. `ChatManager.StartTurn` persists messages and enqueues `agent_cli_runs`
+5. Runner events stream to `agent_cli_events` / `runner_chat_events` and mirror into `messages`
+6. Memory consolidation continues from `messages` (including `transport=runner_chat`)
 
-1. A foreground or background entrypoint receives work
-2. The runtime resolves the session key and related context
-3. Prompt bootstrap files and retrieved memory are injected
-4. The model runs a turn
-5. Tool calls execute through the shared tool registry
-6. Results are persisted to SQLite-backed history and memory stores
-7. Foreground callers receive the response immediately, while background jobs stream or persist status updates
+## Default runner
 
-## Foreground entrypoints
+New configs enable `agentCLI.enabled=true` and `agentCLI.defaultRunner=opencode`.
 
-- `chat` for local interactive use
-- `agent -m` for one-shot turns
-- `service` for authenticated HTTP callers
+- Override with `OR3_AGENT_CLI_DEFAULT_RUNNER`
+- `or3-intern health` / `doctor` report install/auth readiness for the default runner
+- Legacy `or3-intern` runner IDs in session metadata remain readable but are not selectable; new turns migrate to the configured default when agent CLI is enabled
 
-## Background entrypoints
+## Trusted prompt shape
 
-- `serve` for external channels
-- webhook triggers
-- file-watch triggers
-- heartbeat turns
-- cron jobs
-- subagent jobs
+Runner prompts use explicit sections:
 
-## Streaming
+```text
+<trusted_or3_system_instructions>...</trusted_or3_system_instructions>
+<or3_context>...</or3_context>
+<user_task>...</user_task>
+```
 
-The CLI `chat` command supports live token streaming from the provider. The internal service API can also stream job output over SSE for callers that send `Accept: text/event-stream`.
+Bootstrap files (`SOUL.md`, `AGENTS.md`, `IDENTITY.md`, `MEMORY.md`, `TOOLS.md`) feed trusted instructions. `HEARTBEAT.md` is included only for autonomous triggers (heartbeat, cron, webhook, file-watch).
 
-## Session model
+## Context caching
 
-Every turn runs inside a session key, such as:
+OR3 caches safe fragments (bootstrap file content by mtime/size, runner detection TTL). Approval tokens, secrets, and raw credentials are never cached. Provider-native prompt caching is not used for runner turns.
 
-- `cli:default`
-- `telegram:<chat-id>`
-- `slack:<channel-id>`
-- `discord:<channel-id>`
-- `email:<address>`
-- `whatsapp:<chat-id>`
-- `heartbeat:default`
+## Cron payloads
 
-Session keys are used for history isolation, memory retrieval, and optional scope linking.
-
-## Subagents
-
-Subagents are optional background jobs governed by the same runtime and hardening controls. Configuration includes:
-
-- `subagents.enabled`
-- `subagents.maxConcurrent`
-- `subagents.maxQueued`
-- `subagents.taskTimeoutSeconds`
+| Kind | Behavior |
+| --- | --- |
+| `agent_cli_run` | Direct runner background job via `agentcli.Manager` |
+| `agent_turn` / `system_event` | Published to the bus for runner chat when `agentCLI.enabled`; rejected with migration guidance when disabled |
 
 ## Related documentation
 
 - [Memory and context](memory-and-context.md)
-- [Triggers and automation](triggers-and-automation.md)
-- [Internal service API reference](api-reference.md)
-- [Security and hardening](security-and-hardening.md)
+- [Configuration reference](configuration-reference.md)
+- [CLI reference](cli-reference.md)
+- [Migration: runner-first](migration-runner-first.md)
 
 ## Related code
 
-- `internal/agent/`
+- `internal/app/turn_orchestrator.go`
+- `internal/agentcli/chat_manager.go`
 - `cmd/or3-intern/main.go`
-- `cmd/or3-intern/service.go`
+- `internal/agent/QUARANTINE.md` (built-in runtime inventory)

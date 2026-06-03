@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -288,6 +289,7 @@ func (h *channelCommandHandler) sessionMeta(ctx context.Context, sessionKey stri
 		if errors.Is(err, db.ErrChatSessionNotFound) {
 			return db.ChatSessionMeta{}, false
 		}
+		log.Printf("channel command: load session meta for %q: %v", sessionKey, err)
 		return db.ChatSessionMeta{}, false
 	}
 	return meta, true

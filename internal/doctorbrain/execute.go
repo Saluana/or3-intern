@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 	"log"
 	"strings"
 
@@ -203,11 +204,11 @@ func boundOutput(text string, maxBytes int) string {
 	if maxBytes <= 0 || len(text) <= maxBytes {
 		return text
 	}
-	runes := []rune(text)
-	if len(runes) <= maxBytes {
-		return text
+	trunc := text[:maxBytes]
+	for len(trunc) > 0 && !utf8.ValidString(trunc) {
+		trunc = trunc[:len(trunc)-1]
 	}
-	return string(runes[:maxBytes]) + "..."
+	return trunc + "..."
 }
 
 func encodeFailure(toolName string, params map[string]any, out string, err error) string {

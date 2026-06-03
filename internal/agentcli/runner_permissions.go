@@ -143,13 +143,37 @@ func detectStructuredRunnerPermission(payload json.RawMessage, runnerID string) 
 		return RunnerPermissionRequest{}, false
 	}
 	params := mapAnyValue(obj, "params")
-	raw := firstNonNilRunnerPermission(params["target_path"], params["targetPath"], params["path"], params["file"], params["cwd"], obj["target_path"], obj["targetPath"], obj["path"], obj["file"], obj["cwd"])
+	permission := mapAnyValue(obj, "permission")
+	request := mapAnyValue(obj, "request")
+	raw := firstNonNilRunnerPermission(
+		params["target_path"], params["targetPath"], params["path"], params["file"], params["cwd"],
+		permission["target_path"], permission["targetPath"], permission["path"], permission["file"], permission["cwd"],
+		request["target_path"], request["targetPath"], request["path"], request["file"], request["cwd"],
+		obj["target_path"], obj["targetPath"], obj["path"], obj["file"], obj["cwd"],
+	)
 	if raw == nil {
-		raw = firstNonNilRunnerPermission(params["command"], params["reason"], obj["command"], obj["message"], obj["raw"])
+		raw = firstNonNilRunnerPermission(
+			params["command"], params["reason"],
+			permission["command"], permission["reason"], permission["message"],
+			request["command"], request["reason"], request["message"],
+			obj["command"], obj["message"], obj["raw"],
+		)
 	}
 	target := pathFromPermissionValue(raw)
 	access := runnerPermissionAccessRead
-	if strings.Contains(typeValue, "change") || strings.Contains(typeValue, "command") || strings.Contains(typeValue, "write") || strings.Contains(strings.ToLower(fmt.Sprint(raw)), "write") {
+	permissionKind := strings.ToLower(firstNonEmptyRunnerPermission(
+		stringMapValue(params, "permission", "type", "tool", "name"),
+		stringMapValue(permission, "permission", "type", "tool", "name"),
+		stringMapValue(request, "permission", "type", "tool", "name"),
+	))
+	if strings.Contains(typeValue, "change") ||
+		strings.Contains(typeValue, "command") ||
+		strings.Contains(typeValue, "write") ||
+		strings.Contains(permissionKind, "edit") ||
+		strings.Contains(permissionKind, "write") ||
+		strings.Contains(permissionKind, "patch") ||
+		strings.Contains(permissionKind, "bash") ||
+		strings.Contains(strings.ToLower(fmt.Sprint(raw)), "write") {
 		access = runnerPermissionAccessWrite
 	}
 	return NormalizeRunnerPermissionRequest(RunnerPermissionRequest{RunnerID: runnerID, Kind: runnerPermissionKindFilesystem, Access: access, TargetPath: target})

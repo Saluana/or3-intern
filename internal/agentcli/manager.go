@@ -247,6 +247,11 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 		}
 	}
 
+	model := strings.TrimSpace(req.Model)
+	if RunnerID(runnerID) == RunnerOpenCode && model != "" {
+		model = NormalizeOpenCodeModelID(ctx, cfg, nativeEnv(cfg), model)
+	}
+
 	run := db.AgentCLIRun{
 		ID:               runID,
 		JobID:            jobID,
@@ -254,7 +259,7 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 		RunnerID:         runnerID,
 		Task:             task,
 		Cwd:              cwd,
-		Model:            req.Model,
+		Model:            model,
 		Mode:             mode,
 		Isolation:        isolation,
 		Status:           db.AgentCLIStatusQueued,
@@ -410,7 +415,7 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	}
 
 	var cmdSpec CommandSpec
-	cmdSpec, buildErr := m.buildCommandSpecForRun(run)
+	cmdSpec, buildErr := m.buildCommandSpecForRun(runCtx, run)
 	if buildErr != nil {
 		m.finalizeRun(runCtx, run, db.AgentCLIStatusFailed, buildErr.Error(), ProcessOutput{ExitCode: -1, DurationMS: 0})
 		return
@@ -758,16 +763,21 @@ func eventToMap(e AgentRunEvent) map[string]any {
 	return out
 }
 
-func (m *Manager) buildCommandSpecForRun(run db.AgentCLIRun) (CommandSpec, error) {
+func (m *Manager) buildCommandSpecForRun(ctx context.Context, run db.AgentCLIRun) (CommandSpec, error) {
 	if m.Registry == nil {
 		return CommandSpec{}, fmt.Errorf("no runner registry configured")
 	}
+	cfg := m.configSnapshot()
 	meta := parseAgentRunMeta(run.MetaJSON)
+	model := strings.TrimSpace(run.Model)
+	if RunnerID(run.RunnerID) == RunnerOpenCode && model != "" {
+		model = OpenCodeCLIModelFlag(ctx, cfg, nativeEnv(cfg), model)
+	}
 	req := AgentRunRequest{
 		RunnerID:  run.RunnerID,
 		Task:      run.Task,
 		Cwd:       run.Cwd,
-		Model:     run.Model,
+		Model:     model,
 		Mode:      run.Mode,
 		Isolation: run.Isolation,
 		Meta:      meta,
@@ -788,7 +798,7 @@ func (m *Manager) buildCommandSpecForRun(run db.AgentCLIRun) (CommandSpec, error
 			ContinuationMode: ContinuationMode(firstNonEmptyStringMeta(meta, "runner_chat_continuation_mode", string(ContinuationReplay))),
 			ReplayPrompt:     firstNonEmptyStringMeta(meta, "runner_chat_replay_prompt", run.Task),
 			UserMessage:      firstNonEmptyStringMeta(meta, "runner_chat_user_message", run.Task),
-			Model:            run.Model,
+			Model:            model,
 			Mode:             run.Mode,
 			Isolation:        run.Isolation,
 			MaxTurns:         req.MaxTurns,

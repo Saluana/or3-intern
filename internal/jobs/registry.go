@@ -298,22 +298,34 @@ func (r *Registry) cleanupLocked(now time.Time) {
 		}
 	}
 	for len(r.jobs) > r.maxTracked {
-		oldestID := ""
-		var oldest time.Time
-		for id, entry := range r.jobs {
-			if entry == nil || !entry.terminal {
-				continue
-			}
-			if oldestID == "" || entry.updatedAt.Before(oldest) {
-				oldestID = id
-				oldest = entry.updatedAt
+		if !r.evictOldestLocked(false) {
+			if !r.evictOldestLocked(true) {
+				break
 			}
 		}
-		if oldestID == "" {
-			break
-		}
-		delete(r.jobs, oldestID)
 	}
+}
+
+func (r *Registry) evictOldestLocked(includeActive bool) bool {
+	oldestID := ""
+	var oldest time.Time
+	for id, entry := range r.jobs {
+		if entry == nil {
+			continue
+		}
+		if !includeActive && !entry.terminal {
+			continue
+		}
+		if oldestID == "" || entry.updatedAt.Before(oldest) {
+			oldestID = id
+			oldest = entry.updatedAt
+		}
+	}
+	if oldestID == "" {
+		return false
+	}
+	delete(r.jobs, oldestID)
+	return true
 }
 
 func snapshotForEntry(entry *entry) Snapshot {

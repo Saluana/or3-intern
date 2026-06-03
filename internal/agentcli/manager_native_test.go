@@ -1,6 +1,7 @@
 package agentcli
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -37,7 +38,7 @@ func TestManagerBuildCommandSpecForRunnerChatNative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal meta: %v", err)
 	}
-	cmd, err := manager.buildCommandSpecForRun(db.AgentCLIRun{
+	cmd, err := manager.buildCommandSpecForRun(context.Background(), db.AgentCLIRun{
 		RunnerID:  string(RunnerOpenCode),
 		Task:      "fallback task",
 		Model:     "gpt-5",
@@ -47,6 +48,6 @@ func TestManagerBuildCommandSpecForRunnerChatNative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCommandSpecForRun: %v", err)
 	}
-	want := []string{"run", "--format", "json", "--session", "session_live_99", "--model", "gpt-5", "--dangerously-skip-permissions", "pick up where you left off"}
+	want := []string{"run", "--format", "json", "--session", "session_live_99", "--model", "opencode/gpt-5", "--dangerously-skip-permissions", "pick up where you left off"}
 	assertArgsEqual(t, want, cmd.Args)
 }

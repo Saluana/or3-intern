@@ -174,12 +174,17 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 
 	// Insert the new turn row (status=queued). UNIQUE partial index enforces
 	// one active turn per session.
+	model := firstNonEmptyStr(req.Model, sess.Model)
+	if RunnerID(sess.RunnerID) == RunnerOpenCode && strings.TrimSpace(model) != "" && cm.Manager != nil {
+		cfg := cm.Manager.configSnapshot()
+		model = NormalizeOpenCodeModelID(ctx, cfg, nativeEnv(cfg), model)
+	}
 	turn := db.RunnerChatTurn{
 		ID:               newRunnerChatID("rct"),
 		SessionID:        sess.ID,
 		Status:           db.RunnerChatTurnStatusQueued,
 		UserMessage:      userMessage,
-		Model:            firstNonEmptyStr(req.Model, sess.Model),
+		Model:            model,
 		Mode:             firstNonEmptyStr(req.Mode, sess.Mode),
 		Isolation:        firstNonEmptyStr(req.Isolation, sess.Isolation),
 		Cwd:              firstNonEmptyStr(req.Cwd, sess.Cwd),

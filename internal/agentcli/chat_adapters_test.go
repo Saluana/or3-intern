@@ -132,6 +132,30 @@ func TestOpenCodeNormalizeToolUse(t *testing.T) {
 	assertPayloadField(t, events[0].Payload, "title", "webfetch")
 }
 
+func TestOpenCodeNormalizeWriteToolKeepsArguments(t *testing.T) {
+	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	payload := json.RawMessage(`{"type":"message.part.updated","part":{"type":"tool","tool":"write","callID":"call_write","state":{"status":"running","title":"Writing app/main.go","input":{}},"path":"/tmp/project/app/main.go"}}`)
+	events := adapter.NormalizeChatEvent(AgentRunEvent{Type: "structured", Payload: payload, Seq: 10})
+	if len(events) != 1 || events[0].Type != runtimeEventItemUpdated {
+		t.Fatalf("expected running write tool event, got %#v", events)
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(events[0].Payload, &normalized); err != nil {
+		t.Fatalf("unmarshal normalized payload: %v", err)
+	}
+	if normalized["item_type"] != runtimeItemFileChange {
+		t.Fatalf("item_type = %v, want file_change", normalized["item_type"])
+	}
+	data, _ := normalized["data"].(map[string]any)
+	input, _ := data["input"].(map[string]any)
+	if input["path"] != "/tmp/project/app/main.go" {
+		t.Fatalf("input = %#v, want path fallback", data["input"])
+	}
+	if data["callID"] != "call_write" || data["name"] != "write" {
+		t.Fatalf("unexpected canonical tool data: %#v", data)
+	}
+}
+
 func TestOpenCodeNormalizeSuppressesRawJSONStdout(t *testing.T) {
 	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
 	chunk := `{"type":"text","part":{"type":"text","text":"hello"}}`

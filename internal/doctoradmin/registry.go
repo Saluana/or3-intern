@@ -70,15 +70,15 @@ func (r *Registry) ProviderToolDefs(allowed []string) []providers.ToolDef {
 	if len(names) == 0 {
 		names = r.Names()
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	defs := make([]providers.ToolDef, 0, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		r.mu.RLock()
 		action, ok := r.actions[name]
-		r.mu.RUnlock()
 		if !ok {
 			continue
 		}

@@ -1,0 +1,118 @@
+package agentcli
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+)
+
+func TestOpenCodeExecuteStreamsBusEvents(t *testing.T) {
+	const sessionID = "sess_stream"
+	var events []AgentRunEvent
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			w.WriteHeader(http.StatusOK)
+		case "/config/providers":
+			_, _ = w.Write([]byte(`{"providers":[{"id":"openrouter","models":{"mimo-v2.5":{}}}]}`))
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatalf("response writer is not flusher")
+			}
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{
+				"type": "message.part.updated",
+				"properties": map[string]any{
+					"part": map[string]any{
+						"type":      "text",
+						"sessionID": sessionID,
+						"id":        "part_1",
+						"text":      "Hel",
+					},
+				},
+			}))
+			flusher.Flush()
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{
+				"type": "message.part.updated",
+				"properties": map[string]any{
+					"part": map[string]any{
+						"type":      "text",
+						"sessionID": sessionID,
+						"id":        "part_1",
+						"text":      "Hello",
+					},
+				},
+			}))
+			flusher.Flush()
+			<-r.Context().Done()
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"` + sessionID + `"}`))
+		case "/session/" + sessionID + "/message":
+			time.Sleep(40 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"type":"message","text":"Hello"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	_, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
+		Run:    db.AgentCLIRun{ID: "run_1", JobID: "job_1", Task: "hello", Model: "mimo-v2.5"},
+		Chat:   RunnerChatCommandRequest{UserMessage: "hello"},
+		Config: config.AgentCLIConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
+		Env:    []string{"PATH="},
+		OnEvent: func(e AgentRunEvent) {
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var textChunks []string
+	for _, ev := range events {
+		if ev.Type != "structured" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			continue
+		}
+		if stringField(payload, "type") != "text" {
+			continue
+		}
+		part := mapField(payload, "part")
+		textChunks = append(textChunks, extractString(part["text"]))
+	}
+	if len(textChunks) < 2 {
+		t.Fatalf("expected streamed text chunks before completion, got events=%d chunks=%v", len(events), textChunks)
+	}
+	if strings.Join(textChunks, "") != "Hello" {
+		t.Fatalf("chunk text = %q, want Hello", strings.Join(textChunks, ""))
+	}
+}
+
+func mustJSON(v any) string {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}

@@ -860,6 +860,120 @@ func toolLifecyclePayload(itemType, status, title, detail string, data any) map[
 	}
 }
 
+func normalizeOpenCodeToolData(part map[string]any) map[string]any {
+	data := make(map[string]any, len(part)+8)
+	for key, value := range part {
+		data[key] = value
+	}
+	state := mapField(part, "state")
+	input := firstMeaningfulValue(
+		part["input"],
+		part["arguments"],
+		part["args"],
+		part["params"],
+		state["input"],
+		state["arguments"],
+		state["args"],
+		state["params"],
+	)
+	output := firstMeaningfulValue(
+		part["output"],
+		part["result"],
+		state["output"],
+		state["result"],
+	)
+	errorValue := firstMeaningfulValue(part["error"], state["error"])
+	if input != nil {
+		data["input"] = input
+	}
+	if output != nil {
+		data["output"] = output
+		data["result"] = output
+	}
+	if errorValue != nil {
+		data["error"] = errorValue
+	}
+	if id := firstNonEmptyStr(stringField(part, "callID"), stringField(part, "callId"), stringField(part, "id")); id != "" {
+		data["callID"] = id
+		data["id"] = id
+	}
+	if tool := firstNonEmptyStr(stringField(part, "tool"), stringField(part, "name")); tool != "" {
+		data["tool"] = tool
+		data["name"] = tool
+	}
+	if input == nil {
+		fallback := fallbackOpenCodeToolInput(part, state)
+		if fallback != nil {
+			data["input"] = fallback
+		}
+	}
+	return data
+}
+
+func fallbackOpenCodeToolInput(part, state map[string]any) any {
+	out := map[string]any{}
+	for _, key := range []string{"path", "file", "filePath", "filepath", "filename", "url", "command", "cmd", "pattern", "query"} {
+		if value := firstMeaningfulValue(part[key], state[key]); value != nil {
+			out[key] = value
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if title := strings.TrimSpace(extractString(firstNonNil(state["title"], part["title"], part["detail"]))); title != "" {
+		return map[string]any{"summary": title}
+	}
+	return nil
+}
+
+func firstMeaningfulValue(values ...any) any {
+	for _, value := range values {
+		switch v := value.(type) {
+		case nil:
+			continue
+		case string:
+			if strings.TrimSpace(v) == "" {
+				continue
+			}
+			return v
+		case map[string]any:
+			if len(v) == 0 {
+				continue
+			}
+			return v
+		case []any:
+			if len(v) == 0 {
+				continue
+			}
+			return v
+		default:
+			return v
+		}
+	}
+	return nil
+}
+
+func openCodeToolDetail(part map[string]any) string {
+	state := mapField(part, "state")
+	for _, value := range []any{
+		state["title"],
+		part["detail"],
+		part["summary"],
+		state["output"],
+		part["output"],
+		state["error"],
+		part["error"],
+		state["input"],
+		part["input"],
+		fallbackOpenCodeToolInput(part, state),
+	} {
+		if detail := extractString(value); strings.TrimSpace(detail) != "" {
+			return detail
+		}
+	}
+	return ""
+}
+
 func normalizeOpenCodePartUpdated(raw AgentRunEvent, obj map[string]any) []RunnerChatEvent {
 	part := mapField(obj, "part")
 	if len(part) == 0 {
@@ -880,8 +994,9 @@ func normalizeOpenCodePartUpdated(raw AgentRunEvent, obj map[string]any) []Runne
 	state := mapField(part, "state")
 	status := runtimeItemStatusFromProvider(firstNonEmptyStr(stringField(state, "status"), stringField(part, "status")))
 	lifecycle := lifecycleFromStatus(status)
-	detail := extractString(firstNonNil(state["title"], state["output"], state["error"], part["detail"]))
-	payload := toolLifecyclePayload(classifyToolName(toolName), status, firstNonEmptyStr(extractString(state["title"]), toolName, "Tool"), detail, part)
+	data := normalizeOpenCodeToolData(part)
+	detail := openCodeToolDetail(data)
+	payload := toolLifecyclePayload(classifyToolName(toolName), status, firstNonEmptyStr(extractString(state["title"]), toolName, "Tool"), detail, data)
 	return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Payload: runtimePayload(lifecycle, payload, raw.Payload)}}
 }
 
@@ -894,15 +1009,16 @@ func normalizeOpenCodeToolUse(raw AgentRunEvent, obj map[string]any) []RunnerCha
 	state := mapField(part, "state")
 	status := runtimeItemStatusFromProvider(stringField(state, "status"))
 	lifecycle := lifecycleFromStatus(status)
-	detail := extractString(firstNonNil(state["output"], state["error"], state["input"], part["detail"]))
-	payload := toolLifecyclePayload(classifyToolName(toolName), status, toolName, detail, part)
+	data := normalizeOpenCodeToolData(part)
+	detail := openCodeToolDetail(data)
+	payload := toolLifecyclePayload(classifyToolName(toolName), status, toolName, detail, data)
 	return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Payload: runtimePayload(lifecycle, payload, raw.Payload)}}
 }
 
 func normalizeOpenCodeRuntimeEvent(raw AgentRunEvent, obj map[string]any) []RunnerChatEvent {
 	switch stringField(obj, "type") {
 	case "permission.asked":
-		return []RunnerChatEvent{{Type: runtimeEventRequestOpened, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestOpened, map[string]any{"request_type": runtimeRequestUnknown, "detail": extractString(firstNonNil(obj["permission"], obj["question"], obj["message"])), "args": obj}, raw.Payload)}}
+		return []RunnerChatEvent{{Type: runtimeEventRequestOpened, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestOpened, map[string]any{"request_type": openCodePermissionRequestType(obj), "detail": extractString(firstNonNil(obj["permission"], obj["question"], obj["message"])), "args": obj}, raw.Payload)}}
 	case "permission.replied":
 		return []RunnerChatEvent{{Type: runtimeEventRequestResolved, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestResolved, map[string]any{"request_type": runtimeRequestUnknown, "decision": extractString(firstNonNil(obj["decision"], obj["answer"])), "resolution": obj}, raw.Payload)}}
 	case "question.asked":
@@ -918,6 +1034,32 @@ func normalizeOpenCodeRuntimeEvent(raw AgentRunEvent, obj map[string]any) []Runn
 		}
 	}
 	return nil
+}
+
+func openCodePermissionRequestType(obj map[string]any) string {
+	permission := strings.ToLower(firstNonEmptyStr(
+		stringField(obj, "permission"),
+		stringField(obj, "tool"),
+		stringField(obj, "name"),
+		stringField(mapField(obj, "permission"), "permission"),
+		stringField(mapField(obj, "permission"), "type"),
+		stringField(mapField(obj, "permission"), "tool"),
+		stringField(mapField(obj, "permission"), "name"),
+		stringField(mapField(obj, "request"), "permission"),
+		stringField(mapField(obj, "request"), "type"),
+		stringField(mapField(obj, "request"), "tool"),
+		stringField(mapField(obj, "request"), "name"),
+	))
+	switch {
+	case strings.Contains(permission, "bash"), strings.Contains(permission, "shell"), strings.Contains(permission, "command"), strings.Contains(permission, "exec"):
+		return runtimeRequestCommandApproval
+	case strings.Contains(permission, "read"):
+		return runtimeRequestFileReadApproval
+	case strings.Contains(permission, "edit"), strings.Contains(permission, "write"), strings.Contains(permission, "patch"), strings.Contains(permission, "external_directory"):
+		return runtimeRequestFileChangeApproval
+	default:
+		return runtimeRequestUnknown
+	}
 }
 
 func normalizeCodexLifecycleEvent(raw AgentRunEvent, obj map[string]any, lifecycle string) []RunnerChatEvent {

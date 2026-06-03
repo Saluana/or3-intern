@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/jobs"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 )
 
 type fakeChatAdapter struct{}
@@ -157,6 +158,13 @@ func TestOpenCodeInfoUsesConfiguredLoopbackWithoutBinary(t *testing.T) {
 	}
 }
 
+func TestOpenCodeNativeRuntimeDoesNotCapTurnRequestAtClientTimeout(t *testing.T) {
+	runtime := NewOpenCodeNativeRuntime()
+	if runtime.client.Timeout != 0 {
+		t.Fatalf("OpenCode native client timeout = %v, want context-controlled timeout", runtime.client.Timeout)
+	}
+}
+
 func TestFlattenOpenCodeModelsPreservesVariantsAndDefaults(t *testing.T) {
 	var raw any
 	if err := json.Unmarshal([]byte(`{
@@ -204,6 +212,53 @@ func TestReasoningOptionsUseSemanticOrder(t *testing.T) {
 	}
 }
 
+func TestResolveOpenCodeModelMapsVendorPrefixedRequest(t *testing.T) {
+	catalog := []RunnerModelInfo{
+		{ID: "mimo-v2.5", Provider: "openrouter", ProviderName: "OpenRouter"},
+		{ID: "gpt-5", Provider: "openai", ProviderName: "OpenAI"},
+	}
+	resolved := resolveOpenCodeModel(catalog, "xiaomi/mimo-v2.5")
+	if resolved == nil || resolved.Provider != "openrouter" || resolved.ID != "mimo-v2.5" {
+		t.Fatalf("resolved = %+v, want openrouter/mimo-v2.5", resolved)
+	}
+}
+
+func TestOpenCodeExecuteResolvesVendorPrefixedModel(t *testing.T) {
+	var messageBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			w.WriteHeader(http.StatusOK)
+		case "/config/providers":
+			_, _ = w.Write([]byte(`{"providers":[{"id":"openrouter","name":"OpenRouter","models":{"mimo-v2.5":{"name":"MiMo v2.5"}}}]}`))
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"sess_1"}`))
+		case "/session/sess_1/message":
+			if err := json.NewDecoder(r.Body).Decode(&messageBody); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"type":"message","text":"done"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	_, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
+		Run:    db.AgentCLIRun{ID: "run_1", JobID: "job_1", Task: "hello", Model: "xiaomi/mimo-v2.5"},
+		Chat:   RunnerChatCommandRequest{UserMessage: "hello"},
+		Config: config.AgentCLIConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
+		Env:    []string{"PATH="},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if messageBody["providerID"] != "openrouter" || messageBody["modelID"] != "mimo-v2.5" {
+		t.Fatalf("unexpected model request: %#v", messageBody)
+	}
+}
+
 func TestOpenCodeExecuteSendsVariantOnlyWhenSupported(t *testing.T) {
 	var messageBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -235,12 +290,8 @@ func TestOpenCodeExecuteSendsVariantOnlyWhenSupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	model, ok := messageBody["model"].(map[string]any)
-	if !ok {
-		t.Fatalf("model body = %#v, want object", messageBody["model"])
-	}
-	if model["providerID"] != "openai" || model["modelID"] != "gpt-5" || model["variant"] != "high" {
-		t.Fatalf("unexpected model request: %#v", model)
+	if messageBody["providerID"] != "openai" || messageBody["modelID"] != "gpt-5" || messageBody["variant"] != "high" {
+		t.Fatalf("unexpected model request: %#v", messageBody)
 	}
 }
 
@@ -285,7 +336,7 @@ func TestOpenCodeExecuteEmitsStructuredResponseEvents(t *testing.T) {
 		case "/session":
 			_, _ = w.Write([]byte(`{"id":"sess_1"}`))
 		case "/session/sess_1/message":
-			_, _ = w.Write([]byte(`{"type":"message","text":"done","permission":{"type":"permission.request","path":"/tmp/project"}}`))
+			_, _ = w.Write([]byte(`{"type":"message","text":"done","question":{"type":"question.request","question":"Proceed?"}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -310,7 +361,7 @@ func TestOpenCodeExecuteEmitsStructuredResponseEvents(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("expected native events")
 	}
-	foundPermission := false
+	foundQuestion := false
 	for _, event := range events {
 		if event.Type != "structured" {
 			continue
@@ -319,12 +370,80 @@ func TestOpenCodeExecuteEmitsStructuredResponseEvents(t *testing.T) {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			t.Fatalf("unmarshal payload: %v", err)
 		}
-		if payload["type"] == "permission.asked" {
-			foundPermission = true
+		if payload["type"] == "question.asked" {
+			foundQuestion = true
 		}
 	}
-	if !foundPermission {
-		t.Fatalf("expected permission.asked event, got %+v", events)
+	if !foundQuestion {
+		t.Fatalf("expected question.asked event, got %+v", events)
+	}
+}
+
+func TestOpenCodeExecuteStopsOnPermissionRequest(t *testing.T) {
+	const sessionID = "sess_permission"
+	abortCalled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			w.WriteHeader(http.StatusOK)
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatalf("response writer is not flusher")
+			}
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{
+				"type": "permission.updated",
+				"properties": map[string]any{
+					"permission": map[string]any{
+						"type": "write",
+						"path": "/tmp/project/file.txt",
+					},
+				},
+			}))
+			flusher.Flush()
+			<-r.Context().Done()
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"` + sessionID + `"}`))
+		case "/session/" + sessionID + "/message":
+			_, _ = w.Write([]byte(`{"type":"message","permission":{"type":"permission.write","path":"/tmp/project/file.txt"}}`))
+		case "/session/" + sessionID + "/abort":
+			select {
+			case abortCalled <- struct{}{}:
+			default:
+			}
+			_, _ = w.Write([]byte(`true`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runtime := NewOpenCodeNativeRuntime()
+	var sawApprovalEvent bool
+	_, err := runtime.Execute(ctx, NativeRuntimeExecuteRequest{
+		Run:    db.AgentCLIRun{ID: "run_1", JobID: "job_1", Task: "hello"},
+		Chat:   RunnerChatCommandRequest{UserMessage: "hello"},
+		Config: config.AgentCLIConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
+		Env:    []string{"PATH="},
+		OnEvent: func(event AgentRunEvent) {
+			if _, ok := detectOpenCodePermissionRequest(event); ok {
+				sawApprovalEvent = true
+			}
+		},
+	})
+	if !errors.Is(err, errNativeApprovalRequired) {
+		t.Fatalf("Execute err = %v, want errNativeApprovalRequired", err)
+	}
+	if !sawApprovalEvent {
+		t.Fatal("expected permission event to be emitted")
+	}
+	select {
+	case <-abortCalled:
+	case <-time.After(time.Second):
+		t.Fatal("expected OpenCode session abort after permission request")
 	}
 }
 
@@ -336,6 +455,15 @@ func TestStructuredRunnerPermissionDetection(t *testing.T) {
 	}
 	if req.RunnerID != string(RunnerOpenCode) || req.Access != runnerPermissionAccessWrite || req.TargetPath != "/tmp/project/file.txt" {
 		t.Fatalf("unexpected opencode permission: %+v", req)
+	}
+
+	nestedPayload := json.RawMessage(`{"type":"permission.asked","permission":{"type":"edit","path":"/tmp/project/nested.txt"}}`)
+	req, ok = detectOpenCodePermissionRequest(AgentRunEvent{Type: "structured", Payload: nestedPayload})
+	if !ok {
+		t.Fatal("expected nested opencode permission request")
+	}
+	if req.Access != runnerPermissionAccessWrite || req.TargetPath != "/tmp/project/nested.txt" {
+		t.Fatalf("unexpected nested opencode permission: %+v", req)
 	}
 
 	codexPayload := json.RawMessage(`{"method":"codex/requestApproval","params":{"cwd":"/tmp/project"}}`)

@@ -157,9 +157,10 @@ func (s *Service) AddNote(ctx context.Context, req AddNoteRequest) (AddNoteRespo
 	if s.Provider != nil {
 		vec, err := s.Provider.Embed(ctx, s.EmbedModel, text)
 		if err != nil {
-			return AddNoteResponse{}, err
+			warning = "note stored without embedding; semantic recall unavailable for this note"
+		} else {
+			embedding = memory.PackFloat32(vec)
 		}
-		embedding = memory.PackFloat32(vec)
 	} else {
 		warning = "note stored without embedding; semantic recall unavailable until embeddings are configured"
 	}

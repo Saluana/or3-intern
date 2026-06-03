@@ -401,6 +401,8 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 	}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	lastKeepalive := time.Now()
+	const runnerChatStreamKeepaliveInterval = 15 * time.Second
 	for {
 		select {
 		case <-r.Context().Done():
@@ -417,6 +419,7 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 					return
 				}
 				afterSeq = next
+				lastKeepalive = time.Now()
 			}
 			cur, err := store.GetRunnerChatTurn(r.Context(), turnID)
 			if err == nil && isTerminalRunnerChatStatus(cur.Status) {
@@ -431,6 +434,17 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 					"assistant_message_id": cur.AssistantMessageID,
 				})
 				return
+			}
+			if err == nil &&
+				!isTerminalRunnerChatStatus(cur.Status) &&
+				time.Since(lastKeepalive) >= runnerChatStreamKeepaliveInterval {
+				if err := writeSSEEvent(w, "keepalive", map[string]any{
+					"status":  cur.Status,
+					"turn_id": turnID,
+				}); err != nil {
+					return
+				}
+				lastKeepalive = time.Now()
 			}
 		}
 	}

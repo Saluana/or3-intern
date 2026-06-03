@@ -285,7 +285,7 @@ type OpenCodeNativeRuntime struct {
 }
 
 func NewOpenCodeNativeRuntime() *OpenCodeNativeRuntime {
-	return &OpenCodeNativeRuntime{client: &http.Client{Timeout: 60 * time.Second}, activeSessions: map[string]string{}}
+	return &OpenCodeNativeRuntime{client: &http.Client{}, activeSessions: map[string]string{}}
 }
 
 func (r *OpenCodeNativeRuntime) ID() RunnerID { return RunnerOpenCode }
@@ -383,21 +383,64 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 		case <-abortWatcherDone:
 		}
 	}()
+	messageCtx, cancelMessage := context.WithCancel(ctx)
+	defer cancelMessage()
+	approvalRequired := atomic.Bool{}
+	onEvent := func(e AgentRunEvent) {
+		if _, ok := detectOpenCodePermissionRequest(e); ok {
+			approvalRequired.Store(true)
+			cancelMessage()
+		}
+		if req.OnEvent != nil {
+			req.OnEvent(e)
+		}
+	}
 	prompt := firstNonEmpty(req.Chat.UserMessage, req.Run.Task)
 	messageBody := map[string]any{
 		"parts": []map[string]any{{"type": "text", "text": prompt}},
 	}
 	if model := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerOpenCode)]); model != "" {
-		messageBody["model"] = r.openCodeModelRequest(ctx, endpoint, model, requestedThinkingLevel(req.Chat.Meta))
+		mergeOpenCodeModelIntoBody(messageBody, r.openCodeModelRequest(ctx, endpoint, req.Env, model, requestedThinkingLevel(req.Chat.Meta)))
 	}
+
+	streamState := newOpenCodeStreamState()
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		_ = streamOpenCodeGlobalEvents(streamCtx, r.client, endpoint, sessionID, onEvent, &seq, streamState)
+	}()
+
 	var response map[string]any
-	if err := httpJSON(ctx, r.client, http.MethodPost, endpoint+"/session/"+sessionID+"/message", messageBody, &response); err != nil {
-		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+	messageErr := httpJSON(messageCtx, r.client, http.MethodPost, endpoint+"/session/"+sessionID+"/message", messageBody, &response)
+
+	cancelStream()
+	select {
+	case <-streamDone:
+	case <-time.After(750 * time.Millisecond):
 	}
-	emitOpenCodeResponseEvents(&seq, req.OnEvent, sessionID, response)
+
+	if messageErr != nil {
+		if approvalRequired.Load() {
+			r.abortSessionBestEffort(endpoint, sessionID)
+			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+		}
+		return ProcessOutput{ExitCode: -1, StderrPreview: messageErr.Error(), DurationMS: time.Since(started).Milliseconds()}, messageErr
+	}
+	if !streamState.streamedText.Load() {
+		emitOpenCodeResponseEvents(&seq, onEvent, sessionID, response)
+	}
+	if approvalRequired.Load() {
+		r.abortSessionBestEffort(endpoint, sessionID)
+		return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+	}
+	if errMsg := extractOpenCodeErrorMessage(response); errMsg != "" {
+		return ProcessOutput{ExitCode: 1, StderrPreview: errMsg, FinalTextPreview: errMsg, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("%s", errMsg)
+	}
 	finalText := extractText(response)
-	if finalText != "" && req.OnEvent != nil {
-		req.OnEvent(textChunkEvent(&seq, finalText))
+	if finalText != "" && !streamState.streamedText.Load() {
+		onEvent(textChunkEvent(&seq, finalText))
 	}
 	return ProcessOutput{ExitCode: 0, StdoutPreview: finalText, FinalTextPreview: finalText, DurationMS: time.Since(started).Milliseconds()}, nil
 }
@@ -515,6 +558,12 @@ func (r *OpenCodeNativeRuntime) abortSession(ctx context.Context, endpoint, sess
 	return httpJSON(ctx, r.client, http.MethodPost, endpoint+"/session/"+sessionID+"/abort", nil, nil)
 }
 
+func (r *OpenCodeNativeRuntime) abortSessionBestEffort(endpoint, sessionID string) {
+	abortCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.abortSession(abortCtx, endpoint, sessionID)
+}
+
 func emitOpenCodeResponseEvents(seq *int64, onEvent func(AgentRunEvent), sessionID string, response map[string]any) {
 	emitNativeStructured(seq, onEvent, map[string]any{"type": "message", "session_id": sessionID, "raw": response})
 	var walk func(any)
@@ -581,25 +630,59 @@ func (r *OpenCodeNativeRuntime) modelsFromCLI(ctx context.Context, env []string)
 	return parseOpenCodeModelsCLIOutput(output)
 }
 
-func (r *OpenCodeNativeRuntime) openCodeModelRequest(ctx context.Context, endpoint, model, thinking string) any {
-	providerID, modelID := splitProviderModel(model)
-	if thinking == "" {
-		return model
+func (r *OpenCodeNativeRuntime) openCodeModelRequest(ctx context.Context, endpoint string, env []string, model, thinking string) any {
+	return openCodeModelRequestForCatalog(openCodeCatalogWithFallback(ctx, endpoint, env, r), model, thinking)
+}
+
+func openCodeModelBody(info RunnerModelInfo, thinking string) any {
+	provider := strings.TrimSpace(info.Provider)
+	modelID := strings.TrimSpace(info.ID)
+	if provider == "" || modelID == "" {
+		return modelID
 	}
-	for _, info := range r.models(ctx, endpoint) {
-		if info.ID != modelID && info.ID != model {
-			continue
-		}
-		if !stringInSlice(thinking, info.Reasoning) {
-			continue
-		}
-		provider := firstNonEmpty(providerID, info.Provider)
-		if provider == "" {
-			return model
-		}
-		return map[string]any{"providerID": provider, "modelID": info.ID, "variant": thinking}
+	if thinking != "" && stringInSlice(thinking, info.Reasoning) {
+		return map[string]any{"providerID": provider, "modelID": modelID, "variant": thinking}
 	}
-	return model
+	return map[string]any{"providerID": provider, "modelID": modelID}
+}
+
+// resolveOpenCodeModel maps UI/session model strings onto OpenCode catalog entries.
+// The app may send vendor-prefixed values such as "xiaomi/mimo-v2.5" while OpenCode
+// expects providerID "openrouter" (or similar) with modelID "mimo-v2.5".
+func resolveOpenCodeModel(catalog []RunnerModelInfo, requested string) *RunnerModelInfo {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || len(catalog) == 0 {
+		return nil
+	}
+	providerPart, modelPart, split := strings.Cut(requested, "/")
+	if split && modelPart != "" && !strings.Contains(modelPart, "/") {
+		for i := range catalog {
+			if catalog[i].ID == modelPart {
+				return &catalog[i]
+			}
+		}
+	}
+	for i := range catalog {
+		if catalog[i].ID == requested {
+			return &catalog[i]
+		}
+	}
+	if !split {
+		return nil
+	}
+	for i := range catalog {
+		entry := &catalog[i]
+		if entry.Provider == providerPart && entry.ID == modelPart {
+			return entry
+		}
+		if entry.ID == requested {
+			return entry
+		}
+		if entry.ID == modelPart {
+			return entry
+		}
+	}
+	return nil
 }
 
 // CodexNativeRuntime talks to codex app-server over stdio JSON-RPC.

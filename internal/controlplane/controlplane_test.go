@@ -50,6 +50,48 @@ func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time
 	}
 }
 
+func TestBuildAgentCLIRunResponseUsesDisplayTaskMetadata(t *testing.T) {
+	meta, _ := json.Marshal(map[string]any{
+		"ui_task":              "raw visible task",
+		"or3_context_injected": true,
+	})
+	resp := BuildAgentCLIRunResponse(db.AgentCLIRun{
+		ID:               "acr_1",
+		JobID:            "job_1",
+		ParentSessionKey: "sess",
+		RunnerID:         "codex",
+		Task:             "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>",
+		Mode:             "safe_edit",
+		Isolation:        "host_workspace_write",
+		Status:           db.AgentCLIStatusQueued,
+		MetaJSON:         string(meta),
+	})
+	if resp["task"] != "raw visible task" {
+		t.Fatalf("expected display task, got %#v", resp["task"])
+	}
+	if resp["execution_prompt_injected"] != true {
+		t.Fatalf("expected execution prompt marker, got %#v", resp)
+	}
+}
+
+func TestBuildAgentCLIRunResponseUsesRunnerChatUserMessage(t *testing.T) {
+	meta, _ := json.Marshal(map[string]any{
+		"runner_chat_user_message": "raw chat message",
+	})
+	resp := BuildAgentCLIRunResponse(db.AgentCLIRun{
+		ID:               "acr_2",
+		JobID:            "job_2",
+		ParentSessionKey: "sess",
+		RunnerID:         "opencode",
+		Task:             "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>",
+		Status:           db.AgentCLIStatusQueued,
+		MetaJSON:         string(meta),
+	})
+	if resp["task"] != "raw chat message" {
+		t.Fatalf("expected runner-chat user message, got %#v", resp["task"])
+	}
+}
+
 func TestCollectCapabilitiesReportWithMCPDetails(t *testing.T) {
 	cfg := config.Default()
 	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
@@ -192,6 +234,19 @@ func TestBuildRunnerChatEventResponsePassesCanonicalPayload(t *testing.T) {
 	}
 	if response["type"] != "item.started" || response["text"] != "go test ./..." || response["job_id"] != "job-1" {
 		t.Fatalf("expected legacy fields preserved, got %#v", response)
+	}
+}
+
+func TestBuildRunnerChatEventResponsePreservesWhitespaceOnlyText(t *testing.T) {
+	response := BuildRunnerChatEventResponse(db.RunnerChatEvent{
+		ID:     8,
+		TurnID: "turn-1",
+		Seq:    5,
+		Type:   "text_delta",
+		Text:   " ",
+	})
+	if response["text"] != " " {
+		t.Fatalf("expected whitespace-only text delta to be preserved, got %#v", response)
 	}
 }
 

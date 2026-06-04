@@ -27,7 +27,7 @@ func TestBuildRuntimeAgentCLIManagerDisabled(t *testing.T) {
 func TestBuildRuntimeCronServiceDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cron.Enabled = false
-	if svc := buildRuntimeCronService(cfg, bus.New(1), nil); svc != nil {
+	if svc := buildRuntimeCronService(cfg, bus.New(1), nil, nil); svc != nil {
 		t.Fatalf("expected nil cron service when disabled")
 	}
 }

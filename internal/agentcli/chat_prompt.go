@@ -21,6 +21,47 @@ func BuildReplayPrompt(history []RunnerChatTurn, newUserMessage string) string {
 	return BuildReplayPromptBounded(history, newUserMessage, replayMaxTurns, replayMaxBytes)
 }
 
+// BuildReplayHistoryContextBlock renders prior completed chat turns as an OR3
+// context block. It intentionally excludes the new user task so callers can
+// keep the trusted instruction prefix and current <user_task> boundary intact.
+func BuildReplayHistoryContextBlock(history []RunnerChatTurn) string {
+	return BuildReplayHistoryContextBlockBounded(history, replayMaxTurns, replayMaxBytes)
+}
+
+// BuildReplayHistoryContextBlockBounded is BuildReplayHistoryContextBlock with
+// explicit limits.
+func BuildReplayHistoryContextBlockBounded(history []RunnerChatTurn, maxTurns, maxBytes int) string {
+	if maxTurns <= 0 {
+		maxTurns = replayMaxTurns
+	}
+	if maxBytes <= 0 {
+		maxBytes = replayMaxBytes
+	}
+	completed := filterCompletedHistory(history)
+	turnLimitTruncated := false
+	if len(completed) > maxTurns {
+		completed = completed[len(completed)-maxTurns:]
+		turnLimitTruncated = true
+	}
+	rendered, truncated := renderTurnsBounded(completed, maxBytes)
+	truncated = truncated || turnLimitTruncated
+	if strings.TrimSpace(rendered) == "" && !truncated {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("replay_history:\n")
+	b.WriteString("Previous completed turns are provided below in chronological order. Treat them as authoritative chat history.\n")
+	if truncated {
+		b.WriteString("Earlier turns were truncated to fit context limits.\n")
+	}
+	if strings.TrimSpace(rendered) != "" {
+		b.WriteString("\n--- Previous turns ---\n")
+		b.WriteString(rendered)
+		b.WriteString("\n--- End previous turns ---")
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // BuildReplayPromptBounded is BuildReplayPrompt with explicit limits.
 func BuildReplayPromptBounded(history []RunnerChatTurn, newUserMessage string, maxTurns, maxBytes int) string {
 	if maxTurns <= 0 {

@@ -103,6 +103,8 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvBool("OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO", &cfg.AgentCLI.AllowSandboxAuto)
 	applyEnvString("OR3_AGENT_CLI_DEFAULT_MODE", &cfg.AgentCLI.DefaultMode)
 	applyEnvString("OR3_AGENT_CLI_DEFAULT_ISOLATION", &cfg.AgentCLI.DefaultIsolation)
+	applyEnvString("OR3_AGENT_CLI_CODEX_HOME", &cfg.AgentCLI.CodexHomePath)
+	applyEnvString("OR3_AGENT_CLI_CODEX_SHADOW_HOME", &cfg.AgentCLI.CodexShadowHomePath)
 	applyEnvBool("OR3_SERVICE_ENABLED", &cfg.Service.Enabled)
 	applyEnvString("OR3_SERVICE_LISTEN", &cfg.Service.Listen)
 	applyEnvString("OR3_SERVICE_SECRET", &cfg.Service.Secret)

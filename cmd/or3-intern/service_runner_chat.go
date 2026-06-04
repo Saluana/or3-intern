@@ -35,18 +35,18 @@ type runnerChatCreateSessionRequest struct {
 
 // runnerChatStartTurnRequest is the body for POST /runner-chat/sessions/:id/turns.
 type runnerChatStartTurnRequest struct {
-	UserMessage      string         `json:"user_message"`
+	UserMessage      string           `json:"user_message"`
 	Attachments      []map[string]any `json:"attachments"`
-	ContinuationMode string         `json:"continuation_mode"`
-	Model            string         `json:"model"`
-	Mode             string         `json:"mode"`
-	Isolation        string         `json:"isolation"`
-	Cwd              string         `json:"cwd"`
-	MaxTurns         int            `json:"max_turns"`
-	TimeoutSeconds   int            `json:"timeout_seconds"`
-	Meta             map[string]any `json:"meta"`
-	ThinkingLevel    string         `json:"thinking_level"`
-	ApprovalToken    string         `json:"approval_token"`
+	ContinuationMode string           `json:"continuation_mode"`
+	Model            string           `json:"model"`
+	Mode             string           `json:"mode"`
+	Isolation        string           `json:"isolation"`
+	Cwd              string           `json:"cwd"`
+	MaxTurns         int              `json:"max_turns"`
+	TimeoutSeconds   int              `json:"timeout_seconds"`
+	Meta             map[string]any   `json:"meta"`
+	ThinkingLevel    string           `json:"thinking_level"`
+	ApprovalToken    string           `json:"approval_token"`
 	RunnerPermission struct {
 		RunnerID   string `json:"runner_id"`
 		Kind       string `json:"kind"`
@@ -241,18 +241,49 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		writeServiceError(w, r, http.StatusBadRequest, "invalid attachments", err)
 		return
 	}
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
+		return
+	}
+	sess, err := store.GetRunnerChatSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, db.ErrRunnerChatSessionNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+			return
+		}
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat session lookup unavailable", err)
+		return
+	}
+	promptMessage := strings.TrimSpace(req.UserMessage)
+	promptMessageFinal := false
+	if s.turnOrchestrator != nil {
+		continuation := agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
+		if continuation == "" {
+			continuation = agentcli.ContinuationMode(sess.ContinuationMode)
+		}
+		compiled, err := s.turnOrchestrator.CompileRunnerChatPromptForSession(r.Context(), sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
+		if err != nil {
+			writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat prompt unavailable", err)
+			return
+		}
+		promptMessage = compiled.CompiledPrompt
+		promptMessageFinal = true
+	}
 	startReq := agentcli.StartTurnRequest{
-		ContinuationMode: agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
-		UserMessage:      req.UserMessage,
-		Attachments:      attachments,
-		Model:            req.Model,
-		Mode:             req.Mode,
-		Isolation:        req.Isolation,
-		Cwd:              req.Cwd,
-		MaxTurns:         req.MaxTurns,
-		TimeoutSeconds:   req.TimeoutSeconds,
-		Meta:             req.Meta,
-		ApprovalToken:    serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
+		ContinuationMode:   agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
+		UserMessage:        req.UserMessage,
+		PromptMessage:      promptMessage,
+		PromptMessageFinal: promptMessageFinal,
+		Attachments:        attachments,
+		Model:              req.Model,
+		Mode:               req.Mode,
+		Isolation:          req.Isolation,
+		Cwd:                req.Cwd,
+		MaxTurns:           req.MaxTurns,
+		TimeoutSeconds:     req.TimeoutSeconds,
+		Meta:               req.Meta,
+		ApprovalToken:      serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
 	}
 	if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
 		if startReq.Meta == nil {

@@ -39,15 +39,15 @@ func TestManagerBuildCommandSpecForRunnerChatNative(t *testing.T) {
 		t.Fatalf("marshal meta: %v", err)
 	}
 	cmd, err := manager.buildCommandSpecForRun(context.Background(), db.AgentCLIRun{
-		RunnerID:  string(RunnerOpenCode),
-		Task:      "fallback task",
-		Model:     "gpt-5",
-		Mode:      string(RunnerModeSandboxAuto),
-		MetaJSON:  string(metaJSON),
+		RunnerID: string(RunnerOpenCode),
+		Task:     "fallback task",
+		Model:    "gpt-5",
+		Mode:     string(RunnerModeSandboxAuto),
+		MetaJSON: string(metaJSON),
 	})
 	if err != nil {
 		t.Fatalf("buildCommandSpecForRun: %v", err)
 	}
-	want := []string{"run", "--format", "json", "--session", "session_live_99", "--model", "opencode/gpt-5", "--dangerously-skip-permissions", "pick up where you left off"}
+	want := []string{"run", "--format", "json", "--session", "session_live_99", "--model", "gpt-5", "--dangerously-skip-permissions", "pick up where you left off"}
 	assertArgsEqual(t, want, cmd.Args)
 }

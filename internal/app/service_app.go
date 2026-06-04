@@ -296,6 +296,9 @@ func (a *ServiceApp) StartAgentCLIRun(ctx context.Context, req agentcli.AgentRun
 	if a == nil || a.agentCLIManager == nil {
 		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
 	}
+	if a.turnOrchestrator != nil {
+		req = a.turnOrchestrator.PrepareAgentRunRequest(ctx, req)
+	}
 	return a.agentCLIManager.Enqueue(ctx, req)
 }
 

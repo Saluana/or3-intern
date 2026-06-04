@@ -2,8 +2,10 @@ package app
 
 import "strings"
 
-// RunnerBootstrapContext carries static OR3 bootstrap files used when building
-// runner prompts. Callers populate this from workspace bootstrap files.
+// RunnerBootstrapContext carries OR3 bootstrap files used when building runner
+// prompts. AgentInstructions and ToolNotes are loaded for compatibility, but
+// runner-native CLIs read their own AGENTS/tool instructions, so OR3 does not
+// inject them into the trusted prompt envelope.
 type RunnerBootstrapContext struct {
 	Soul              string
 	AgentInstructions string
@@ -16,12 +18,12 @@ type RunnerBootstrapContext struct {
 func (b RunnerBootstrapContext) trustedBlocks() []string {
 	return []string{
 		b.Soul,
-		b.AgentInstructions,
-		b.ToolNotes,
 		b.IdentityText,
-		b.StaticMemory,
+		runnerMemoryToolHint,
 	}
 }
+
+const runnerMemoryToolHint = "Memory context may be provided below. If an OR3 memory tool is available, save durable user preferences/facts only."
 
 func (b RunnerBootstrapContext) contextBlocks(triggerKind string) []string {
 	if !isAutonomousTrigger(triggerKind) {

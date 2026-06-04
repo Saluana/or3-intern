@@ -675,6 +675,9 @@ func validateAgentCLIConfig(cfg AgentCLIConfig) error {
 			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must point at loopback", runner)
 		}
 	}
+	if strings.TrimSpace(cfg.CodexShadowHomePath) != "" && strings.TrimSpace(cfg.CodexHomePath) == "" {
+		return errors.New("agentCLI.codexShadowHomePath requires agentCLI.codexHomePath")
+	}
 	return nil
 }
 

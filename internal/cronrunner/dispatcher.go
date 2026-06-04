@@ -19,18 +19,33 @@ type AgentCLIEnqueuer interface {
 	Enqueue(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error)
 }
 
+type AgentRunPreparer interface {
+	PrepareAgentRunRequest(ctx context.Context, req agentcli.AgentRunRequest) agentcli.AgentRunRequest
+}
+
 type Dispatcher struct {
 	Bus               *bus.Bus
 	DefaultSessionKey string
 	AgentCLI          AgentCLIEnqueuer
+	AgentRunPreparer  AgentRunPreparer
 	AgentCLIEnabled   bool
 }
 
 func New(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqueuer, agentCLIEnabled bool) cron.Runner {
+	return NewWithPreparer(b, defaultSessionKey, agentCLI, nil, agentCLIEnabled)
+}
+
+func NewWithPreparer(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqueuer, preparer AgentRunPreparer, agentCLIEnabled bool) cron.Runner {
 	if b == nil {
 		panic("cronrunner dispatcher event bus not configured")
 	}
-	d := Dispatcher{Bus: b, DefaultSessionKey: defaultSessionKey, AgentCLI: agentCLI, AgentCLIEnabled: agentCLIEnabled}
+	d := Dispatcher{
+		Bus:               b,
+		DefaultSessionKey: defaultSessionKey,
+		AgentCLI:          agentCLI,
+		AgentRunPreparer:  preparer,
+		AgentCLIEnabled:   agentCLIEnabled,
+	}
 	return d.Run
 }
 
@@ -95,6 +110,9 @@ func (d Dispatcher) enqueueAgentRun(ctx context.Context, job cron.CronJob, paylo
 		Isolation:        run.Isolation,
 		MaxTurns:         run.MaxTurns,
 		Meta:             run.Meta,
+	}
+	if d.AgentRunPreparer != nil {
+		req = d.AgentRunPreparer.PrepareAgentRunRequest(ctx, req)
 	}
 	created, err := d.AgentCLI.Enqueue(ctx, req)
 	if err != nil {

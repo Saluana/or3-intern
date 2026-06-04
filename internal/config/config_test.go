@@ -1367,6 +1367,32 @@ func TestLoad_AgentCLINativeServerURLsAreLoopbackOnly(t *testing.T) {
 	}
 }
 
+func TestLoad_AgentCLICodexHomePathsTrimAndValidate(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.AgentCLI.CodexHomePath = "  ~/.codex-work  "
+	input.AgentCLI.CodexShadowHomePath = "  ~/.or3/codex-work-shadow  "
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.CodexHomePath != "~/.codex-work" || cfg.AgentCLI.CodexShadowHomePath != "~/.or3/codex-work-shadow" {
+		t.Fatalf("unexpected codex paths: home=%q shadow=%q", cfg.AgentCLI.CodexHomePath, cfg.AgentCLI.CodexShadowHomePath)
+	}
+
+	input.AgentCLI.CodexHomePath = ""
+	input.AgentCLI.CodexShadowHomePath = "~/.or3/codex-shadow"
+	b, _ = json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "codexShadowHomePath requires") {
+		t.Fatalf("expected shadow-home validation error, got %v", err)
+	}
+}
+
 func TestLoad_AgentCLIDisabledRunnersEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
@@ -1454,6 +1480,24 @@ func TestLoad_AgentCLIDefaultRunnerEnvOverride(t *testing.T) {
 	}
 	if cfg.AgentCLI.DefaultRunner != "claude" {
 		t.Errorf("expected env override claude, got %q", cfg.AgentCLI.DefaultRunner)
+	}
+}
+
+func TestLoad_AgentCLICodexHomeEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	t.Setenv("OR3_AGENT_CLI_CODEX_HOME", "~/.codex-personal")
+	t.Setenv("OR3_AGENT_CLI_CODEX_SHADOW_HOME", "~/.or3/codex-personal-shadow")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentCLI.CodexHomePath != "~/.codex-personal" || cfg.AgentCLI.CodexShadowHomePath != "~/.or3/codex-personal-shadow" {
+		t.Fatalf("unexpected env codex paths: home=%q shadow=%q", cfg.AgentCLI.CodexHomePath, cfg.AgentCLI.CodexShadowHomePath)
 	}
 }
 

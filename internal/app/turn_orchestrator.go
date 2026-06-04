@@ -1,7 +1,6 @@
 package app
 
 import (
-	"or3-intern/internal/requestctx"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	"or3-intern/internal/requestctx"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/turns"
 )
@@ -47,11 +48,11 @@ type RunnerTurnResult struct {
 // RunnerTurnOrchestrator routes ingress work to agentcli.ChatManager instead of
 // the built-in provider/tool-loop runtime.
 type RunnerTurnOrchestrator struct {
-	cfg        config.Config
-	chat       *agentcli.ChatManager
-	bootstrap  RunnerBootstrapContext
-	context    *RunnerContextBuilder
-	contextMax int
+	cfg            config.Config
+	chat           *agentcli.ChatManager
+	bootstrap      RunnerBootstrapContext
+	context        *RunnerContextBuilder
+	promptCompiler *RunnerPromptCompiler
 }
 
 // NewRunnerTurnOrchestrator constructs an orchestrator when runner chat is enabled.
@@ -59,12 +60,13 @@ func NewRunnerTurnOrchestrator(cfg config.Config, chat *agentcli.ChatManager, bo
 	if chat == nil || !cfg.AgentCLI.Enabled {
 		return nil
 	}
+	compiler := NewRunnerPromptCompiler(cfg, bootstrap, deps)
 	return &RunnerTurnOrchestrator{
-		cfg:        cfg,
-		chat:       chat,
-		bootstrap:  bootstrap,
-		context:    NewRunnerContextBuilder(cfg, deps),
-		contextMax: 48 * 1024,
+		cfg:            cfg,
+		chat:           chat,
+		bootstrap:      bootstrap,
+		context:        compiler.context,
+		promptCompiler: compiler,
 	}
 }
 
@@ -104,20 +106,6 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 	if triggerKind == "" {
 		triggerKind = "user_message"
 	}
-	bootstrap := o.bootstrapForTrigger(triggerKind)
-	var contextBlocks []string
-	if o.context != nil {
-		contextBlocks = o.context.BuildContextBlocks(ctx, sessionKey, userMessage, triggerKind, bootstrap)
-	} else {
-		contextBlocks = bootstrap.contextBlocks(triggerKind)
-	}
-	prompt := agentcli.BuildRunnerPrompt(agentcli.RunnerPromptContext{
-		TrustedSystemInstructions: bootstrap.trustedBlocks(),
-		ContextBlocks:             contextBlocks,
-		UserMessage:               userMessage,
-		TriggerKind:               triggerKind,
-		MaxBytes:                  o.contextMax,
-	})
 	mode := strings.TrimSpace(req.Mode)
 	if mode == "" {
 		mode = strings.TrimSpace(o.cfg.AgentCLI.DefaultMode)
@@ -130,7 +118,7 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 		AppSessionKey:    sessionKey,
 		RunnerID:         string(runnerID),
 		UserMessage:      userMessage,
-		PromptMessage:    prompt,
+		PromptMessage:    userMessage,
 		Attachments:      req.Attachments,
 		ContinuationMode: agentcli.ContinuationReplay,
 		Model:            strings.TrimSpace(req.Model),
@@ -144,6 +132,12 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 	if err != nil {
 		return RunnerTurnResult{}, err
 	}
+	compiled, err := o.compileRunnerChatPrompt(ctx, sess.ID, sessionKey, userMessage, triggerKind, req.Meta, agentcli.ContinuationReplay)
+	if err != nil {
+		return RunnerTurnResult{}, err
+	}
+	startReq.PromptMessage = compiled.CompiledPrompt
+	startReq.PromptMessageFinal = true
 	result, err := o.chat.StartTurn(ctx, sess.ID, startReq)
 	if err != nil {
 		return RunnerTurnResult{}, err
@@ -154,6 +148,76 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 		AgentCLIRunID:       result.Turn.AgentCLIRunID,
 		AgentCLIJobID:       result.JobID,
 	}, nil
+}
+
+// CompileRunnerChatPrompt builds the OR3 runner envelope for runner-chat HTTP turns.
+func (o *RunnerTurnOrchestrator) CompileRunnerChatPrompt(ctx context.Context, sessionKey, userMessage, triggerKind string, meta map[string]any) RunnerPromptCompileResult {
+	out, _ := o.compileRunnerChatPrompt(ctx, "", sessionKey, userMessage, triggerKind, meta, agentcli.ContinuationReplay)
+	return out
+}
+
+// CompileRunnerChatPromptForSession builds a final runner-chat execution prompt
+// with prior completed turns included as volatile OR3 context.
+func (o *RunnerTurnOrchestrator) CompileRunnerChatPromptForSession(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation agentcli.ContinuationMode) (RunnerPromptCompileResult, error) {
+	return o.compileRunnerChatPrompt(ctx, runnerChatSessionID, appSessionKey, userMessage, triggerKind, meta, continuation)
+}
+
+func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation agentcli.ContinuationMode) (RunnerPromptCompileResult, error) {
+	extra := []string(nil)
+	if continuation != agentcli.ContinuationNative && strings.TrimSpace(runnerChatSessionID) != "" && o != nil && o.chat != nil && o.chat.DB != nil {
+		history, err := o.chat.DB.ListRunnerChatTurns(ctx, runnerChatSessionID, 0)
+		if err != nil {
+			return RunnerPromptCompileResult{}, fmt.Errorf("list runner chat history: %w", err)
+		}
+		if block := agentcli.BuildReplayHistoryContextBlock(appAgentcliHistory(history)); block != "" {
+			extra = append(extra, block)
+		}
+	}
+	return o.compilePrompt(ctx, RunnerPromptCompileInput{
+		SessionKey:         appSessionKey,
+		UserTask:           userMessage,
+		TriggerKind:        triggerKind,
+		Meta:               meta,
+		ExtraContextBlocks: extra,
+	}), nil
+}
+
+func appAgentcliHistory(turns []db.RunnerChatTurn) []agentcli.RunnerChatTurn {
+	out := make([]agentcli.RunnerChatTurn, 0, len(turns))
+	for _, t := range turns {
+		out = append(out, agentcli.RunnerChatTurn{
+			ID:          t.ID,
+			Sequence:    t.Sequence,
+			UserText:    t.UserMessage,
+			FinalText:   t.FinalText,
+			Status:      t.Status,
+			RequestedAt: t.RequestedAt,
+			CompletedAt: t.CompletedAt,
+		})
+	}
+	return out
+}
+
+// PrepareAgentRunRequest applies OR3 context compilation to background agent runs.
+func (o *RunnerTurnOrchestrator) PrepareAgentRunRequest(ctx context.Context, req agentcli.AgentRunRequest) agentcli.AgentRunRequest {
+	if o == nil || o.promptCompiler == nil {
+		return req
+	}
+	return o.promptCompiler.PrepareAgentRunRequest(ctx, req)
+}
+
+func (o *RunnerTurnOrchestrator) compilePrompt(ctx context.Context, in RunnerPromptCompileInput) RunnerPromptCompileResult {
+	if o == nil || o.promptCompiler == nil {
+		userTask := strings.TrimSpace(in.UserTask)
+		return RunnerPromptCompileResult{
+			Mode:           OR3ContextAuto,
+			UserTask:       userTask,
+			CompiledPrompt: userTask,
+			RawTask:        userTask,
+			TriggerKind:    normalizeTriggerKind(in.TriggerKind),
+		}
+	}
+	return o.promptCompiler.Compile(ctx, in)
 }
 
 // HandleBusEvent converts a bus event into a runner chat turn.

@@ -49,11 +49,11 @@ func startRuntimeAgentCLIManager(ctx context.Context, manager *agentcli.Manager)
 	return manager.Start(ctx)
 }
 
-func buildRuntimeCronService(cfg config.Config, events *bus.Bus, agentCLIManager *agentcli.Manager) *cron.Service {
+func buildRuntimeCronService(cfg config.Config, events *bus.Bus, agentCLIManager *agentcli.Manager, turnOrchestrator *app.RunnerTurnOrchestrator) *cron.Service {
 	if !cfg.Cron.Enabled {
 		return nil
 	}
-	return cron.New(cfg.Cron.StorePath, cronrunner.New(events, cfg.DefaultSessionKey, agentCLIManager, cfg.AgentCLI.Enabled))
+	return cron.New(cfg.Cron.StorePath, cronrunner.NewWithPreparer(events, cfg.DefaultSessionKey, agentCLIManager, turnOrchestrator, cfg.AgentCLI.Enabled))
 }
 
 func buildRuntimeChatManager(cfg config.Config, database *db.DB, manager *agentcli.Manager, jobs *jobs.Registry, broker *approval.Broker) *agentcli.ChatManager {

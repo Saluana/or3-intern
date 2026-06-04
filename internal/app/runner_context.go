@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"or3-intern/internal/agentcli"
@@ -12,6 +13,13 @@ import (
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/scope"
+)
+
+const (
+	runnerPinnedMemoryMaxChars    = 1000
+	runnerRetrievedMemoryMaxChars = 2200
+	runnerRetrievedMemoryMaxHits  = 5
+	runnerStaticMemoryMaxChars    = 1200
 )
 
 // RunnerContextDeps supplies optional memory/doc retrieval for runner prompts.
@@ -72,6 +80,15 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 			scopeKey = resolved
 		}
 	}
+	memoryParts := make([]string, 0, 3)
+	if b.deps.DB != nil {
+		pinned, err := b.deps.DB.GetPinned(ctx, scopeKey)
+		if err != nil {
+			log.Printf("runner context: pinned memory failed for %q: %v", scopeKey, err)
+		} else if text := formatPinnedMemoryContext(pinned, runnerPinnedMemoryMaxChars); text != "" {
+			memoryParts = append(memoryParts, "pinned_memory:\n"+text)
+		}
+	}
 	if b.deps.Mem != nil && strings.TrimSpace(userMessage) != "" {
 		mem := *b.deps.Mem
 		mem.EmbedFingerprint = b.deps.EmbedFingerprint
@@ -84,12 +101,22 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 				queryVec = vec
 			}
 		}
-		retrieved, err := mem.Retrieve(ctx, scopeKey, userMessage, queryVec, b.deps.VectorK, b.deps.FTSK, b.deps.TopK)
+		topK := b.deps.TopK
+		if topK <= 0 || topK > runnerRetrievedMemoryMaxHits {
+			topK = runnerRetrievedMemoryMaxHits
+		}
+		retrieved, err := mem.Retrieve(ctx, scopeKey, userMessage, queryVec, b.deps.VectorK, b.deps.FTSK, topK)
 		if err != nil {
 			log.Printf("runner context: memory retrieve failed for %q: %v", scopeKey, err)
-		} else if text := memory.FormatRetrievedBrief(retrieved, b.deps.BootstrapMax); text != "" && text != "(none)" {
-			blocks = append(blocks, "retrieved_memory:\n"+text)
+		} else if text := memory.FormatRetrievedBrief(retrieved, runnerRetrievedMemoryMaxChars); text != "" && text != "(none)" {
+			memoryParts = append(memoryParts, "retrieved_memory:\n"+text)
 		}
+	}
+	if text := compactRunnerContextText(bootstrap.StaticMemory, runnerStaticMemoryMaxChars); text != "" {
+		memoryParts = append(memoryParts, "memory_digest:\n"+text)
+	}
+	if len(memoryParts) > 0 {
+		blocks = append(blocks, "memory_context:\n"+strings.Join(memoryParts, "\n\n"))
 	}
 	if b.deps.Docs != nil && strings.TrimSpace(userMessage) != "" {
 		limit := b.deps.DocLimit
@@ -109,4 +136,40 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 		}
 	}
 	return blocks
+}
+
+func formatPinnedMemoryContext(pinned map[string]string, maxChars int) string {
+	if len(pinned) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(pinned))
+	for key := range pinned {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(pinned[key]) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		line := fmt.Sprintf("- %s: %s\n", strings.TrimSpace(key), compactRunnerContextText(pinned[key], 240))
+		if maxChars > 0 && b.Len()+len(line) > maxChars {
+			break
+		}
+		b.WriteString(line)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func compactRunnerContextText(text string, maxChars int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if text == "" {
+		return ""
+	}
+	if maxChars > 0 && len(text) > maxChars {
+		if maxChars <= 3 {
+			return text[:maxChars]
+		}
+		return text[:maxChars-3] + "..."
+	}
+	return text
 }

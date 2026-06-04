@@ -71,6 +71,29 @@ func TestRunnerRuntimeModeDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestCodexNativeReplayExecutionInputUsesReplayPrompt(t *testing.T) {
+	run := db.AgentCLIRun{Task: "compiled run task with soul"}
+	chat := RunnerChatCommandRequest{
+		ContinuationMode: ContinuationReplay,
+		ReplayPrompt:     "compiled replay with soul",
+		UserMessage:      "raw user only",
+	}
+	if got := ChatExecutionInput(chat, run.Task); got != "compiled replay with soul" {
+		t.Fatalf("replay native execution should use replay prompt, got %q", got)
+	}
+}
+
+func TestOpenCodeNativeReplayExecutionInputUsesReplayPrompt(t *testing.T) {
+	chat := RunnerChatCommandRequest{
+		ContinuationMode: ContinuationReplay,
+		ReplayPrompt:     "compiled replay with soul",
+		UserMessage:      "raw user only",
+	}
+	if got := ChatExecutionInput(chat, "compiled run task with soul"); got != "compiled replay with soul" {
+		t.Fatalf("replay native execution should use replay prompt, got %q", got)
+	}
+}
+
 func TestBuildRuntimeChatRequest(t *testing.T) {
 	meta := map[string]any{
 		"runner_chat_session_id":         "chat_sess_1",

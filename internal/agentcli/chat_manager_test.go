@@ -2,11 +2,12 @@ package agentcli
 
 import (
 	"context"
+	"strings"
 	"testing"
 
-	"or3-intern/internal/jobs"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 )
 
 func openChatManagerTestDB(t *testing.T) *db.DB {
@@ -91,6 +92,43 @@ func TestChatManagerUsesSessionMaxTurnsDefault(t *testing.T) {
 	}
 	if got := run.MetaJSON; got != `{"_max_turns":7,"runner_chat_continuation_mode":"replay","runner_chat_native_session_ref":"","runner_chat_replay_prompt":"System: This conversation is being replayed for context. Previous turns are provided below in chronological order. Treat them as authoritative chat history.\n\nUser: hello\n","runner_chat_session_id":"`+sess.ID+`","runner_chat_turn_id":"`+result.Turn.ID+`","runner_chat_user_message":"hello"}` {
 		t.Fatalf("unexpected meta json: %s", got)
+	}
+}
+
+func TestChatManagerUsesFinalPromptWithoutReplayWrapping(t *testing.T) {
+	d := openChatManagerTestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	sess, err := cm.EnsureSession(ctx, StartTurnRequest{
+		AppSessionKey:    "app-session",
+		RunnerID:         string(RunnerCodex),
+		ContinuationMode: ContinuationReplay,
+	})
+	if err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	finalPrompt := "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>\n\n<or3_context>\nreplay_history:\nUser: previous\nAssistant: answer\n</or3_context>\n\n<user_task>\nhello\n</user_task>\n"
+	result, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{
+		UserMessage:        "hello",
+		PromptMessage:      finalPrompt,
+		PromptMessageFinal: true,
+	})
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	defer func() { _ = cm.Manager.Abort(ctx, result.JobID) }()
+	run, ok, err := d.GetAgentCLIRun(ctx, result.JobID)
+	if err != nil || !ok {
+		t.Fatalf("GetAgentCLIRun: ok=%v err=%v", ok, err)
+	}
+	if run.Task != strings.TrimSpace(finalPrompt) {
+		t.Fatalf("expected final prompt as task, got %q", run.Task)
+	}
+	if strings.HasPrefix(run.Task, "System: This conversation is being replayed") {
+		t.Fatalf("final prompt was replay-wrapped: %q", run.Task)
+	}
+	if !strings.HasPrefix(run.Task, "<trusted_or3_system_instructions>") {
+		t.Fatalf("final prompt lost trusted prefix: %q", run.Task)
 	}
 }
 

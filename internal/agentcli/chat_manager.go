@@ -24,10 +24,11 @@ import (
 // event rows, and mirrors normalized user/assistant messages into the shared
 // `messages` table.
 type ChatManager struct {
-	DB      *db.DB
-	Manager *Manager
-	Jobs    *jobs.Registry
-	Broker  *approval.Broker
+	DB               *db.DB
+	Manager          *Manager
+	Jobs             *jobs.Registry
+	Broker           *approval.Broker
+	OnSuccessfulTurn func(sessionKey string)
 
 	mu          sync.Mutex
 	activeTurns map[string]turnContext // turnID -> cancel/job binding
@@ -40,23 +41,24 @@ type turnContext struct {
 
 // StartTurnRequest is the input for ChatManager.StartTurn.
 type StartTurnRequest struct {
-	AppSessionKey    string
-	RunnerID         string
-	UserMessage      string
-	Attachments      []turns.Attachment
-	PromptMessage    string
-	ContinuationMode ContinuationMode
-	Model            string
-	Mode             string
-	Isolation        string
-	Cwd              string
-	MaxTurns         int
-	TimeoutSeconds   int
-	Meta             map[string]any
-	AllowedTools     []string
-	RestrictTools    bool
-	ApprovalToken    string
-	RunnerPermission *RunnerPermissionRequest
+	AppSessionKey      string
+	RunnerID           string
+	UserMessage        string
+	Attachments        []turns.Attachment
+	PromptMessage      string
+	PromptMessageFinal bool
+	ContinuationMode   ContinuationMode
+	Model              string
+	Mode               string
+	Isolation          string
+	Cwd                string
+	MaxTurns           int
+	TimeoutSeconds     int
+	Meta               map[string]any
+	AllowedTools       []string
+	RestrictTools      bool
+	ApprovalToken      string
+	RunnerPermission   *RunnerPermissionRequest
 }
 
 type turnMirrorState struct {
@@ -164,12 +166,16 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 
 	prompt := ""
 	if req.ContinuationMode != ContinuationNative {
-		// Read prior turn history to build the replay prompt.
-		history, err := cm.DB.ListRunnerChatTurns(ctx, sess.ID, 0)
-		if err != nil {
-			return StartTurnResult{}, fmt.Errorf("list turns: %w", err)
+		if req.PromptMessageFinal {
+			prompt = promptMessage
+		} else {
+			// Read prior turn history to build the replay prompt.
+			history, err := cm.DB.ListRunnerChatTurns(ctx, sess.ID, 0)
+			if err != nil {
+				return StartTurnResult{}, fmt.Errorf("list turns: %w", err)
+			}
+			prompt = BuildReplayPrompt(toAgentcliHistory(history), promptMessage)
 		}
-		prompt = BuildReplayPrompt(toAgentcliHistory(history), promptMessage)
 	}
 
 	// Insert the new turn row (status=queued). UNIQUE partial index enforces
@@ -506,6 +512,9 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 		duration = db.NowMS() - turn.RequestedAt
 	}
 	log.Printf("chat manager: finalized runner chat turn runner=%s session=%s turn=%s status=%s duration_ms=%d", sess.RunnerID, sess.ID, turn.ID, status, duration)
+	if status == db.RunnerChatTurnStatusSucceeded && cm.OnSuccessfulTurn != nil {
+		cm.OnSuccessfulTurn(sess.AppSessionKey)
+	}
 
 	// Update chat_session_meta with the latest preview / counts.
 	cm.bumpChatSessionMeta(sess.AppSessionKey, sess.RunnerID, sess.ID, finalText)

@@ -439,6 +439,8 @@ type AgentCLIConfig struct {
 	RuntimeMode                map[string]string `json:"runtimeMode,omitempty"`
 	DefaultModels              map[string]string `json:"defaultModels,omitempty"`
 	NativeServerURLs           map[string]string `json:"nativeServerUrls,omitempty"`
+	CodexHomePath              string            `json:"codexHomePath,omitempty"`
+	CodexShadowHomePath        string            `json:"codexShadowHomePath,omitempty"`
 	NativeServerStartupSeconds int               `json:"nativeServerStartupSeconds"`
 	NativeServerIdleSeconds    int               `json:"nativeServerIdleSeconds"`
 	MaxConcurrent              int               `json:"maxConcurrent"`
@@ -684,10 +686,10 @@ type ApprovalDomainConfig struct {
 type ApprovalModeratorPreset string
 
 const (
-	ApprovalModeratorPresetBalanced  ApprovalModeratorPreset = "balanced"
-	ApprovalModeratorPresetCautious  ApprovalModeratorPreset = "cautious"
-	ApprovalModeratorPresetHandsOff  ApprovalModeratorPreset = "hands_off"
-	ApprovalModeratorPresetManual    ApprovalModeratorPreset = "manual"
+	ApprovalModeratorPresetBalanced ApprovalModeratorPreset = "balanced"
+	ApprovalModeratorPresetCautious ApprovalModeratorPreset = "cautious"
+	ApprovalModeratorPresetHandsOff ApprovalModeratorPreset = "hands_off"
+	ApprovalModeratorPresetManual   ApprovalModeratorPreset = "manual"
 )
 
 // ApprovalModeratorAction is the moderator decision for a risk level.
@@ -709,32 +711,32 @@ type ApprovalModeratorActionMap struct {
 
 // ApprovalModeratorConfig configures AI-assisted approval review.
 type ApprovalModeratorConfig struct {
-	Enabled             bool                         `json:"enabled"`
-	Preset              ApprovalModeratorPreset      `json:"preset"`
-	Provider            string                       `json:"provider"`
-	Model               string                       `json:"model"`
-	TimeoutSeconds      int                          `json:"timeoutSeconds"`
-	MaxPromptChars      int                          `json:"maxPromptChars"`
-	MaxSubjectChars     int                          `json:"maxSubjectChars"`
-	FailureAction       ApprovalModeratorAction      `json:"failureAction"`
-	UserPolicy          string                       `json:"userPolicy"`
-	Actions             ApprovalModeratorActionMap   `json:"actions"`
-	RequireUserAuthHigh bool                         `json:"requireUserAuthHigh"`
+	Enabled             bool                       `json:"enabled"`
+	Preset              ApprovalModeratorPreset    `json:"preset"`
+	Provider            string                     `json:"provider"`
+	Model               string                     `json:"model"`
+	TimeoutSeconds      int                        `json:"timeoutSeconds"`
+	MaxPromptChars      int                        `json:"maxPromptChars"`
+	MaxSubjectChars     int                        `json:"maxSubjectChars"`
+	FailureAction       ApprovalModeratorAction    `json:"failureAction"`
+	UserPolicy          string                     `json:"userPolicy"`
+	Actions             ApprovalModeratorActionMap `json:"actions"`
+	RequireUserAuthHigh bool                       `json:"requireUserAuthHigh"`
 }
 
 type ApprovalConfig struct {
-	Enabled                 bool                     `json:"enabled"`
-	HostID                  string                   `json:"hostId"`
-	KeyFile                 string                   `json:"keyFile"`
-	PairingCodeTTLSeconds   int                      `json:"pairingCodeTtlSeconds"`
-	PendingTTLSeconds       int                      `json:"pendingTtlSeconds"`
-	ApprovalTokenTTLSeconds int                      `json:"approvalTokenTtlSeconds"`
-	Moderator               ApprovalModeratorConfig  `json:"moderator"`
-	Pairing                 ApprovalDomainConfig     `json:"pairing"`
-	Exec                    ApprovalDomainConfig     `json:"exec"`
-	SkillExecution          ApprovalDomainConfig     `json:"skillExecution"`
-	SecretAccess            ApprovalDomainConfig     `json:"secretAccess"`
-	MessageSend             ApprovalDomainConfig     `json:"messageSend"`
+	Enabled                 bool                    `json:"enabled"`
+	HostID                  string                  `json:"hostId"`
+	KeyFile                 string                  `json:"keyFile"`
+	PairingCodeTTLSeconds   int                     `json:"pairingCodeTtlSeconds"`
+	PendingTTLSeconds       int                     `json:"pendingTtlSeconds"`
+	ApprovalTokenTTLSeconds int                     `json:"approvalTokenTtlSeconds"`
+	Moderator               ApprovalModeratorConfig `json:"moderator"`
+	Pairing                 ApprovalDomainConfig    `json:"pairing"`
+	Exec                    ApprovalDomainConfig    `json:"exec"`
+	SkillExecution          ApprovalDomainConfig    `json:"skillExecution"`
+	SecretAccess            ApprovalDomainConfig    `json:"secretAccess"`
+	MessageSend             ApprovalDomainConfig    `json:"messageSend"`
 }
 
 // SecurityConfig groups secret storage, auditing, profiles, and network policy.

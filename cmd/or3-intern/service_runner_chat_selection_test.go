@@ -488,10 +488,14 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	if err := database.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{TurnID: turn.ID, SessionID: sess.ID, JobID: "job-stream", Seq: 4, Type: "content.delta", Text: "ok", PayloadJSON: canonical}); err != nil {
 		t.Fatalf("AppendRunnerChatEvent canonical: %v", err)
 	}
+	spaceCanonical := `{"type":"content.delta","stream_kind":"assistant_text","delta":" "}`
+	if err := database.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{TurnID: turn.ID, SessionID: sess.ID, JobID: "job-stream", Seq: 5, Type: "content.delta", Text: " ", PayloadJSON: spaceCanonical}); err != nil {
+		t.Fatalf("AppendRunnerChatEvent whitespace canonical: %v", err)
+	}
 
 	list := mustServiceDoJSON(t, fixture, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/events?after_seq=3", sess.ID, turn.ID), "")
 	items := list["events"].([]any)
-	if len(items) != 1 {
+	if len(items) != 2 {
 		t.Fatalf("expected one canonical event, got %#v", list)
 	}
 	item := items[0].(map[string]any)
@@ -501,6 +505,14 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	payload := item["payload"].(map[string]any)
 	if payload["type"] != "content.delta" || payload["stream_kind"] != "command_output" || payload["delta"] != "ok" {
 		t.Fatalf("expected canonical payload in list response, got %#v", payload)
+	}
+	spaceItem := items[1].(map[string]any)
+	if spaceItem["text"] != " " {
+		t.Fatalf("expected whitespace text in list response, got %#v", spaceItem)
+	}
+	spacePayload := spaceItem["payload"].(map[string]any)
+	if spacePayload["delta"] != " " {
+		t.Fatalf("expected whitespace delta in list payload, got %#v", spacePayload)
 	}
 
 	path := fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/stream?after_seq=3", sess.ID, turn.ID)
@@ -517,6 +529,9 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	joined := strings.Join(readSSEEvents(t, resp), "\n")
 	if !strings.Contains(joined, `content.delta|{"id":4,"job_id":"job-stream","payload":{"type":"content.delta","stream_kind":"command_output","delta":"ok"}`) {
 		t.Fatalf("expected canonical payload in SSE stream, got %s", joined)
+	}
+	if !strings.Contains(joined, `content.delta|{"id":5,"job_id":"job-stream","payload":{"type":"content.delta","stream_kind":"assistant_text","delta":" "}`) {
+		t.Fatalf("expected whitespace delta in SSE stream, got %s", joined)
 	}
 }
 

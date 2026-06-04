@@ -54,14 +54,7 @@ func (a *OpenCodeAdapter) BuildChatCommand(req RunnerChatCommandRequest) (Comman
 	if mode == RunnerModeSandboxAuto {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	task := strings.TrimSpace(req.UserMessage)
-	if req.ContinuationMode != ContinuationNative || task == "" {
-		task = strings.TrimSpace(req.ReplayPrompt)
-		if task == "" {
-			task = strings.TrimSpace(req.UserMessage)
-		}
-	}
-	args = append(args, task)
+	args = append(args, ChatExecutionInput(req, strings.TrimSpace(req.ReplayPrompt)))
 	return CommandSpec{
 		RunnerID:    a.ID(),
 		Binary:      a.spec.Binary,
@@ -299,13 +292,7 @@ func (a *GeminiAdapter) ExtractNativeSessionRef(event AgentRunEvent) (string, bo
 }
 
 func chatCommandRunRequest(id RunnerID, req RunnerChatCommandRequest) AgentRunRequest {
-	task := strings.TrimSpace(req.UserMessage)
-	if req.ContinuationMode != ContinuationNative {
-		task = strings.TrimSpace(req.ReplayPrompt)
-	}
-	if task == "" {
-		task = strings.TrimSpace(req.UserMessage)
-	}
+	task := ChatExecutionInput(req, strings.TrimSpace(req.ReplayPrompt))
 	return AgentRunRequest{
 		ParentSessionKey: req.SessionID,
 		RunnerID:         string(id),
@@ -385,9 +372,9 @@ func normalizeOpenCodeStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 			Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload),
 		}}
 	case "message.part.delta":
-		text := extractString(firstNonNil(obj["delta"], obj["text"], obj["content"]))
+		text := extractStringPreserveWhitespace(firstNonNilPreserveString(obj["delta"], obj["text"], obj["content"]))
 		if text == "" {
-			text = extractString(obj["part"])
+			text = extractStringPreserveWhitespace(obj["part"])
 		}
 		if text == "" {
 			return nil
@@ -871,6 +858,15 @@ func firstNonNil(values ...any) any {
 	return nil
 }
 
+func firstNonNilPreserveString(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
 func runtimePayload(eventType string, fields map[string]any, raw json.RawMessage) json.RawMessage {
 	payload := map[string]any{"type": eventType}
 	for key, value := range fields {
@@ -878,7 +874,7 @@ func runtimePayload(eventType string, fields map[string]any, raw json.RawMessage
 			continue
 		}
 		value = sanitizeRawValue(value)
-		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" && !preserveWhitespacePayloadField(key) {
 			continue
 		}
 		payload[key] = value
@@ -888,6 +884,15 @@ func runtimePayload(eventType string, fields map[string]any, raw json.RawMessage
 	}
 	encoded, _ := json.Marshal(payload)
 	return encoded
+}
+
+func preserveWhitespacePayloadField(key string) bool {
+	switch key {
+	case "delta", "text", "content":
+		return true
+	default:
+		return false
+	}
 }
 
 func runtimeContentDeltaPayload(streamKind, delta string, raw json.RawMessage) json.RawMessage {
@@ -1025,7 +1030,7 @@ func normalizeOpenCodePartUpdated(raw AgentRunEvent, obj map[string]any) []Runne
 	}
 	partType := strings.ToLower(stringField(part, "type"))
 	if partType == "text" || partType == "reasoning" {
-		text := extractString(part["text"])
+		text := extractStringPreserveWhitespace(part["text"])
 		if text == "" {
 			return nil
 		}

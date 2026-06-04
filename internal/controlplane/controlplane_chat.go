@@ -171,8 +171,8 @@ func BuildRunnerChatEventResponse(e db.RunnerChatEvent) map[string]any {
 	if v := strings.TrimSpace(e.Stream); v != "" {
 		out["stream"] = v
 	}
-	if v := strings.TrimSpace(e.Text); v != "" {
-		out["text"] = v
+	if e.Text != "" {
+		out["text"] = e.Text
 	}
 	if v := strings.TrimSpace(e.JobID); v != "" {
 		out["job_id"] = v

@@ -225,6 +225,8 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 			}
 		}
 	}
+	cfg.AgentCLI.CodexHomePath = strings.TrimSpace(cfg.AgentCLI.CodexHomePath)
+	cfg.AgentCLI.CodexShadowHomePath = strings.TrimSpace(cfg.AgentCLI.CodexShadowHomePath)
 	if cfg.AgentCLI.NativeServerStartupSeconds <= 0 {
 		cfg.AgentCLI.NativeServerStartupSeconds = 10
 	}

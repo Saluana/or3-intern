@@ -234,6 +234,28 @@ func extractString(value any) string {
 	return ""
 }
 
+func extractStringPreserveWhitespace(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := extractStringPreserveWhitespace(item); strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	case map[string]any:
+		for _, key := range []string{"text", "message", "content", "response", "result"} {
+			if text := extractStringPreserveWhitespace(v[key]); strings.TrimSpace(text) != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
 func stringField(obj map[string]any, key string) string {
 	value, _ := obj[key].(string)
 	return strings.TrimSpace(value)

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
 )
 
@@ -30,6 +31,18 @@ func TestRunTurnFailsClosedWhenRunnerFirstHasNoOrchestrator(t *testing.T) {
 	_, err := app.RunTurn(context.Background(), TurnRequest{SessionKey: "s", Message: "hi"})
 	if !errors.Is(err, ErrRunnerTurnsDisabled) {
 		t.Fatalf("expected runner turns disabled error, got %v", err)
+	}
+}
+
+func TestServiceAppPrepareAgentRunUsesOrchestratorCompiler(t *testing.T) {
+	cfg := config.Default()
+	compiler := NewRunnerPromptCompiler(cfg, RunnerBootstrapContext{Soul: "service soul"}, RunnerContextDeps{})
+	app := &ServiceApp{
+		turnOrchestrator: &RunnerTurnOrchestrator{promptCompiler: compiler},
+	}
+	req := app.turnOrchestrator.PrepareAgentRunRequest(context.Background(), agentcli.AgentRunRequest{Task: "do work"})
+	if !strings.Contains(req.Task, "service soul") {
+		t.Fatalf("expected compiled OR3 context from service path, got %q", req.Task)
 	}
 }
 

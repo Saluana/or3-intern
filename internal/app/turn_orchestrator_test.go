@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -38,6 +39,22 @@ func TestRunnerTurnRequestFromBusEventDefaultRunner(t *testing.T) {
 	req := RunnerTurnRequestFromBusEvent(cfg, bus.Event{Type: bus.EventUserMessage, SessionKey: "cli:default", Message: "hi"})
 	if req.RunnerID != string(agentcli.RunnerOpenCode) {
 		t.Fatalf("expected default runner opencode, got %q", req.RunnerID)
+	}
+}
+
+func TestCompileRunnerChatPromptIncludesSoulInReplayEnvelope(t *testing.T) {
+	cfg := config.Default()
+	compiler := NewRunnerPromptCompiler(cfg, RunnerBootstrapContext{
+		Soul:              "SOUL.md content",
+		AgentInstructions: "AGENTS.md content",
+	}, RunnerContextDeps{})
+	o := &RunnerTurnOrchestrator{promptCompiler: compiler}
+	out := o.CompileRunnerChatPrompt(context.Background(), "cli:test", "hello", "user_message", nil)
+	if !strings.Contains(out.CompiledPrompt, "SOUL.md content") {
+		t.Fatalf("expected soul in compiled prompt: %q", out.CompiledPrompt)
+	}
+	if !strings.Contains(out.CompiledPrompt, "<trusted_or3_system_instructions>") {
+		t.Fatalf("expected trusted envelope: %q", out.CompiledPrompt)
 	}
 }
 

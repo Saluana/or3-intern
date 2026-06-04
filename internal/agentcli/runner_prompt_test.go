@@ -25,6 +25,25 @@ func TestBuildRunnerPromptTrustedBeforeUserTask(t *testing.T) {
 	}
 }
 
+func TestBuildRunnerPromptTruncatesVolatileBeforeStableAndUserTask(t *testing.T) {
+	longVolatile := strings.Repeat("v", 40*1024)
+	prompt := BuildRunnerPrompt(RunnerPromptContext{
+		TrustedSystemInstructions: []string{strings.Repeat("s", 4096)},
+		ContextBlocks:             []string{longVolatile},
+		UserMessage:               "protected user task",
+		MaxBytes:                  8 * 1024,
+	})
+	if !strings.Contains(prompt, "protected user task") {
+		t.Fatalf("user task must survive truncation: %q", prompt[:200])
+	}
+	if !strings.Contains(prompt, strings.Repeat("s", 32)) {
+		t.Fatalf("stable prefix should remain: %q", prompt[:200])
+	}
+	if strings.Contains(prompt, strings.Repeat("v", 32*1024)) {
+		t.Fatal("expected volatile memory to be truncated first")
+	}
+}
+
 func TestBuildRunnerPromptIncludesAutonomousContext(t *testing.T) {
 	prompt := BuildRunnerPrompt(RunnerPromptContext{
 		UserMessage: "tick",

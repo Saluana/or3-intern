@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 type openCodeStreamState struct {
@@ -142,7 +140,7 @@ func openCodeBusEventToStructuredPayload(bus map[string]any, state *openCodeStre
 			stringField(props, "partId"),
 			stringField(props, "part_id"),
 		)
-		delta := extractString(props["delta"])
+		delta := extractStringPreserveWhitespace(props["delta"])
 		if partID == "" || delta == "" {
 			return nil, false
 		}
@@ -156,7 +154,7 @@ func openCodeBusEventToStructuredPayload(bus map[string]any, state *openCodeStre
 		}
 		previousText := state.lastTextByPart[partID]
 		if previousText == "" {
-			previousText = extractString(existingPart["text"])
+			previousText = extractStringPreserveWhitespace(existingPart["text"])
 		}
 		nextText := previousText + delta
 		state.lastTextByPart[partID] = nextText
@@ -166,15 +164,6 @@ func openCodeBusEventToStructuredPayload(bus map[string]any, state *openCodeStre
 		deltaPart := cloneStringAnyMap(updatedPart)
 		deltaPart["text"] = delta
 		state.streamedText.Store(true)
-		// #region agent log
-		agentDebugLog("A-D", "opencode_events_stream.go:part-delta", "OpenCode part delta emitted", map[string]any{
-			"partKind":     stringField(updatedPart, "kind"),
-			"partType":     stringField(updatedPart, "type"),
-			"isReasoning":  openCodePartIsReasoning(updatedPart),
-			"deltaPreview": truncateDiagnostic(delta),
-			"partID":       partID,
-		})
-		// #endregion
 		return map[string]any{
 			"type": "text",
 			"part": deltaPart,
@@ -259,15 +248,6 @@ func (state *openCodeStreamState) emitOpenCodeStreamTextDelta(part map[string]an
 	state.streamedText.Store(true)
 	deltaPart := cloneStringAnyMap(part)
 	deltaPart["text"] = delta
-	// #region agent log
-	agentDebugLog("A-D", "opencode_events_stream.go:text-delta", "OpenCode text delta emitted", map[string]any{
-		"partKind":     stringField(part, "kind"),
-		"partType":     stringField(part, "type"),
-		"isReasoning":  openCodePartIsReasoning(part),
-		"deltaPreview": truncateDiagnostic(delta),
-		"partID":       firstNonEmpty(stringField(part, "id"), stringField(part, "callID"), stringField(part, "messageID")),
-	})
-	// #endregion
 	return map[string]any{
 		"type": "text",
 		"part": deltaPart,
@@ -355,7 +335,7 @@ func openCodeTextDeltaFromPart(part map[string]any, state *openCodeStreamState) 
 		return ""
 	}
 	partID := firstNonEmpty(stringField(part, "id"), stringField(part, "callID"), stringField(part, "messageID"), "text")
-	newText := extractString(part["text"])
+	newText := extractStringPreserveWhitespace(part["text"])
 	if newText == "" {
 		return ""
 	}
@@ -371,26 +351,4 @@ func openCodeTextDeltaFromPart(part map[string]any, state *openCodeStreamState) 
 		return ""
 	}
 	return newText
-}
-
-func agentDebugLog(hypothesisID, location, message string, data map[string]any) {
-	entry := map[string]any{
-		"sessionId":    "3fa1b1",
-		"runId":        "post-fix",
-		"hypothesisId": hypothesisID,
-		"location":     location,
-		"message":      message,
-		"data":         data,
-		"timestamp":    time.Now().UnixMilli(),
-	}
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	file, err := os.OpenFile("/Users/brendon/Documents/or3-intern-app/.cursor/debug-3fa1b1.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	_, _ = file.Write(append(raw, '\n'))
 }

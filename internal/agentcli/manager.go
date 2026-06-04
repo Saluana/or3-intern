@@ -424,7 +424,11 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	if runnerID == "" {
 		runnerID = RunnerID(run.RunnerID)
 	}
-	additionalEnv := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON))
+	additionalEnv, envErr := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON))
+	if envErr != nil {
+		m.finalizeRun(runCtx, run, db.AgentCLIStatusFailed, envErr.Error(), ProcessOutput{ExitCode: -1, DurationMS: 0})
+		return
+	}
 
 	// Build child environment — use os.Environ() as the base so PATH, HOME,
 	// and TMPDIR are preserved through the allowlist filter.
@@ -527,7 +531,9 @@ func (m *Manager) tryExecuteNativeRun(ctx context.Context, run db.AgentCLIRun) (
 	}
 	env := nativeEnv(cfg)
 	runnerID := RunnerID(run.RunnerID)
-	if additionalEnv := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON)); len(additionalEnv) > 0 {
+	if additionalEnv, err := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON)); err != nil {
+		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error()}, true
+	} else if len(additionalEnv) > 0 {
 		env = mergeEnvOverlay(env, additionalEnv)
 	}
 	startedPayload, _ := json.Marshal(map[string]any{
@@ -910,21 +916,31 @@ func (m *Manager) DetectOptions() DetectOptions {
 }
 
 func (m *Manager) detectOptions(cfg config.AgentCLIConfig) DetectOptions {
+	additionalEnv := map[string]string(nil)
+	if env, err := codexHomeEnv(cfg); err == nil {
+		additionalEnv = env
+	}
 	return DetectOptions{
 		DisabledRunners: cfg.DisabledRunners,
-		Env:             BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil),
+		Env:             BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, additionalEnv),
 	}
 }
 
-func (m *Manager) runnerAdditionalEnv(runnerID RunnerID, meta map[string]any) map[string]string {
-	if m == nil || runnerID != RunnerOpenCode {
-		return nil
+func (m *Manager) runnerAdditionalEnv(runnerID RunnerID, meta map[string]any) (map[string]string, error) {
+	if m == nil {
+		return nil, nil
+	}
+	if runnerID == RunnerCodex {
+		return codexHomeEnv(m.configSnapshot())
+	}
+	if runnerID != RunnerOpenCode {
+		return nil, nil
 	}
 	directories := m.openCodeExternalDirectoriesSnapshot()
 	if permission, ok := runnerPermissionFromMeta(meta); ok {
 		directories = append(directories, permission.TargetPath)
 	}
-	return buildOpenCodeConfigEnv(directories)
+	return buildOpenCodeConfigEnv(directories), nil
 }
 
 func (m *Manager) openCodeExternalDirectoriesSnapshot() []string {

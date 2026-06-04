@@ -159,6 +159,69 @@ func TestOpenCodeBusSuppressesUserTextParts(t *testing.T) {
 	}
 }
 
+func TestOpenCodeBusPreservesAssistantDeltaWhitespace(t *testing.T) {
+	state := newOpenCodeStreamState()
+	state.storePart(map[string]any{
+		"type": "text",
+		"role": "assistant",
+		"id":   "part_assistant",
+		"text": "Hello",
+	})
+	state.lastTextByPart["part_assistant"] = "Hello"
+
+	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.delta",
+		"properties": map[string]any{
+			"partID": "part_assistant",
+			"delta":  " world ",
+		},
+	}, state)
+	if !ok {
+		t.Fatal("expected assistant delta payload")
+	}
+	part := mapField(payload, "part")
+	if text, _ := part["text"].(string); text != " world " {
+		t.Fatalf("expected delta whitespace to be preserved, got %#v", part)
+	}
+}
+
+func TestOpenCodeBusPreservesCumulativeTextBoundaryWhitespace(t *testing.T) {
+	state := newOpenCodeStreamState()
+	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"part": map[string]any{
+				"type": "text",
+				"role": "assistant",
+				"id":   "part_assistant",
+				"text": "Hello",
+			},
+		},
+	}, state)
+	if !ok || mapField(payload, "part")["text"] != "Hello" {
+		t.Fatalf("expected initial assistant text payload, got ok=%v payload=%#v", ok, payload)
+	}
+
+	payload, ok = openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"part": map[string]any{
+				"type": "text",
+				"role": "assistant",
+				"id":   "part_assistant",
+				"text": "Hello ",
+			},
+		},
+	}, state)
+	if !ok {
+		t.Fatal("expected cumulative assistant text delta")
+	}
+	part := mapField(payload, "part")
+	if text, _ := part["text"].(string); text != " " {
+		t.Fatalf("expected boundary space delta to be preserved, got %#v", part)
+	}
+}
+
 func TestOpenCodeBusPreservesReasoningTextPartMetadata(t *testing.T) {
 	state := newOpenCodeStreamState()
 	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{

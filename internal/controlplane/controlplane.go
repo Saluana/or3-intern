@@ -781,7 +781,7 @@ func CollectCapabilitiesReportWithMCPStatus(cfg config.Config, broker *approval.
 		NetworkPolicy:      cfg.Security.Network,
 		HeartbeatEnabled:   cfg.Heartbeat.Enabled,
 		CronEnabled:        cfg.Cron.Enabled,
-		ApprovalBroker: approvalBrokerCapabilities(cfg, broker),
+		ApprovalBroker:     approvalBrokerCapabilities(cfg, broker),
 	}
 	report.MCPServers = mcpServerCapabilities(cfg, mcpStatus)
 	report.EnabledMCPServers = enabledMCPServers(report.MCPServers, cfg)
@@ -1119,13 +1119,14 @@ func DescribeUnavailable(err error) error {
 // BuildAgentCLIRunResponse converts a persisted agent_cli_runs row into a
 // sanitized JSON map for the agents API.
 func BuildAgentCLIRunResponse(run db.AgentCLIRun) map[string]any {
+	displayTask := displayTaskForAgentCLIRun(run)
 	out := map[string]any{
 		"job_id":             run.JobID,
 		"run_id":             run.ID,
 		"kind":               "agent_cli:" + run.RunnerID,
 		"runner_id":          run.RunnerID,
 		"parent_session_key": run.ParentSessionKey,
-		"task":               run.Task,
+		"task":               displayTask,
 		"mode":               run.Mode,
 		"isolation":          run.Isolation,
 		"status":             run.Status,
@@ -1162,7 +1163,23 @@ func BuildAgentCLIRunResponse(run db.AgentCLIRun) map[string]any {
 	if model := strings.TrimSpace(run.Model); model != "" {
 		out["model"] = model
 	}
+	if displayTask != strings.TrimSpace(run.Task) {
+		out["execution_prompt_injected"] = true
+	}
 	return out
+}
+
+func displayTaskForAgentCLIRun(run db.AgentCLIRun) string {
+	meta := map[string]any{}
+	if strings.TrimSpace(run.MetaJSON) != "" && strings.TrimSpace(run.MetaJSON) != "{}" {
+		_ = json.Unmarshal([]byte(run.MetaJSON), &meta)
+	}
+	for _, key := range []string{"ui_task", "runner_chat_user_message"} {
+		if value, ok := meta[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(run.Task)
 }
 
 // BuildAgentCLIRunListResponse renders a list of persisted agent CLI runs.

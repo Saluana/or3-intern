@@ -26,9 +26,42 @@ func BuildRunnerPrompt(ctx RunnerPromptContext) string {
 	if maxBytes <= 0 {
 		maxBytes = runnerPromptDefaultMaxBytes
 	}
+	user := strings.TrimSpace(ctx.UserMessage)
+	userBlock := runnerPromptUserBlock(user)
+	stable := runnerPromptTrustedBlock(ctx.TrustedSystemInstructions)
+	volatile := runnerPromptContextBlock(ctx.TriggerKind, ctx.ContextBlocks)
+	prefixBudget := maxBytes - len(userBlock)
+	if prefixBudget < 0 {
+		if len(userBlock) > maxBytes {
+			return userBlock[len(userBlock)-maxBytes:]
+		}
+		return userBlock
+	}
+	if len(stable)+len(volatile) > prefixBudget {
+		volatileBudget := prefixBudget - len(stable)
+		if volatileBudget < 0 {
+			volatileBudget = 0
+		}
+		volatile = truncateRunnerPromptPrefix(volatile, volatileBudget)
+		if len(stable)+len(volatile) > prefixBudget {
+			stableBudget := prefixBudget - len(volatile)
+			if stableBudget < 0 {
+				stableBudget = 0
+			}
+			stable = truncateRunnerPromptPrefix(stable, stableBudget)
+		}
+	}
+	return stable + volatile + userBlock
+}
+
+func runnerPromptUserBlock(user string) string {
+	return "\n<user_task>\n" + user + "\n</user_task>\n"
+}
+
+func runnerPromptTrustedBlock(blocks []string) string {
 	var b strings.Builder
 	b.WriteString("<trusted_or3_system_instructions>\n")
-	for _, block := range ctx.TrustedSystemInstructions {
+	for _, block := range blocks {
 		block = strings.TrimSpace(block)
 		if block == "" {
 			continue
@@ -37,14 +70,18 @@ func BuildRunnerPrompt(ctx RunnerPromptContext) string {
 		b.WriteByte('\n')
 	}
 	b.WriteString("</trusted_or3_system_instructions>\n")
+	return b.String()
+}
 
+func runnerPromptContextBlock(triggerKind string, blocks []string) string {
+	var b strings.Builder
 	b.WriteString("\n<or3_context>\n")
-	if ctx.TriggerKind != "" {
+	if triggerKind != "" {
 		b.WriteString("trigger: ")
-		b.WriteString(strings.TrimSpace(ctx.TriggerKind))
+		b.WriteString(strings.TrimSpace(triggerKind))
 		b.WriteByte('\n')
 	}
-	for _, block := range ctx.ContextBlocks {
+	for _, block := range blocks {
 		block = strings.TrimSpace(block)
 		if block == "" {
 			continue
@@ -53,34 +90,21 @@ func BuildRunnerPrompt(ctx RunnerPromptContext) string {
 		b.WriteByte('\n')
 	}
 	b.WriteString("</or3_context>\n")
-
-	user := strings.TrimSpace(ctx.UserMessage)
-	b.WriteString("\n<user_task>\n")
-	b.WriteString(user)
-	b.WriteString("\n</user_task>\n")
-
-	out := b.String()
-	if len(out) > maxBytes {
-		out = truncateRunnerPrompt(out, maxBytes, user)
-	}
-	return out
+	return b.String()
 }
 
-func truncateRunnerPrompt(full string, maxBytes int, userMessage string) string {
-	user := strings.TrimSpace(userMessage)
-	userBlock := "\n<user_task>\n" + user + "\n</user_task>\n"
-	if len(userBlock) >= maxBytes {
-		return userBlock[len(userBlock)-maxBytes:]
+func truncateRunnerPromptPrefix(prefix string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
 	}
-	keep := maxBytes - len(userBlock)
-	if keep <= 0 {
-		return userBlock
+	if len(prefix) <= maxBytes {
+		return prefix
 	}
-	prefix := full[:len(full)-len(userBlock)]
-	if len(prefix) > keep {
-		prefix = "[...truncated...]\n" + prefix[len(prefix)-keep+len("[...truncated...]\n"):]
+	marker := "[...truncated...]\n"
+	if maxBytes <= len(marker) {
+		return prefix[len(prefix)-maxBytes:]
 	}
-	return prefix + userBlock
+	return marker + prefix[len(prefix)-(maxBytes-len(marker)):]
 }
 
 // PromptBuilderVersion returns the active runner prompt schema version for caches.

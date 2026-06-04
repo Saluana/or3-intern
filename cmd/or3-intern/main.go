@@ -510,7 +510,7 @@ func main() {
 	chatManager := buildRuntimeChatManager(cfg, d, agentCLIManager, serviceJobs, approvalBroker)
 	turnOrchestrator := buildRunnerTurnOrchestrator(cfg, chatManager, d, ret, docRetriever, embedProv)
 
-	cronSvc = buildRuntimeCronService(cfg, b, agentCLIManager)
+	cronSvc = buildRuntimeCronService(cfg, b, agentCLIManager, turnOrchestrator)
 	if cronSvc != nil {
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
@@ -519,7 +519,9 @@ func main() {
 	}
 	if consolidator, scheduler := startMemoryConsolidation(ctx, cfg, d, del); consolidator != nil {
 		_ = consolidator
-		_ = scheduler
+		if chatManager != nil && scheduler != nil {
+			chatManager.OnSuccessfulTurn = scheduler.Trigger
+		}
 	}
 
 	var heartbeatSvc *heartbeat.Service

@@ -395,7 +395,7 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 			req.OnEvent(e)
 		}
 	}
-	prompt := firstNonEmpty(req.Chat.UserMessage, req.Run.Task)
+	prompt := ChatExecutionInput(req.Chat, req.Run.Task)
 	messageBody := map[string]any{
 		"parts": []map[string]any{{"type": "text", "text": prompt}},
 	}
@@ -849,7 +849,7 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 		threadID = req.Chat.NativeSessionRef
 	}
 	emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": "thread.started", "thread_id": threadID, "raw": threadResp})
-	turnParams := map[string]any{"threadId": threadID, "input": req.Chat.UserMessage, "cwd": req.Run.Cwd}
+	turnParams := map[string]any{"threadId": threadID, "input": ChatExecutionInput(req.Chat, req.Run.Task), "cwd": req.Run.Cwd}
 	selectedModel := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)])
 	if model := selectedModel; model != "" {
 		turnParams["model"] = model

@@ -34,6 +34,24 @@ func TestBuildReplayPromptSkipsIncompleteTurns(t *testing.T) {
 	}
 }
 
+func TestBuildReplayHistoryContextBlockExcludesCurrentUserTask(t *testing.T) {
+	block := BuildReplayHistoryContextBlockBounded([]RunnerChatTurn{
+		{Sequence: 1, UserText: "previous user", FinalText: "previous answer", Status: "completed"},
+		{Sequence: 2, UserText: "running user", FinalText: "partial", Status: "running"},
+	}, 10, 4096)
+	for _, want := range []string{"replay_history:", "previous user", "previous answer"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("context block missing %q: %s", want, block)
+		}
+	}
+	if strings.Contains(block, "running user") {
+		t.Fatalf("running turn leaked into context block: %s", block)
+	}
+	if strings.Contains(block, "<user_task>") || strings.Contains(block, "\nUser: current") {
+		t.Fatalf("context block must not include current user task: %s", block)
+	}
+}
+
 func TestBuildReplayPromptByteLimitKeepsUserMessage(t *testing.T) {
 	prompt := BuildReplayPromptBounded([]RunnerChatTurn{
 		{Sequence: 1, UserText: strings.Repeat("u", 2048), FinalText: strings.Repeat("a", 2048), Status: "succeeded"},

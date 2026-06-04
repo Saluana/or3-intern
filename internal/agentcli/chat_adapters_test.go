@@ -301,7 +301,7 @@ func TestCodexNativeResumeSandboxAutoUsesSupportedArgs(t *testing.T) {
 	}
 }
 
-func TestNativeFirstTurnUsesUserMessageAndStreamOutput(t *testing.T) {
+func TestNativeFirstTurnUsesCompiledBootstrapWhenProvided(t *testing.T) {
 	gemini := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
 	cmd, err := gemini.BuildChatCommand(RunnerChatCommandRequest{
 		ReplayPrompt:     "full replay prompt",
@@ -312,7 +312,7 @@ func TestNativeFirstTurnUsesUserMessageAndStreamOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildChatCommand: %v", err)
 	}
-	assertArgsEqual(t, []string{"--prompt", "start native session", "--output-format", "stream-json", "--approval-mode", "auto_edit"}, cmd.Args)
+	assertArgsEqual(t, []string{"--prompt", "full replay prompt", "--output-format", "stream-json", "--approval-mode", "auto_edit"}, cmd.Args)
 	if cmd.OutputMode != OutputJSONL {
 		t.Fatalf("expected native Gemini chat to use JSONL output, got %q", cmd.OutputMode)
 	}
@@ -427,6 +427,27 @@ func TestCodexDeltaNormalizationPreservesWhitespace(t *testing.T) {
 	output := codex.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 2, Payload: json.RawMessage(`{"method":"item/commandExecution/outputDelta","params":{"delta":"line\n"}}`)})
 	if len(output) != 1 || output[0].Text != "line\n" {
 		t.Fatalf("expected command delta newline to be preserved, got %#v", output)
+	}
+}
+
+func TestOpenCodeDeltaNormalizationPreservesWhitespace(t *testing.T) {
+	opencode := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	events := opencode.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 1, Payload: json.RawMessage(`{"type":"message.part.delta","delta":" hello "}`)})
+	if len(events) != 1 || events[0].Text != " hello " {
+		t.Fatalf("expected assistant delta whitespace to be preserved, got %#v", events)
+	}
+
+	updated := opencode.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 2, Payload: json.RawMessage(`{"type":"message.part.updated","part":{"type":"text","text":" world "}}`)})
+	if len(updated) != 1 || updated[0].Text != " world " {
+		t.Fatalf("expected updated text whitespace to be preserved, got %#v", updated)
+	}
+
+	spaceOnly := opencode.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 3, Payload: json.RawMessage(`{"type":"message.part.delta","delta":" "}`)})
+	if len(spaceOnly) != 1 || spaceOnly[0].Text != " " {
+		t.Fatalf("expected whitespace-only assistant delta to be preserved, got %#v", spaceOnly)
+	}
+	if !strings.Contains(string(spaceOnly[0].Payload), `"delta":" "`) {
+		t.Fatalf("expected canonical payload to preserve whitespace-only delta, got %s", string(spaceOnly[0].Payload))
 	}
 }
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ import (
 )
 
 const serviceRunnerChatBodyLimit = 64 * 1024
+const serviceRunnerChatPromptCompileTimeout = 8 * time.Second
 
 func (s *serviceServer) runnerChatWriteUnavailable() bool {
 	return s == nil || s.chatManager == nil || s.chatManager.Manager == nil
@@ -262,13 +265,31 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		if continuation == "" {
 			continuation = agentcli.ContinuationMode(sess.ContinuationMode)
 		}
-		compiled, err := s.turnOrchestrator.CompileRunnerChatPromptForSession(r.Context(), sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
+		compileCtx, cancelCompile := context.WithTimeout(r.Context(), serviceRunnerChatPromptCompileTimeout)
+		compiled, err := s.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
+		cancelCompile()
 		if err != nil {
-			writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat prompt unavailable", err)
-			return
+			if r.Context().Err() != nil {
+				writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat prompt unavailable", err)
+				return
+			}
+			log.Printf("runner chat: prompt compile failed; falling back to raw user message: session=%s err=%v", sess.ID, err)
+			if req.Meta == nil {
+				req.Meta = map[string]any{}
+			}
+			req.Meta["runner_prompt_compile_error"] = err.Error()
+			req.Meta["runner_prompt_compile_fallback"] = true
+		} else if compileCtx.Err() == context.DeadlineExceeded {
+			log.Printf("runner chat: prompt compile timed out; falling back to raw user message: session=%s", sess.ID)
+			if req.Meta == nil {
+				req.Meta = map[string]any{}
+			}
+			req.Meta["runner_prompt_compile_error"] = "prompt compile timed out"
+			req.Meta["runner_prompt_compile_fallback"] = true
+		} else {
+			promptMessage = compiled.CompiledPrompt
+			promptMessageFinal = true
 		}
-		promptMessage = compiled.CompiledPrompt
-		promptMessageFinal = true
 	}
 	startReq := agentcli.StartTurnRequest{
 		ContinuationMode:   agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),

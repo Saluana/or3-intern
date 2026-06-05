@@ -71,6 +71,8 @@ type runnerApprovalState struct {
 	Message  string
 }
 
+const runnerChatMessageEventPayloadLimit = 300
+
 // StartTurnResult contains the durable identifiers for a started turn.
 type StartTurnResult struct {
 	Session db.RunnerChatSession
@@ -493,6 +495,9 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 	if errMessage != "" {
 		assistantPayload["error"] = errMessage
 	}
+	if events := cm.runnerChatEventsPayload(turn.ID); len(events) > 0 {
+		assistantPayload["runner_chat_events"] = events
+	}
 	assistantMsgID, err := cm.appendMessage(context.Background(), sess.AppSessionKey, "assistant", assistantContent, assistantPayload)
 	if err != nil {
 		log.Printf("chat manager: persist assistant message failed: turn=%s err=%v", turn.ID, err)
@@ -664,6 +669,43 @@ func (cm *ChatManager) bumpChatSessionMeta(appSessionKey, runnerID, runnerChatSe
 	if err != nil {
 		log.Printf("chat manager: upsert chat_session_meta failed: session=%s err=%v", appSessionKey, err)
 	}
+}
+
+func (cm *ChatManager) runnerChatEventsPayload(turnID string) []map[string]any {
+	if cm == nil || cm.DB == nil || strings.TrimSpace(turnID) == "" {
+		return nil
+	}
+	events, err := cm.DB.ListRunnerChatEvents(context.Background(), turnID, 0, runnerChatMessageEventPayloadLimit)
+	if err != nil {
+		log.Printf("chat manager: list events for assistant payload failed: turn=%s err=%v", turnID, err)
+		return nil
+	}
+	out := make([]map[string]any, 0, len(events))
+	for _, ev := range events {
+		item := map[string]any{
+			"type": ev.Type,
+			"seq":  ev.Seq,
+		}
+		if strings.TrimSpace(ev.JobID) != "" {
+			item["job_id"] = ev.JobID
+		}
+		if strings.TrimSpace(ev.Stream) != "" {
+			item["stream"] = ev.Stream
+		}
+		if ev.Text != "" {
+			item["text"] = ev.Text
+		}
+		if strings.TrimSpace(ev.PayloadJSON) != "" {
+			var payload any
+			if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err == nil {
+				item["payload"] = payload
+			} else {
+				item["payload_json"] = ev.PayloadJSON
+			}
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (cm *ChatManager) countMessages(sessionKey string) (int64, error) {

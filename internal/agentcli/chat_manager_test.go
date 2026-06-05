@@ -2,6 +2,7 @@ package agentcli
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -169,5 +170,56 @@ func TestChatManagerPersistsNormalizedRunnerEvents(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != "text_delta" || events[0].Text != "hello" {
 		t.Fatalf("unexpected normalized events: %#v", events)
+	}
+}
+
+func TestChatManagerRunnerChatEventsPayloadPreservesCanonicalPayload(t *testing.T) {
+	d := openChatManagerTestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	sess, err := d.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{
+		ID:               "rcs-payload",
+		AppSessionKey:    "app-session",
+		RunnerID:         string(RunnerCodex),
+		ContinuationMode: string(ContinuationReplay),
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	turn, err := d.CreateRunnerChatTurn(ctx, db.RunnerChatTurn{
+		ID:               "rct-payload",
+		SessionID:        sess.ID,
+		Status:           db.RunnerChatTurnStatusQueued,
+		UserMessage:      "hello",
+		ContinuationMode: string(ContinuationReplay),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunnerChatTurn: %v", err)
+	}
+	payload := `{"type":"item.started","item_type":"command_execution","status":"inProgress","title":"Command run"}`
+	if err := d.AppendRunnerChatEvent(ctx, db.RunnerChatEvent{
+		TurnID:      turn.ID,
+		SessionID:   sess.ID,
+		JobID:       "job-payload",
+		Seq:         4,
+		Type:        "item.started",
+		Text:        "go test ./...",
+		PayloadJSON: payload,
+	}); err != nil {
+		t.Fatalf("AppendRunnerChatEvent: %v", err)
+	}
+	events := cm.runnerChatEventsPayload(turn.ID)
+	if len(events) != 1 {
+		t.Fatalf("expected one event payload, got %#v", events)
+	}
+	if events[0]["type"] != "item.started" || events[0]["text"] != "go test ./..." || events[0]["job_id"] != "job-payload" {
+		t.Fatalf("expected event fields preserved, got %#v", events[0])
+	}
+	encoded, err := json.Marshal(events[0]["payload"])
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"item_type":"command_execution"`) {
+		t.Fatalf("expected canonical payload object, got %s", string(encoded))
 	}
 }

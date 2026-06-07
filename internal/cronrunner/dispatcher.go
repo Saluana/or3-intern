@@ -2,7 +2,6 @@ package cronrunner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -11,9 +10,6 @@ import (
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 )
-
-// ErrLegacyCronAgentTurn is returned when legacy agent_turn cron payloads cannot run.
-var ErrLegacyCronAgentTurn = errors.New("legacy cron agent_turn requires agentCLI.enabled; use agent_cli_run for runner jobs")
 
 type AgentCLIEnqueuer interface {
 	Enqueue(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error)
@@ -51,43 +47,11 @@ func NewWithPreparer(b *bus.Bus, defaultSessionKey string, agentCLI AgentCLIEnqu
 
 func (d Dispatcher) Run(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
 	switch job.Payload.Kind {
-	case cron.PayloadAgentTurn, cron.PayloadSystemEvent:
-		return d.publishAgentTurn(job, job.Payload)
 	case cron.PayloadAgentCLIRun:
 		return d.enqueueAgentRun(ctx, job, job.Payload)
 	default:
 		return cron.RunResult{}, fmt.Errorf("unsupported cron payload kind: %s", job.Payload.Kind)
 	}
-}
-
-func (d Dispatcher) publishAgentTurn(job cron.CronJob, payload cron.CronPayload) (cron.RunResult, error) {
-	if !d.AgentCLIEnabled {
-		return cron.RunResult{}, fmt.Errorf("%w: recreate the job as agent_cli_run or enable agentCLI.enabled", ErrLegacyCronAgentTurn)
-	}
-	msg := payload.Message
-	if strings.TrimSpace(msg) == "" {
-		msg = "cron job: " + job.Name
-	}
-	sessionKey := payload.SessionKey
-	if strings.TrimSpace(sessionKey) == "" {
-		sessionKey = d.DefaultSessionKey
-	}
-	ev := bus.Event{
-		Type:       bus.EventCron,
-		SessionKey: sessionKey,
-		Channel:    payload.Channel,
-		From:       payload.To,
-		Message:    msg,
-		Meta: map[string]any{
-			"job_id":            job.ID,
-			"cron_payload_kind": payload.Kind,
-			"runner_first":      true,
-		},
-	}
-	if ok := d.Bus.Publish(ev); !ok {
-		return cron.RunResult{}, fmt.Errorf("event bus full")
-	}
-	return cron.RunResult{}, nil
 }
 
 func (d Dispatcher) enqueueAgentRun(ctx context.Context, job cron.CronJob, payload cron.CronPayload) (cron.RunResult, error) {

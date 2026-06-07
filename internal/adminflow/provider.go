@@ -10,9 +10,8 @@ import (
 type AdminBrainKind string
 
 const (
-	AdminBrainRunner         AdminBrainKind = "runner"
-	AdminBrainAPIKeyProvider AdminBrainKind = "apiKeyProvider"
-	AdminBrainUnavailable    AdminBrainKind = "unavailable"
+	AdminBrainRunner      AdminBrainKind = "runner"
+	AdminBrainUnavailable AdminBrainKind = "unavailable"
 )
 
 type AdminBrainProvider struct {
@@ -25,54 +24,34 @@ type AdminBrainProvider struct {
 }
 
 // DetectAdminBrainProvider chooses how settings health chat runs AI turns.
-// Admin Assistant turns rely on in-process doctor_* service tools, so only the
-// service runtime can be advertised as tool-capable Admin Brain.
 func DetectAdminBrainProvider(cfg config.Config, runners []agentcli.RunnerInfo) AdminBrainProvider {
-	if providerKey := configuredAdminBrainProviderKey(cfg); providerKey != "" {
+	for _, runner := range runners {
+		id := strings.TrimSpace(runner.ID)
+		if id == "" || strings.EqualFold(id, string(agentcli.RunnerOR3)) {
+			continue
+		}
 		return AdminBrainProvider{
-			Kind:        AdminBrainAPIKeyProvider,
+			Kind:        AdminBrainRunner,
 			Available:   true,
-			DisplayName: "Admin Brain",
-			ProviderKey: providerKey,
+			DisplayName: runner.DisplayName,
+			RunnerID:    id,
+		}
+	}
+	if cfg.AgentCLI.Enabled {
+		runnerID := string(agentcli.ResolveDefaultRunner(cfg))
+		if strings.TrimSpace(runnerID) != "" && !strings.EqualFold(runnerID, string(agentcli.RunnerOR3)) {
+			return AdminBrainProvider{
+				Kind:        AdminBrainRunner,
+				Available:   true,
+				DisplayName: runnerID,
+				RunnerID:    runnerID,
+			}
 		}
 	}
 	return AdminBrainProvider{
 		Kind:        AdminBrainUnavailable,
 		Available:   false,
 		DisplayName: "Admin Brain",
-		Reason:      "Basic Doctor is available. Configure an in-process model provider so Admin Assistant can use Doctor tools.",
-	}
-}
-
-func configuredAdminBrainProviderKey(cfg config.Config) string {
-	if strings.TrimSpace(cfg.Provider.APIKey) != "" {
-		key := strings.TrimSpace(cfg.ModelRouting.Chat.Primary.Provider)
-		if key == "" {
-			key = inferProviderKeyFromBase(cfg.Provider.APIBase)
-		}
-		if key == "" {
-			key = "provider"
-		}
-		return key
-	}
-	for key, profile := range cfg.Providers {
-		if strings.TrimSpace(profile.APIKey) != "" {
-			return strings.TrimSpace(key)
-		}
-	}
-	return ""
-}
-
-func inferProviderKeyFromBase(apiBase string) string {
-	base := strings.ToLower(strings.TrimSpace(apiBase))
-	switch {
-	case strings.Contains(base, "openrouter"):
-		return "openrouter"
-	case strings.Contains(base, "openai"):
-		return "openai"
-	case base != "":
-		return "custom"
-	default:
-		return ""
+		Reason:      "Basic Doctor is available. Configure an external runner so Admin Assistant can answer through runner chat.",
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"or3-intern/internal/compat"
-	"or3-intern/internal/providers"
 	"or3-intern/internal/turns"
 )
 
@@ -24,19 +23,6 @@ type serviceTurnRequest struct {
 	ProfileName    string
 	ApprovalToken  string
 	Warnings       []string
-}
-
-type serviceSubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	TimeoutSeconds   int
-	Meta             map[string]any
-	ProfileName      string
-	Channel          string
-	ReplyTo          string
-	ApprovalToken    string
-	Warnings         []string
 }
 
 type serviceAgentRunRequest struct {
@@ -100,33 +86,6 @@ type serviceTurnRequestPayload struct {
 	ReplayToolCallCamel   *serviceReplayToolCallPayload `json:"replayToolCall"`
 }
 
-type serviceSubagentRequestPayload struct {
-	ParentSessionKey      string                    `json:"parent_session_key"`
-	ParentSessionKeyCamel string                    `json:"parentSessionKey"`
-	SessionKey            string                    `json:"session_key"`
-	InternSessionKey      string                    `json:"intern_session_key"`
-	SessionKeyCamel       string                    `json:"sessionKey"`
-	InternSessionKeyCamel string                    `json:"internSessionKey"`
-	Task                  string                    `json:"task"`
-	PromptSnapshot        []providers.ChatMessage   `json:"prompt_snapshot"`
-	PromptSnapshotCamel   []providers.ChatMessage   `json:"promptSnapshot"`
-	AllowedTools          []string                  `json:"allowed_tools"`
-	AllowedToolsCamel     []string                  `json:"allowedTools"`
-	ToolPolicy            *serviceToolPolicyPayload `json:"tool_policy"`
-	ToolPolicyCamel       *serviceToolPolicyPayload `json:"toolPolicy"`
-	TimeoutSeconds        json.Number               `json:"timeout_seconds"`
-	TimeoutSecondsCamel   json.Number               `json:"timeoutSeconds"`
-	Timeout               json.Number               `json:"timeout"`
-	Meta                  map[string]any            `json:"meta"`
-	ProfileName           string                    `json:"profile_name"`
-	ProfileNameCamel      string                    `json:"profileName"`
-	Channel               string                    `json:"channel"`
-	ReplyTo               string                    `json:"reply_to"`
-	ReplyToCamel          string                    `json:"replyTo"`
-	ApprovalToken         string                    `json:"approval_token"`
-	ApprovalTokenCamel    string                    `json:"approvalToken"`
-}
-
 func decodeServiceTurnRequest(body io.Reader) (serviceTurnRequest, error) {
 	var payload serviceTurnRequestPayload
 	fields, err := decodeServiceRequestPayload(body, &payload)
@@ -175,54 +134,8 @@ func decodeServiceTurnRequest(body io.Reader) (serviceTurnRequest, error) {
 		Model:          strings.TrimSpace(payload.Model),
 		Attachments:    attachments,
 		ToolPolicyMode: toolPolicyMode,
-		Meta:          meta,
-		ProfileName:   compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
-		ApprovalToken: compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
-		Warnings:      warnings,
-	}, nil
-}
-
-func decodeServiceSubagentRequest(body io.Reader) (serviceSubagentRequest, error) {
-	var payload serviceSubagentRequestPayload
-	fields, err := decodeServiceRequestPayload(body, &payload)
-	if err != nil {
-		return serviceSubagentRequest{}, err
-	}
-	warnings := serviceRequestConflictWarnings(fields,
-		serviceRequestFieldPair{"parent_session_key", "parentSessionKey"},
-		serviceRequestFieldPair{"session_key", "sessionKey"},
-		serviceRequestFieldPair{"intern_session_key", "internSessionKey"},
-		serviceRequestFieldPair{"prompt_snapshot", "promptSnapshot"},
-		serviceRequestFieldPair{"allowed_tools", "allowedTools"},
-		serviceRequestFieldPair{"tool_policy", "toolPolicy"},
-		serviceRequestFieldPair{"timeout_seconds", "timeoutSeconds"},
-		serviceRequestFieldPair{"profile_name", "profileName"},
-		serviceRequestFieldPair{"reply_to", "replyTo"},
-		serviceRequestFieldPair{"approval_token", "approvalToken"},
-	)
-	if payload.ToolPolicy != nil || payload.ToolPolicyCamel != nil || len(compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel)) > 0 {
-		warnings = append(warnings, "subagent tool policy is ignored; subagent creation was removed")
-	}
-	timeoutSeconds, err := firstPositiveInt(payload.TimeoutSeconds, payload.TimeoutSecondsCamel, payload.Timeout)
-	if err != nil {
-		return serviceSubagentRequest{}, err
-	}
-	return serviceSubagentRequest{
-		ParentSessionKey: compat.FirstString(
-			payload.ParentSessionKey,
-			payload.ParentSessionKeyCamel,
-			payload.SessionKey,
-			payload.InternSessionKey,
-			payload.SessionKeyCamel,
-			payload.InternSessionKeyCamel,
-		),
-		Task:           strings.TrimSpace(payload.Task),
-		PromptSnapshot: firstPromptSnapshot(payload.PromptSnapshot, payload.PromptSnapshotCamel),
-		TimeoutSeconds: timeoutSeconds,
-		Meta:           cloneMapOrEmpty(payload.Meta),
+		Meta:           meta,
 		ProfileName:    compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
-		Channel:        strings.TrimSpace(payload.Channel),
-		ReplyTo:        compat.FirstString(payload.ReplyTo, payload.ReplyToCamel),
 		ApprovalToken:  compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
 		Warnings:       warnings,
 	}, nil
@@ -359,18 +272,6 @@ type serviceReplayToolCallPayload struct {
 	ArgumentsCamel     json.RawMessage `json:"argumentsCamel"`
 	ArgumentsJSON      string          `json:"arguments_json"`
 	ArgumentsJSONCamel string          `json:"argumentsJson"`
-}
-
-func firstPromptSnapshot(values ...[]providers.ChatMessage) []providers.ChatMessage {
-	for _, value := range values {
-		if len(value) == 0 {
-			continue
-		}
-		out := make([]providers.ChatMessage, len(value))
-		copy(out, value)
-		return out
-	}
-	return nil
 }
 
 func firstNonEmptyString(values ...string) string {

@@ -1,14 +1,13 @@
 package app
 
 import (
-	"or3-intern/internal/requestctx"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"or3-intern/internal/requestctx"
 	"os"
 	"strings"
-	"time"
 
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
@@ -18,7 +17,6 @@ import (
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
-	"or3-intern/internal/providers"
 	"or3-intern/internal/streaming"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/turns"
@@ -72,21 +70,21 @@ func (a *ServiceApp) SetRunnerRuntime(agentCLIManager *agentcli.Manager, turnOrc
 }
 
 type TurnRequest struct {
-	SessionKey          string
-	Message             string
-	Model               string
-	Attachments         []turns.Attachment
-	SystemPrompt        string
-	Meta                map[string]any
-	AllowedTools        []string
-	RestrictTools       bool
-	ProfileName         string
-	Capability          tools.CapabilityLevel
-	ApprovalToken       string
-	Actor               string
-	Role                string
-	Observer            streaming.ConversationObserver
-	Streamer            channels.StreamingChannel
+	SessionKey    string
+	Message       string
+	Model         string
+	Attachments   []turns.Attachment
+	SystemPrompt  string
+	Meta          map[string]any
+	AllowedTools  []string
+	RestrictTools bool
+	ProfileName   string
+	Capability    tools.CapabilityLevel
+	ApprovalToken string
+	Actor         string
+	Role          string
+	Observer      streaming.ConversationObserver
+	Streamer      channels.StreamingChannel
 }
 
 type TurnResult struct {
@@ -189,32 +187,6 @@ func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallReque
 
 func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
 	return "", ErrLegacyToolReplayDisabled
-}
-
-type SubagentRequest struct {
-	ParentSessionKey string
-	Task             string
-	PromptSnapshot   []providers.ChatMessage
-	AllowedTools     []string
-	RestrictTools    bool
-	ProfileName      string
-	Capability       tools.CapabilityLevel
-	Channel          string
-	ReplyTo          string
-	Meta             map[string]any
-	Timeout          time.Duration
-	ApprovalToken    string
-	Actor            string
-	Role             string
-}
-
-// SubagentJob is the legacy subagent spawn result shape kept for API compatibility.
-type SubagentJob struct {
-	JobID string
-}
-
-func (a *ServiceApp) StartSubagent(ctx context.Context, req SubagentRequest) (SubagentJob, error) {
-	return SubagentJob{}, ErrLegacySubagentsRemoved
 }
 
 func (a *ServiceApp) GetJob(jobID string) (jobs.Snapshot, error) {
@@ -584,7 +556,7 @@ func cloneMap(src map[string]any) map[string]any {
 
 func isTerminalStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
+	case "completed", "failed", "aborted":
 		return true
 	default:
 		return false

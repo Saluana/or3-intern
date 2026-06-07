@@ -113,9 +113,13 @@ func TestBuildAgentCLIEnv_DefaultsWhenEmptyAllowlist(t *testing.T) {
 func TestBuildAgentCLIEnv_AppendsCommonUserCLIDirs(t *testing.T) {
 	home := t.TempDir()
 	bin := filepath.Join(home, ".opencode", "bin")
+	bunBin := filepath.Join(home, ".bun", "bin")
 	nvmBin := filepath.Join(home, ".nvm", "versions", "node", "v22.0.0", "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(bunBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll bun: %v", err)
 	}
 	if err := os.MkdirAll(nvmBin, 0o755); err != nil {
 		t.Fatalf("MkdirAll nvm: %v", err)
@@ -126,6 +130,9 @@ func TestBuildAgentCLIEnv_AppendsCommonUserCLIDirs(t *testing.T) {
 	path := envValue(env, "PATH")
 	if !strings.Contains(path, bin) {
 		t.Fatalf("expected PATH %q to include %q", path, bin)
+	}
+	if bunIdx, oldIdx := strings.Index(path, bunBin), strings.Index(path, bin); bunIdx < 0 || oldIdx < 0 || bunIdx > oldIdx {
+		t.Fatalf("expected PATH %q to prefer %q before %q", path, bunBin, bin)
 	}
 	if !strings.Contains(path, nvmBin) {
 		t.Fatalf("expected PATH %q to include %q", path, nvmBin)

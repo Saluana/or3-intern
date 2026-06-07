@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
@@ -93,6 +94,69 @@ func TestChatManagerUsesSessionMaxTurnsDefault(t *testing.T) {
 	}
 	if got := run.MetaJSON; got != `{"_max_turns":7,"runner_chat_continuation_mode":"replay","runner_chat_native_session_ref":"","runner_chat_replay_prompt":"System: This conversation is being replayed for context. Previous turns are provided below in chronological order. Treat them as authoritative chat history.\n\nUser: hello\n","runner_chat_session_id":"`+sess.ID+`","runner_chat_turn_id":"`+result.Turn.ID+`","runner_chat_user_message":"hello"}` {
 		t.Fatalf("unexpected meta json: %s", got)
+	}
+}
+
+func TestChatManagerReplayDoesNotForwardNativeSessionRef(t *testing.T) {
+	d := openChatManagerTestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	sess, err := cm.EnsureSession(ctx, StartTurnRequest{
+		AppSessionKey:    "app-session",
+		RunnerID:         string(RunnerOpenCode),
+		ContinuationMode: ContinuationReplay,
+	})
+	if err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	if err := d.UpdateRunnerChatSessionNativeRef(ctx, sess.ID, "stale_opencode_session"); err != nil {
+		t.Fatalf("UpdateRunnerChatSessionNativeRef: %v", err)
+	}
+	result, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{UserMessage: "hello"})
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	run, ok, err := d.GetAgentCLIRun(ctx, result.JobID)
+	if err != nil || !ok {
+		t.Fatalf("GetAgentCLIRun: ok=%v err=%v", ok, err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(run.MetaJSON), &meta); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	if got := meta["runner_chat_native_session_ref"]; got != "" {
+		t.Fatalf("runner_chat_native_session_ref = %#v, want empty", got)
+	}
+	if err := cm.Manager.Abort(ctx, result.JobID); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		latest, err := d.GetRunnerChatTurn(ctx, result.Turn.ID)
+		if err != nil {
+			t.Fatalf("GetRunnerChatTurn: %v", err)
+		}
+		if latest.Status == db.RunnerChatTurnStatusAborted {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("turn did not finalize after abort")
+}
+
+func TestRunnerErrorEnvelopeIsNotFinalText(t *testing.T) {
+	raw := `{"type":"error","timestamp":1780727114335,"sessionID":"ses_1646495d3ffe7m5AzHnsNey91c","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_c208f54a"}}}`
+	snap := jobs.Snapshot{
+		Status: "failed",
+		Events: []jobs.Event{{
+			Type: "completion",
+			Data: map[string]any{"final_text": raw, "final_text_preview": raw},
+		}},
+	}
+	if got := extractFinalTextFromSnapshot(snap); got != "" {
+		t.Fatalf("final text = %q, want empty", got)
+	}
+	if got := extractErrorFromSnapshot(snap); got != "Unexpected server error. Check server logs for details." {
+		t.Fatalf("error = %q", got)
 	}
 }
 

@@ -23,8 +23,21 @@ func mustStartService(t *testing.T, svc *Service) {
 
 func mustAddJob(t *testing.T, svc *Service, job CronJob) {
 	t.Helper()
+	if strings.TrimSpace(job.Payload.Kind) == "" {
+		job.Payload = testAgentCLIPayload("test task")
+	}
 	if err := svc.Add(job); err != nil {
 		t.Fatalf("Add: %v", err)
+	}
+}
+
+func testAgentCLIPayload(task string) CronPayload {
+	return CronPayload{
+		Kind: PayloadAgentCLIRun,
+		AgentRun: &CronAgentRunPayload{
+			RunnerID: "opencode",
+			Task:     task,
+		},
 	}
 }
 
@@ -88,7 +101,7 @@ func TestAdd_And_List(t *testing.T) {
 		Name:     "test job",
 		Enabled:  true,
 		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-		Payload:  CronPayload{Kind: "agent_turn", Message: "hello"},
+		Payload:  testAgentCLIPayload("hello"),
 	}
 	if err := svc.Add(job); err != nil {
 		t.Fatalf("Add: %v", err)
@@ -657,11 +670,12 @@ func TestStart_WithExistingJobs(t *testing.T) {
 
 func TestCronPayloadSessionKey(t *testing.T) {
 	payload := CronPayload{
-		Kind:       "agent_turn",
+		Kind:       PayloadAgentCLIRun,
 		Message:    "hello from cron",
 		SessionKey: "custom-session-123",
 		Channel:    "telegram",
 		To:         "user456",
+		AgentRun:   &CronAgentRunPayload{RunnerID: "opencode", Task: "hello from cron"},
 	}
 
 	// Serialize
@@ -679,8 +693,8 @@ func TestCronPayloadSessionKey(t *testing.T) {
 	if decoded.SessionKey != "custom-session-123" {
 		t.Errorf("expected SessionKey %q, got %q", "custom-session-123", decoded.SessionKey)
 	}
-	if decoded.Kind != "agent_turn" {
-		t.Errorf("expected Kind %q, got %q", "agent_turn", decoded.Kind)
+	if decoded.Kind != PayloadAgentCLIRun {
+		t.Errorf("expected Kind %q, got %q", PayloadAgentCLIRun, decoded.Kind)
 	}
 	if decoded.Message != "hello from cron" {
 		t.Errorf("expected Message %q, got %q", "hello from cron", decoded.Message)
@@ -690,8 +704,9 @@ func TestCronPayloadSessionKey(t *testing.T) {
 func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
 	// SessionKey should be omitted when empty (json:"session_key,omitempty")
 	payload := CronPayload{
-		Kind:    "agent_turn",
-		Message: "no session key",
+		Kind:     PayloadAgentCLIRun,
+		Message:  "no session key",
+		AgentRun: &CronAgentRunPayload{RunnerID: "opencode", Task: "no session key"},
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -870,7 +885,7 @@ func TestService_ConcurrentMutationAndLifecycle(t *testing.T) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			if err := svc.Add(CronJob{ID: id, Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}}); err != nil {
+			if err := svc.Add(CronJob{ID: id, Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}, Payload: testAgentCLIPayload(id)}); err != nil {
 				errCh <- fmt.Errorf("Add %s: %w", id, err)
 			}
 		}(id)

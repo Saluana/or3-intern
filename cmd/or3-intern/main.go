@@ -780,15 +780,7 @@ func configErrorHint(err error) string {
 }
 
 func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
-	if cfg.RunnerFirst() || !cfg.Subagents.Enabled {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(cmd)) {
-	case "service", "chat", "serve":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func buildIdentityScopeMap(cfg config.Config) map[string]string {

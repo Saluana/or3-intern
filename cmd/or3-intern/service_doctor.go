@@ -930,8 +930,14 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 			return
 		}
 	}
-	useInternalAdminBrain := doctorShouldUseInternalAdminBrain(meta, adminBrain)
-	if !useInternalAdminBrain && strings.TrimSpace(meta.RunnerChatSessionID) != "" && s.chatManager != nil && s.chatManager.DB != nil && s.chatManager.Manager != nil {
+	if strings.TrimSpace(meta.RunnerChatSessionID) == "" && doctorUsesRunnerChat(meta.RunnerID) {
+		meta, err = s.syncDoctorSessionRunnerMeta(r.Context(), meta, meta.RunnerID, strings.TrimSpace(req.Model), adminBrain)
+		if err != nil {
+			writeServiceError(w, r, http.StatusBadGateway, "doctor session runner setup failed", err)
+			return
+		}
+	}
+	if strings.TrimSpace(meta.RunnerChatSessionID) != "" && s.chatManager != nil && s.chatManager.DB != nil && s.chatManager.Manager != nil {
 		releaseTurn, turnErr := s.claimDoctorSessionTurn(sessionKey, "runner_chat", meta.RunnerChatSessionID)
 		if turnErr != nil {
 			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": turnErr.Error(), "code": "doctor_turn_active"})
@@ -939,26 +945,20 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 		}
 		defer releaseTurn()
 		turnMeta := map[string]any{
-			"doctor_session":       true,
-			"doctor_user_message":  content,
-			"doctor_untrusted":     true,
-			"doctor_tool_policy":   doctorAdminBrainToolPolicyName,
-			"doctor_allowed_tools": doctorAdminBrainAllowedTools(s.doctorAdmin),
+			"doctor_session":      true,
+			"doctor_user_message": content,
+			"doctor_untrusted":    true,
 		}
 		if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
 			turnMeta["runner_thinking_level"] = thinking
 		}
-		allowedTools := doctorAdminBrainAllowedTools(s.doctorAdmin)
 		result, err := s.chatManager.StartTurn(r.Context(), meta.RunnerChatSessionID, agentcli.StartTurnRequest{
 			UserMessage:    content,
-			PromptMessage:  s.buildDoctorAdminBrainEnvelope(r.Context(), content),
 			Mode:           string(agentcli.RunnerModeReview),
 			Isolation:      string(agentcli.IsolationHostReadOnly),
 			Model:          strings.TrimSpace(req.Model),
 			MaxTurns:       4,
 			TimeoutSeconds: 120,
-			AllowedTools:   allowedTools,
-			RestrictTools:  true,
 			ApprovalToken:  serviceApprovalTokenFromRequest(r),
 			Meta:           turnMeta,
 		})
@@ -974,44 +974,6 @@ func (s *serviceServer) handleDoctorSessionMessage(w http.ResponseWriter, r *htt
 		writeDoctorSessionPayload(w, http.StatusAccepted, doctorSessionMessageResponse(messages, adminBrain, "runner_chat", map[string]any{
 			"runner_chat": map[string]any{"session_id": result.Session.ID, "turn_id": result.Turn.ID, "job_id": result.JobID},
 		}))
-		return
-	}
-	if useInternalAdminBrain {
-		userSeq := s.nextDoctorMessageSequence(r.Context(), sessionKey)
-		if _, err := store.AppendMessage(r.Context(), sessionKey, "user", content, doctorMessagePayload("doctor", userSeq, nil)); err != nil {
-			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor user message persistence failed", err)
-			return
-		}
-		if req.Stream {
-			jobID, err := s.startDoctorInternalAdminBrainTurn(r.Context(), sessionKey, content, strings.TrimSpace(req.Model), serviceApprovalTokenFromRequest(r), serviceAuthIdentityFromContext(r.Context()))
-			if err != nil {
-				writeDoctorAdminBrainTurnError(w, r, err)
-				return
-			}
-			messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
-			if err != nil {
-				writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
-				return
-			}
-			writeDoctorSessionPayload(w, http.StatusAccepted, doctorSessionMessageResponse(messages, adminBrain, "job", map[string]any{"job_id": jobID}))
-			return
-		}
-		releaseTurn, turnErr := s.claimDoctorSessionTurn(sessionKey, "sync", "internal")
-		if turnErr != nil {
-			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": turnErr.Error(), "code": "doctor_turn_active"})
-			return
-		}
-		defer releaseTurn()
-		if err := s.runDoctorInternalAdminBrainTurn(r.Context(), sessionKey, content, strings.TrimSpace(req.Model), serviceApprovalTokenFromRequest(r), serviceAuthIdentityFromContext(r.Context())); err != nil {
-			writeDoctorAdminBrainTurnError(w, r, err)
-			return
-		}
-		messages, err := s.listDoctorSessionMessages(r.Context(), sessionKey)
-		if err != nil {
-			writeServiceError(w, r, http.StatusServiceUnavailable, "doctor session messages unavailable", err)
-			return
-		}
-		writeDoctorSessionPayload(w, http.StatusAccepted, doctorSessionMessageResponse(messages, adminBrain, "sync", nil))
 		return
 	}
 	userSeq := s.nextDoctorMessageSequence(r.Context(), sessionKey)

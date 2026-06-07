@@ -1,6 +1,6 @@
 # Internal service REST / HTTP API reference
 
-> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). Legacy built-in endpoints `POST /internal/v1/turns` and `POST /internal/v1/subagents` return **410 Gone** with migration guidance. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
+> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). The legacy built-in `POST /internal/v1/turns` endpoint returns **410 Gone** with migration guidance; the old subagent endpoint has been removed. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
 
 This page documents the authenticated machine-facing REST / HTTP API exposed by:
 
@@ -115,7 +115,6 @@ Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`,
 | `GET` | `/internal/v1/chat-runners` | Admin or Operator | List chat-selectable external runners and service default runner. |
 | `POST` | `/internal/v1/chat/turns` | Admin or Operator | Submit a foreground turn through an external runner (primary chat path). |
 | `POST` | `/internal/v1/turns` | Admin or Operator | **Removed:** returns `410 Gone`; use runner chat. |
-| `POST` | `/internal/v1/subagents` | Admin or Operator | **Removed:** returns `410 Gone` for creation; `GET` lists historical rows. |
 | `POST` | `/internal/v1/runner-memory/search` | Operator | Search scoped memory for a session. |
 | `POST` | `/internal/v1/runner-memory/notes` | Operator | Add a durable memory note. |
 | `GET` | `/internal/v1/runner-memory/pinned` | Operator | Read pinned memory for a session. |
@@ -259,10 +258,6 @@ MCP management routes require operator access and write the primary config file.
 `DELETE /internal/v1/mcp/servers/{name}` removes one configured server.
 
 `POST /internal/v1/mcp/servers/{name}/test` creates a temporary MCP manager for the saved server config, connects once, reports discovered tools, and closes the manager. It does not hot-reload the runtime manager.
-
-### `POST /internal/v1/subagents` (removed)
-
-Returns **410 Gone** for new jobs. Use `POST /internal/v1/agent-runs` for background runner work. `GET /internal/v1/subagents` still returns historical rows for Activity views.
 
 ### External Agent CLI Delegation
 
@@ -409,7 +404,7 @@ After cancellation the run status is `aborted` and the job registry emits a `com
 `GET /internal/v1/jobs/{job_id}` resolves in this order:
 
 1. In-memory `JobRegistry` snapshot.
-2. Persisted `subagent_jobs` row.
+2. Persisted `agent_cli_runs` row.
 3. Persisted `agent_cli_runs` row.
 
 This means clients can look up external CLI runs through the same `/internal/v1/jobs/{job_id}` endpoint that serves subagent and turn jobs — no dedicated route required.
@@ -970,7 +965,7 @@ Fixture-pinned request and response shapes live in `cmd/or3-intern/testdata/serv
   - subagent requests normalize `parent_session_key`, `session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey` → `parent_session_key`
   - no internal package should introduce new aliases such as `session_id` for these service contracts without an explicit compatibility test update.
 
-**Removed routes:** `POST /internal/v1/turns` and `POST /internal/v1/subagents` return **410 Gone** (no alias normalization). Use runner chat and `POST /internal/v1/agent-runs` instead.
+**Removed routes:** `POST /internal/v1/turns` returns **410 Gone** (no alias normalization). The old `/internal/v1/subagents` route is no longer registered. Use runner chat and `POST /internal/v1/agent-runs` instead.
 
 **Stable job routes:**
 - `GET /internal/v1/jobs/{jobId}/stream` — returns 404 for unknown jobs

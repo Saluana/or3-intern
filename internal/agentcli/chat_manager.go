@@ -247,7 +247,11 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	agentMeta["runner_chat_continuation_mode"] = string(req.ContinuationMode)
 	agentMeta["runner_chat_user_message"] = userMessage
 	agentMeta["runner_chat_replay_prompt"] = prompt
-	agentMeta["runner_chat_native_session_ref"] = sess.NativeSessionRef
+	nativeSessionRef := ""
+	if req.ContinuationMode == ContinuationNative {
+		nativeSessionRef = sess.NativeSessionRef
+	}
+	agentMeta["runner_chat_native_session_ref"] = nativeSessionRef
 	if approvedPermission != nil {
 		agentMeta["runner_permission"] = runnerPermissionToMap(*approvedPermission)
 	}
@@ -270,14 +274,6 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		Meta:             agentMeta,
 		AllowedTools:     append([]string{}, req.AllowedTools...),
 		RestrictTools:    req.RestrictTools,
-	}
-	if err := ValidateDoctorAgentRunRequest(agentReq); err != nil {
-		_ = cm.DB.FinalizeRunnerChatTurn(context.Background(), turn.ID, db.RunnerChatTurnFinalize{
-			Status:       db.RunnerChatTurnStatusFailed,
-			ErrorMessage: err.Error(),
-			CompletedAt:  db.NowMS(),
-		})
-		return StartTurnResult{}, err
 	}
 	run, err := cm.Manager.Enqueue(ctx, agentReq)
 	if err != nil {
@@ -809,6 +805,9 @@ func (cm *ChatManager) chatRunner(runnerID string) (RunnerSpec, RunnerChatAdapte
 }
 
 func (cm *ChatManager) maybePersistNativeSessionRef(sess db.RunnerChatSession, jobID string, ev jobs.Event) {
+	if ContinuationMode(strings.TrimSpace(sess.ContinuationMode)) != ContinuationNative {
+		return
+	}
 	if sess.NativeSessionRef != "" {
 		return
 	}
@@ -909,9 +908,15 @@ func extractFinalTextFromSnapshot(snap jobs.Snapshot) string {
 			continue
 		}
 		if v, ok := ev.Data["final_text"].(string); ok && strings.TrimSpace(v) != "" {
+			if runnerErrorEnvelopeMessage(v) != "" {
+				continue
+			}
 			return v
 		}
 		if v, ok := ev.Data["final_text_preview"].(string); ok && strings.TrimSpace(v) != "" {
+			if runnerErrorEnvelopeMessage(v) != "" {
+				continue
+			}
 			return v
 		}
 	}
@@ -927,6 +932,16 @@ func extractErrorFromSnapshot(snap jobs.Snapshot) string {
 		if ev.Data == nil {
 			continue
 		}
+		if v, ok := ev.Data["final_text"].(string); ok {
+			if msg := runnerErrorEnvelopeMessage(v); msg != "" {
+				return msg
+			}
+		}
+		if v, ok := ev.Data["final_text_preview"].(string); ok {
+			if msg := runnerErrorEnvelopeMessage(v); msg != "" {
+				return msg
+			}
+		}
 		if v, ok := ev.Data["error"].(string); ok && strings.TrimSpace(v) != "" {
 			return v
 		}
@@ -941,6 +956,18 @@ func extractErrorFromSnapshot(snap jobs.Snapshot) string {
 		return "timed out"
 	}
 	return ""
+}
+
+func runnerErrorEnvelopeMessage(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" || (text[0] != '{' && text[0] != '[') {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal([]byte(text), &value); err != nil {
+		return ""
+	}
+	return extractOpenCodeErrorMessage(value)
 }
 
 func previewSnippetClamped(s string, max int) string {

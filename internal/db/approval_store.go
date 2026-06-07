@@ -57,28 +57,9 @@ type ApprovalRequestRecord struct {
 	ResolverActorID      string
 	ResolutionKind       string
 	ResolutionNote       string
-	ModeratorStatus      string
-	ModeratorRisk        string
-	ModeratorAction      string
-	ModeratorReason      string
-	ModeratorModel       string
-	ModeratorPolicyHash  string
-	ModeratorReviewedAt  int64
-	ModeratorLatencyMS   int64
 }
 
-const approvalRequestSelectColumns = `id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note, moderator_status, moderator_risk, moderator_action, moderator_reason, moderator_model, moderator_policy_hash, moderator_reviewed_at, moderator_latency_ms`
-
-type ApprovalModeratorMetadata struct {
-	Status      string
-	Risk        string
-	Action      string
-	Reason      string
-	Model       string
-	PolicyHash  string
-	ReviewedAt  int64
-	LatencyMS   int64
-}
+const approvalRequestSelectColumns = `id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note`
 
 type ApprovalAllowlistRecord struct {
 	ID                  int64
@@ -612,13 +593,6 @@ func (d *DB) UpdateApprovalRequestResolution(ctx context.Context, id int64, stat
 	return err
 }
 
-func (d *DB) UpdateApprovalRequestModeratorMetadata(ctx context.Context, id int64, meta ApprovalModeratorMetadata) error {
-	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET moderator_status=?, moderator_risk=?, moderator_action=?, moderator_reason=?, moderator_model=?, moderator_policy_hash=?, moderator_reviewed_at=?, moderator_latency_ms=? WHERE id=?`,
-		strings.TrimSpace(meta.Status), strings.TrimSpace(meta.Risk), strings.TrimSpace(meta.Action), strings.TrimSpace(meta.Reason),
-		strings.TrimSpace(meta.Model), strings.TrimSpace(meta.PolicyHash), meta.ReviewedAt, meta.LatencyMS, id)
-	return err
-}
-
 func (d *DB) ResolveApprovalRequest(ctx context.Context, id int64, fromStatus, toStatus string, resolvedAt int64, actor, kind, note string) (bool, error) {
 	res, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET status=?, resolved_at=?, resolver_actor_id=?, resolution_kind=?, resolution_note=? WHERE id=? AND status=?`, toStatus, resolvedAt, actor, kind, note, id, fromStatus)
 	if err != nil {
@@ -826,9 +800,6 @@ func (d *DB) ApproveRequestWithArtifacts(ctx context.Context, requestID int64, a
 	if rows != 1 {
 		return ApproveRequestArtifacts{}, fmt.Errorf("approval request is not pending")
 	}
-	if _, err := updateSkillRunPlansByApprovalRequestTx(ctx, tx, requestID, []string{"pending_approval"}, "approved", "", nowMS); err != nil {
-		return ApproveRequestArtifacts{}, err
-	}
 	out := ApproveRequestArtifacts{Request: req}
 	if alwaysAllow && buildAllowlist != nil {
 		allowlistInput, err := buildAllowlist(req)
@@ -915,25 +886,6 @@ func createOrGetApprovalAllowlistTx(ctx context.Context, tx *sql.Tx, input Appro
 	return rec, false, err
 }
 
-func updateSkillRunPlansByApprovalRequestTx(ctx context.Context, tx *sql.Tx, approvalRequestID int64, fromStatuses []string, toStatus, lastError string, updatedAt int64) (int64, error) {
-	if len(fromStatuses) == 0 {
-		return 0, nil
-	}
-	placeholders := make([]string, len(fromStatuses))
-	args := []any{strings.TrimSpace(toStatus), strings.TrimSpace(lastError), updatedAt, approvalRequestID}
-	for i, status := range fromStatuses {
-		placeholders[i] = "?"
-		args = append(args, status)
-	}
-	query := `UPDATE skill_run_plans SET status=?, last_error=?, updated_at=? WHERE approval_request_id=? AND status IN (` + strings.Join(placeholders, ",") + `)`
-	res, err := tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	rows, err := res.RowsAffected()
-	return rows, err
-}
-
 func (d *DB) CreateApprovalToken(ctx context.Context, input ApprovalTokenRecord) (ApprovalTokenRecord, error) {
 	res, err := d.SQL.ExecContext(ctx, `INSERT INTO approval_tokens(approval_request_id, subject_hash, issued_at, expires_at, issuer, revoked_at) VALUES(?, ?, ?, ?, ?, ?)`, input.ApprovalRequestID, input.SubjectHash, input.IssuedAt, input.ExpiresAt, input.Issuer, input.RevokedAt)
 	if err != nil {
@@ -1004,7 +956,6 @@ func scanApprovalRequest(scanner interface{ Scan(dest ...any) error }) (Approval
 	if err := scanner.Scan(
 		&rec.ID, &rec.Type, &rec.SubjectHash, &rec.SubjectJSON, &rec.RequesterAgentID, &rec.RequesterSessionID, &rec.RequesterContextJSON,
 		&rec.ExecutionHostID, &rec.Status, &rec.PolicyMode, &rec.RequestedAt, &rec.ExpiresAt, &rec.ResolvedAt, &rec.ResolverActorID, &rec.ResolutionKind, &rec.ResolutionNote,
-		&rec.ModeratorStatus, &rec.ModeratorRisk, &rec.ModeratorAction, &rec.ModeratorReason, &rec.ModeratorModel, &rec.ModeratorPolicyHash, &rec.ModeratorReviewedAt, &rec.ModeratorLatencyMS,
 	); err != nil {
 		return ApprovalRequestRecord{}, err
 	}

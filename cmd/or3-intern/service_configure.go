@@ -529,7 +529,7 @@ func serviceProviderStatus(cfg config.Config) map[string]any {
 		})
 	}
 	roleItems := map[string]any{}
-	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleAgents, config.ModelRoleSubagents, config.ModelRoleSummarization, config.ModelRoleContextManager, config.ModelRoleEmbeddings} {
+	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleSummarization, config.ModelRoleContextManager, config.ModelRoleEmbeddings} {
 		role := cfg.ModelRole(roleName)
 		roleItems[roleName] = map[string]any{
 			"primary":         role.Primary,

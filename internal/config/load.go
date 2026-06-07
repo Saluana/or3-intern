@@ -107,10 +107,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.MaxMediaBytes <= 0 {
 		cfg.MaxMediaBytes = 20 * 1024 * 1024
 	}
-	if cfg.MaxToolLoops <= 0 {
-		cfg.MaxToolLoops = 6
-	}
-	cfg.MaxToolLoopsExceededAction = normalizeQuotaExceededAction(cfg.MaxToolLoopsExceededAction, Default().MaxToolLoopsExceededAction)
 	if cfg.VectorScanLimit <= 0 {
 		cfg.VectorScanLimit = 2000
 	}
@@ -128,15 +124,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	}
 	if cfg.ConsolidationAsyncTimeoutSeconds <= 0 {
 		cfg.ConsolidationAsyncTimeoutSeconds = 30
-	}
-	if cfg.Subagents.MaxConcurrent <= 0 {
-		cfg.Subagents.MaxConcurrent = 1
-	}
-	if cfg.Subagents.MaxQueued <= 0 {
-		cfg.Subagents.MaxQueued = 32
-	}
-	if cfg.Subagents.TaskTimeoutSeconds <= 0 {
-		cfg.Subagents.TaskTimeoutSeconds = 300
 	}
 	if cfg.AgentCLI.MaxConcurrent <= 0 {
 		cfg.AgentCLI.MaxConcurrent = 1
@@ -563,7 +550,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	cfg.Security.Approvals.SkillExecution.Mode = normalizeApprovalMode(cfg.Security.Approvals.SkillExecution.Mode, Default().Security.Approvals.SkillExecution.Mode)
 	cfg.Security.Approvals.SecretAccess.Mode = normalizeApprovalMode(cfg.Security.Approvals.SecretAccess.Mode, Default().Security.Approvals.SecretAccess.Mode)
 	cfg.Security.Approvals.MessageSend.Mode = normalizeApprovalMode(cfg.Security.Approvals.MessageSend.Mode, Default().Security.Approvals.MessageSend.Mode)
-	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
 	if cfg.Security.Profiles.Channels == nil {
 		cfg.Security.Profiles.Channels = map[string]string{}
 	}

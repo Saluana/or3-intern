@@ -44,8 +44,10 @@ const (
 
 func (a *OpenCodeAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
 	args := []string{"run", "--format", "json"}
-	if req.NativeSessionRef != "" {
-		args = append(args, "--session", req.NativeSessionRef)
+	if req.ContinuationMode == ContinuationNative {
+		if ref := strings.TrimSpace(req.NativeSessionRef); ref != "" {
+			args = append(args, "--session", ref)
+		}
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)

@@ -22,12 +22,9 @@ import (
 	"or3-intern/internal/tools"
 )
 
-const maxResultChars = 64 * 1024
-
 type session interface {
 	Close() error
 	ListTools(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error)
-	CallTool(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error)
 }
 
 type connector func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error)
@@ -52,14 +49,6 @@ type ServerStatus struct {
 	LastError string   `json:"lastError,omitempty"`
 }
 
-type ToolCatalogEntry struct {
-	ServerName string
-	RemoteName string
-	LocalName  string
-	Status     string
-	LastError  string
-}
-
 type remoteToolSpec struct {
 	localName   string
 	serverName  string
@@ -69,22 +58,6 @@ type remoteToolSpec struct {
 	timeout     time.Duration
 	session     session
 }
-
-// RemoteTool adapts one discovered MCP tool to the local tools.Tool interface.
-type RemoteTool struct {
-	tools.Base
-
-	localName   string
-	serverName  string
-	remoteName  string
-	description string
-	parameters  map[string]any
-	timeout     time.Duration
-	session     session
-}
-
-// Capability reports the trust level required to invoke the remote tool.
-func (t *RemoteTool) Capability() tools.CapabilityLevel { return tools.CapabilityGuarded }
 
 // NewManager constructs a Manager for the configured servers.
 func NewManager(servers map[string]config.MCPServerConfig) *Manager {
@@ -277,31 +250,6 @@ func (m *Manager) ReconnectWithBackoff(ctx context.Context, attempts int, initia
 	return nil
 }
 
-func (m *Manager) ToolCatalog() []ToolCatalogEntry {
-	if m == nil {
-		return nil
-	}
-	status := m.ServerStatus()
-	out := make([]ToolCatalogEntry, 0, len(m.tools))
-	for _, spec := range m.tools {
-		state := status[spec.serverName]
-		out = append(out, ToolCatalogEntry{
-			ServerName: spec.serverName,
-			RemoteName: spec.remoteName,
-			LocalName:  spec.localName,
-			Status:     state.State,
-			LastError:  state.LastError,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].ServerName != out[j].ServerName {
-			return out[i].ServerName < out[j].ServerName
-		}
-		return out[i].LocalName < out[j].LocalName
-	})
-	return out
-}
-
 // Close closes all active sessions and clears discovered tools.
 func (m *Manager) Close() error {
 	if m == nil {
@@ -341,70 +289,6 @@ func (m *Manager) logfSafe(format string, args ...any) {
 		return
 	}
 	m.logf(format, args...)
-}
-
-func (s remoteToolSpec) Tool() tools.Tool {
-	return &RemoteTool{
-		localName:   s.localName,
-		serverName:  s.serverName,
-		remoteName:  s.remoteName,
-		description: s.description,
-		parameters:  cloneAnyMap(s.parameters),
-		timeout:     s.timeout,
-		session:     s.session,
-	}
-}
-
-// Name returns the local tool name exposed to the runtime.
-func (t *RemoteTool) Name() string { return t.localName }
-
-// Description returns the remote tool description or a synthesized fallback.
-func (t *RemoteTool) Description() string {
-	if strings.TrimSpace(t.description) != "" {
-		return t.description
-	}
-	return fmt.Sprintf("MCP tool %s from server %s.", t.remoteName, t.serverName)
-}
-
-// Parameters returns a cloned JSON-schema-like parameter description.
-func (t *RemoteTool) Parameters() map[string]any {
-	return cloneAnyMap(t.parameters)
-}
-
-// Schema returns the runtime tool schema for this remote tool.
-func (t *RemoteTool) Schema() map[string]any {
-	return t.SchemaFor(t.Name(), t.Description(), t.Parameters())
-}
-
-// Execute calls the remote tool and converts its result into plain text.
-func (t *RemoteTool) Execute(ctx context.Context, params map[string]any) (string, error) {
-	if t.session == nil {
-		return "", fmt.Errorf("mcp %s/%s: session not connected", t.serverName, t.remoteName)
-	}
-
-	callCtx := ctx
-	cancel := func() {}
-	if t.timeout > 0 {
-		callCtx, cancel = context.WithTimeout(ctx, t.timeout)
-	}
-	defer cancel()
-
-	res, err := t.session.CallTool(callCtx, &sdkmcp.CallToolParams{
-		Name:      t.remoteName,
-		Arguments: cloneAnyMap(params),
-	})
-	if err != nil {
-		return "", fmt.Errorf("mcp %s/%s: %w", t.serverName, t.remoteName, err)
-	}
-
-	text := resultToText(res, maxResultChars)
-	if res != nil && res.IsError {
-		if strings.TrimSpace(text) == "" {
-			text = "remote tool reported error"
-		}
-		return "", fmt.Errorf("mcp %s/%s: %s", t.serverName, t.remoteName, text)
-	}
-	return text, nil
 }
 
 func connectSessionWithPolicy(ctx context.Context, _ string, cfg config.MCPServerConfig, policy security.HostPolicy) (session, error) {
@@ -588,73 +472,6 @@ func normalizeSchema(schema any) map[string]any {
 		return defaultParameters()
 	}
 	return m
-}
-
-func resultToText(res *sdkmcp.CallToolResult, limit int) string {
-	if res == nil {
-		return ""
-	}
-	var parts []string
-	for _, content := range res.Content {
-		if part := contentToText(content, limit); strings.TrimSpace(part) != "" {
-			parts = append(parts, part)
-		}
-	}
-	if structured := structuredToText(res.StructuredContent); structured != "" {
-		if len(parts) == 0 || strings.TrimSpace(parts[len(parts)-1]) != strings.TrimSpace(structured) {
-			parts = append(parts, structured)
-		}
-	}
-	return truncateResult(strings.Join(parts, "\n\n"), limit)
-}
-
-func structuredToText(v any) string {
-	if v == nil {
-		return ""
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
-func contentToText(content sdkmcp.Content, limit int) string {
-	switch block := content.(type) {
-	case *sdkmcp.TextContent:
-		return truncateResult(block.Text, limit)
-	case *sdkmcp.ImageContent:
-		return fmt.Sprintf("[image content omitted mime=%s bytes=%d]", block.MIMEType, len(block.Data))
-	case *sdkmcp.AudioContent:
-		return fmt.Sprintf("[audio content omitted mime=%s bytes=%d]", block.MIMEType, len(block.Data))
-	case *sdkmcp.ResourceLink:
-		return fmt.Sprintf("[resource link uri=%s name=%s]", block.URI, strings.TrimSpace(block.Name))
-	case *sdkmcp.EmbeddedResource:
-		if block.Resource == nil {
-			return "[embedded resource omitted]"
-		}
-		if strings.TrimSpace(block.Resource.Text) != "" {
-			return truncateResult(block.Resource.Text, limit)
-		}
-		if len(block.Resource.Blob) > 0 {
-			return fmt.Sprintf("[embedded resource omitted uri=%s mime=%s bytes=%d]", block.Resource.URI, block.Resource.MIMEType, len(block.Resource.Blob))
-		}
-		return fmt.Sprintf("[embedded resource uri=%s]", block.Resource.URI)
-	default:
-		b, err := json.Marshal(content)
-		if err != nil {
-			return fmt.Sprintf("[unsupported MCP content %T]", content)
-		}
-		return truncateResult(string(b), limit)
-	}
-}
-
-func truncateResult(text string, limit int) string {
-	text = strings.TrimSpace(text)
-	if limit <= 0 || len(text) <= limit {
-		return text
-	}
-	return strings.TrimSpace(text[:limit]) + "...[truncated]"
 }
 
 func cloneAnyMap(in map[string]any) map[string]any {

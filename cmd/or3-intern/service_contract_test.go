@@ -27,17 +27,6 @@ type serviceTurnRequestFixture struct {
 	ApprovalToken string         `json:"approval_token"`
 }
 
-type serviceSubagentRequestFixture struct {
-	ParentSessionKey string         `json:"parent_session_key"`
-	Task             string         `json:"task"`
-	TimeoutSeconds   int            `json:"timeout_seconds"`
-	Meta             map[string]any `json:"meta"`
-	ProfileName      string         `json:"profile_name"`
-	Channel          string         `json:"channel"`
-	ReplyTo          string         `json:"reply_to"`
-	ApprovalToken    string         `json:"approval_token"`
-}
-
 type serviceAppUsageRouteFixture struct {
 	Area   string `json:"area"`
 	Method string `json:"method"`
@@ -80,28 +69,6 @@ func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
 		}
 	})
 
-	t.Run("subagent request", func(t *testing.T) {
-		var expected serviceSubagentRequestFixture
-		loadFixtureJSON(t, "service_contract/subagent-request.decoded.json", &expected)
-		body := loadFixtureString(t, "service_contract/subagent-request.json")
-		actual, err := decodeServiceSubagentRequest(strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("decodeServiceSubagentRequest: %v", err)
-		}
-		got := serviceSubagentRequestFixture{
-			ParentSessionKey: actual.ParentSessionKey,
-			Task:             actual.Task,
-			TimeoutSeconds:   actual.TimeoutSeconds,
-			Meta:             actual.Meta,
-			ProfileName:      actual.ProfileName,
-			Channel:          actual.Channel,
-			ReplyTo:          actual.ReplyTo,
-			ApprovalToken:    actual.ApprovalToken,
-		}
-		if !reflect.DeepEqual(got, expected) {
-			t.Fatalf("decoded subagent request mismatch\nexpected: %#v\ngot: %#v", expected, got)
-		}
-	})
 }
 
 func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
@@ -118,21 +85,6 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-	})
-
-	t.Run("subagent response", func(t *testing.T) {
-		server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-		httpServer := newServiceTestHTTPServer(t, strings.Repeat("u", 32), server)
-		defer httpServer.Close()
-
-		body := loadFixtureString(t, "service_contract/subagent-request.json")
-		req := mustServiceRequest(t, httpServer, strings.Repeat("u", 32), http.MethodPost, "/internal/v1/subagents", body)
-		resp, err := httpServer.Client().Do(req)
-		if err != nil {
-			t.Fatalf("Do: %v", err)
-		}
-		defer resp.Body.Close()
-		assertHTTPLegacySubagentsPostGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 	})
 
 	t.Run("job stream attach", func(t *testing.T) {
@@ -321,7 +273,6 @@ func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t
 		wantStatus int
 	}{
 		{name: "turns removed", method: http.MethodPost, path: "/internal/v1/turns", body: `{}`, wantStatus: http.StatusGone},
-		{name: "subagents create removed", method: http.MethodPost, path: "/internal/v1/subagents", body: `{}`, wantStatus: http.StatusGone},
 		{name: "jobs route missing", method: http.MethodGet, path: "/internal/v1/jobs", wantStatus: http.StatusNotFound},
 		{name: "cron method", method: http.MethodPost, path: "/internal/v1/cron", wantStatus: http.StatusMethodNotAllowed},
 		{name: "approvals unavailable", method: http.MethodGet, path: "/internal/v1/approvals", wantStatus: http.StatusServiceUnavailable},

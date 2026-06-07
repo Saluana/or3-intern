@@ -11,7 +11,6 @@ import (
 
 const (
 	PublicErrorProvider      = "provider_error"
-	PublicErrorStream        = "stream_error"
 	PublicErrorValidation    = "validation_error"
 	PublicErrorPolicy        = "policy_error"
 	PublicErrorApproval      = "approval_required"
@@ -31,10 +30,6 @@ func PublicErrorCode(err error) string {
 	var approvalErr *tools.ApprovalRequiredError
 	if errors.As(err, &approvalErr) {
 		return PublicErrorApproval
-	}
-	var streamErr providers.ProviderStreamError
-	if errors.As(err, &streamErr) {
-		return PublicErrorStream
 	}
 	var providerErr providers.ProviderError
 	if errors.As(err, &providerErr) {

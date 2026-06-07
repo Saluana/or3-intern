@@ -146,7 +146,7 @@ func (s *serviceServer) serviceSkillsInventory(ctx context.Context, cfg config.C
 }
 
 func (s *serviceServer) serviceAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
-	return filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, false))
+	return filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled))
 }
 
 func (s *serviceServer) serviceBundledSkillsDir() string {

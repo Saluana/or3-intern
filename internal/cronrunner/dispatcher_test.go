@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/bus"
@@ -25,43 +24,6 @@ func (f *fakeAgentCLIEnqueuer) Enqueue(ctx context.Context, req agentcli.AgentRu
 		return db.AgentCLIRun{}, f.err
 	}
 	return f.run, nil
-}
-
-func TestDispatcherPublishesLegacyCronEvent(t *testing.T) {
-	b := bus.New(1)
-	events, unsubscribe := b.Subscribe()
-	defer unsubscribe()
-	runner := New(b, "default-session", nil, true)
-
-	_, err := runner(context.Background(), cron.CronJob{
-		ID:   "legacy",
-		Name: "Legacy",
-		Payload: cron.CronPayload{
-			Kind:    cron.PayloadAgentTurn,
-			Message: "run this",
-		},
-	})
-	if err != nil {
-		t.Fatalf("runner: %v", err)
-	}
-
-	select {
-	case ev := <-events:
-		if ev.Type != bus.EventCron {
-			t.Fatalf("expected cron event, got %s", ev.Type)
-		}
-		if ev.SessionKey != "default-session" {
-			t.Fatalf("expected default session, got %q", ev.SessionKey)
-		}
-		if ev.Message != "run this" {
-			t.Fatalf("expected message, got %q", ev.Message)
-		}
-		if ev.Meta["runner_first"] != true {
-			t.Fatalf("expected runner_first meta, got %#v", ev.Meta)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("timeout waiting for cron event")
-	}
 }
 
 func TestDispatcherEnqueuesAgentCLIRun(t *testing.T) {
@@ -113,16 +75,6 @@ func TestDispatcherAgentCLIRunUnavailable(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "agent CLI manager") {
 		t.Fatalf("expected agent CLI manager error, got %v", err)
-	}
-}
-
-func TestDispatcherRejectsLegacyCronWhenAgentCLIDisabled(t *testing.T) {
-	runner := New(bus.New(1), "default-session", nil, false)
-	_, err := runner(context.Background(), cron.CronJob{
-		Payload: cron.CronPayload{Kind: cron.PayloadAgentTurn, Message: "legacy"},
-	})
-	if err == nil || !errors.Is(err, ErrLegacyCronAgentTurn) {
-		t.Fatalf("expected legacy cron error, got %v", err)
 	}
 }
 

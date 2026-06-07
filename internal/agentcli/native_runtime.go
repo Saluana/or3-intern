@@ -355,7 +355,10 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": "runtime.started", "runtime": "opencode-server", "endpoint": endpoint})
-	sessionID := strings.TrimSpace(req.Chat.NativeSessionRef)
+	sessionID := ""
+	if req.Chat.ContinuationMode == ContinuationNative {
+		sessionID = strings.TrimSpace(req.Chat.NativeSessionRef)
+	}
 	if sessionID == "" {
 		var session map[string]any
 		if err := httpJSON(ctx, r.client, http.MethodPost, endpoint+"/session", map[string]any{}, &session); err != nil {
@@ -436,7 +439,7 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 		return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 	}
 	if errMsg := extractOpenCodeErrorMessage(response); errMsg != "" {
-		return ProcessOutput{ExitCode: 1, StderrPreview: errMsg, FinalTextPreview: errMsg, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("%s", errMsg)
+		return ProcessOutput{ExitCode: 1, StderrPreview: errMsg, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("%s", errMsg)
 	}
 	finalText := extractOpenCodeVisibleText(response)
 	if finalText != "" && !streamState.streamedText.Load() {

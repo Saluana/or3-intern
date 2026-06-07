@@ -170,9 +170,6 @@ func TestScan_MissingRelativeSkillDependencyMakesSkillIneligible(t *testing.T) {
 	if !testContainsString(skill.Missing, "missing skill dependency: shared") {
 		t.Fatalf("expected missing dependency reason, got %+v", skill.Missing)
 	}
-	if strings.Contains(inv.ModelSummary(10), "needs-shared") {
-		t.Fatalf("expected missing dependency skill to be hidden from model summary")
-	}
 }
 
 func TestScan_PresentSkillDependencyKeepsSkillEligible(t *testing.T) {

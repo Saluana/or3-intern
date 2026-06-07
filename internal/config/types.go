@@ -90,37 +90,34 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 
 // Config is the top-level persisted runtime configuration.
 type Config struct {
-	DBPath                     string              `json:"dbPath"`
-	ArtifactsDir               string              `json:"artifactsDir"`
-	WorkspaceDir               string              `json:"workspaceDir"`
-	AllowedDir                 string              `json:"allowedDir"`
-	DefaultSessionKey          string              `json:"defaultSessionKey"`
-	SoulFile                   string              `json:"soulFile"`
-	AgentsFile                 string              `json:"agentsFile"`
-	ToolsFile                  string              `json:"toolsFile"`
-	BootstrapMaxChars          int                 `json:"bootstrapMaxChars"`
-	BootstrapTotalMaxChars     int                 `json:"bootstrapTotalMaxChars"`
-	SessionCache               int                 `json:"sessionCacheLimit"`
-	HistoryMax                 int                 `json:"historyMaxMessages"`
-	MaxToolBytes               int                 `json:"maxToolBytes"`
-	MaxMediaBytes              int                 `json:"maxMediaBytes"`
-	MaxToolLoops               int                 `json:"maxToolLoops"`
-	MaxToolLoopsExceededAction QuotaExceededAction `json:"maxToolLoopsExceededAction"`
-	MemoryRetrieve             int                 `json:"memoryRetrieveLimit"`
-	VectorK                    int                 `json:"vectorSearchK"`
-	FTSK                       int                 `json:"ftsSearchK"`
-	VectorScanLimit            int                 `json:"vectorScanLimit"`
-	WorkerCount                int                 `json:"workerCount"`
+	DBPath                 string `json:"dbPath"`
+	ArtifactsDir           string `json:"artifactsDir"`
+	WorkspaceDir           string `json:"workspaceDir"`
+	AllowedDir             string `json:"allowedDir"`
+	DefaultSessionKey      string `json:"defaultSessionKey"`
+	SoulFile               string `json:"soulFile"`
+	AgentsFile             string `json:"agentsFile"`
+	ToolsFile              string `json:"toolsFile"`
+	BootstrapMaxChars      int    `json:"bootstrapMaxChars"`
+	BootstrapTotalMaxChars int    `json:"bootstrapTotalMaxChars"`
+	SessionCache           int    `json:"sessionCacheLimit"`
+	HistoryMax             int    `json:"historyMaxMessages"`
+	MaxToolBytes           int    `json:"maxToolBytes"`
+	MaxMediaBytes          int    `json:"maxMediaBytes"`
+	MemoryRetrieve         int    `json:"memoryRetrieveLimit"`
+	VectorK                int    `json:"vectorSearchK"`
+	FTSK                   int    `json:"ftsSearchK"`
+	VectorScanLimit        int    `json:"vectorScanLimit"`
+	WorkerCount            int    `json:"workerCount"`
 
-	ConsolidationEnabled             bool            `json:"consolidationEnabled"`
-	ConsolidationModel               string          `json:"consolidationModel"`
-	ConsolidationWindowSize          int             `json:"consolidationWindowSize"`
-	ConsolidationMaxMessages         int             `json:"consolidationMaxMessages"`
-	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
-	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
-	Subagents                        SubagentsConfig `json:"subagents"`
-	AgentCLI                         AgentCLIConfig  `json:"agentCLI"`
-	RuntimeProfile                   RuntimeProfile  `json:"runtimeProfile"`
+	ConsolidationEnabled             bool           `json:"consolidationEnabled"`
+	ConsolidationModel               string         `json:"consolidationModel"`
+	ConsolidationWindowSize          int            `json:"consolidationWindowSize"`
+	ConsolidationMaxMessages         int            `json:"consolidationMaxMessages"`
+	ConsolidationMaxInputChars       int            `json:"consolidationMaxInputChars"`
+	ConsolidationAsyncTimeoutSeconds int            `json:"consolidationAsyncTimeoutSeconds"`
+	AgentCLI                         AgentCLIConfig `json:"agentCLI"`
+	RuntimeProfile                   RuntimeProfile `json:"runtimeProfile"`
 	// CompatEnvWarnings collects non-fatal migration hints from env overrides (not persisted).
 	CompatEnvWarnings []string `json:"-"`
 
@@ -292,8 +289,6 @@ type ProviderProfileConfig struct {
 
 type ModelRoutingConfig struct {
 	Chat           ModelRoleConfig `json:"chat,omitempty"`
-	Agents         ModelRoleConfig `json:"agents,omitempty"`
-	Subagents      ModelRoleConfig `json:"subagents,omitempty"`
 	Summarization  ModelRoleConfig `json:"summarization,omitempty"`
 	ContextManager ModelRoleConfig `json:"contextManager,omitempty"`
 	Embeddings     ModelRoleConfig `json:"embeddings,omitempty"`
@@ -321,8 +316,6 @@ type FavoriteModelConfig struct {
 
 const (
 	ModelRoleChat           = "chat"
-	ModelRoleAgents         = "agents"
-	ModelRoleSubagents      = "subagents"
 	ModelRoleSummarization  = "summarization"
 	ModelRoleContextManager = "contextManager"
 	ModelRoleEmbeddings     = "embeddings"
@@ -331,10 +324,6 @@ const (
 
 func (cfg Config) ModelRole(role string) ModelRoleConfig {
 	switch strings.TrimSpace(role) {
-	case ModelRoleAgents:
-		return cfg.ModelRouting.Agents
-	case ModelRoleSubagents:
-		return cfg.ModelRouting.Subagents
 	case ModelRoleSummarization:
 		return cfg.ModelRouting.Summarization
 	case ModelRoleContextManager:
@@ -421,14 +410,6 @@ type ServiceConfig struct {
 	TrustedPairingOrigins             []string `json:"trustedPairingOrigins"`
 	TrustedPairingCIDRs               []string `json:"trustedPairingCIDRs"`
 	MutationRateLimitPerMinute        int      `json:"mutationRateLimitPerMinute"`
-}
-
-// SubagentsConfig limits the internal subagent queue and worker pool.
-type SubagentsConfig struct {
-	Enabled            bool `json:"enabled"`
-	MaxConcurrent      int  `json:"maxConcurrent"`
-	MaxQueued          int  `json:"maxQueued"`
-	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
 }
 
 // AgentCLIConfig controls the external agent CLI delegation subsystem.
@@ -682,61 +663,18 @@ type ApprovalDomainConfig struct {
 	Mode ApprovalMode `json:"mode"`
 }
 
-// ApprovalModeratorPreset names a built-in risk-to-action mapping.
-type ApprovalModeratorPreset string
-
-const (
-	ApprovalModeratorPresetBalanced ApprovalModeratorPreset = "balanced"
-	ApprovalModeratorPresetCautious ApprovalModeratorPreset = "cautious"
-	ApprovalModeratorPresetHandsOff ApprovalModeratorPreset = "hands_off"
-	ApprovalModeratorPresetManual   ApprovalModeratorPreset = "manual"
-)
-
-// ApprovalModeratorAction is the moderator decision for a risk level.
-type ApprovalModeratorAction string
-
-const (
-	ApprovalModeratorActionApprove  ApprovalModeratorAction = "approve"
-	ApprovalModeratorActionEscalate ApprovalModeratorAction = "escalate"
-	ApprovalModeratorActionDeny     ApprovalModeratorAction = "deny"
-)
-
-// ApprovalModeratorActionMap maps risk levels to moderator actions.
-type ApprovalModeratorActionMap struct {
-	Low     ApprovalModeratorAction `json:"low"`
-	Medium  ApprovalModeratorAction `json:"medium"`
-	High    ApprovalModeratorAction `json:"high"`
-	Extreme ApprovalModeratorAction `json:"extreme"`
-}
-
-// ApprovalModeratorConfig configures AI-assisted approval review.
-type ApprovalModeratorConfig struct {
-	Enabled             bool                       `json:"enabled"`
-	Preset              ApprovalModeratorPreset    `json:"preset"`
-	Provider            string                     `json:"provider"`
-	Model               string                     `json:"model"`
-	TimeoutSeconds      int                        `json:"timeoutSeconds"`
-	MaxPromptChars      int                        `json:"maxPromptChars"`
-	MaxSubjectChars     int                        `json:"maxSubjectChars"`
-	FailureAction       ApprovalModeratorAction    `json:"failureAction"`
-	UserPolicy          string                     `json:"userPolicy"`
-	Actions             ApprovalModeratorActionMap `json:"actions"`
-	RequireUserAuthHigh bool                       `json:"requireUserAuthHigh"`
-}
-
 type ApprovalConfig struct {
-	Enabled                 bool                    `json:"enabled"`
-	HostID                  string                  `json:"hostId"`
-	KeyFile                 string                  `json:"keyFile"`
-	PairingCodeTTLSeconds   int                     `json:"pairingCodeTtlSeconds"`
-	PendingTTLSeconds       int                     `json:"pendingTtlSeconds"`
-	ApprovalTokenTTLSeconds int                     `json:"approvalTokenTtlSeconds"`
-	Moderator               ApprovalModeratorConfig `json:"moderator"`
-	Pairing                 ApprovalDomainConfig    `json:"pairing"`
-	Exec                    ApprovalDomainConfig    `json:"exec"`
-	SkillExecution          ApprovalDomainConfig    `json:"skillExecution"`
-	SecretAccess            ApprovalDomainConfig    `json:"secretAccess"`
-	MessageSend             ApprovalDomainConfig    `json:"messageSend"`
+	Enabled                 bool                 `json:"enabled"`
+	HostID                  string               `json:"hostId"`
+	KeyFile                 string               `json:"keyFile"`
+	PairingCodeTTLSeconds   int                  `json:"pairingCodeTtlSeconds"`
+	PendingTTLSeconds       int                  `json:"pendingTtlSeconds"`
+	ApprovalTokenTTLSeconds int                  `json:"approvalTokenTtlSeconds"`
+	Pairing                 ApprovalDomainConfig `json:"pairing"`
+	Exec                    ApprovalDomainConfig `json:"exec"`
+	SkillExecution          ApprovalDomainConfig `json:"skillExecution"`
+	SecretAccess            ApprovalDomainConfig `json:"secretAccess"`
+	MessageSend             ApprovalDomainConfig `json:"messageSend"`
 }
 
 // SecurityConfig groups secret storage, auditing, profiles, and network policy.

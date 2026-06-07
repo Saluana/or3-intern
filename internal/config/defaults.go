@@ -15,7 +15,6 @@ const (
 	defaultSessionCacheLimit              = 64
 	defaultHistoryMaxMessages             = 40
 	defaultMaxMediaBytes                  = 20 * 1024 * 1024
-	defaultMaxToolLoops                   = 6
 	defaultMemoryRetrieveLimit            = 8
 	defaultVectorSearchK                  = 8
 	defaultFTSSearchK                     = 8
@@ -92,8 +91,6 @@ func Default() Config {
 		HistoryMax:                       defaultHistoryMaxMessages,
 		MaxToolBytes:                     DefaultMaxToolBytes,
 		MaxMediaBytes:                    defaultMaxMediaBytes,
-		MaxToolLoops:                     defaultMaxToolLoops,
-		MaxToolLoopsExceededAction:       QuotaExceededActionAsk,
 		MemoryRetrieve:                   defaultMemoryRetrieveLimit,
 		VectorK:                          defaultVectorSearchK,
 		FTSK:                             defaultFTSSearchK,
@@ -104,7 +101,6 @@ func Default() Config {
 		ConsolidationMaxMessages:         defaultConsolidationMaxMessages,
 		ConsolidationMaxInputChars:       defaultConsolidationMaxInputChars,
 		ConsolidationAsyncTimeoutSeconds: defaultConsolidationAsyncTimeoutSecs,
-		Subagents:                        defaultSubagentsConfig(),
 		AgentCLI:                         defaultAgentCLIConfig(),
 		DocIndex:                         defaultDocIndexConfig(),
 		Skills:                           defaultSkillsConfig(home, root),
@@ -130,10 +126,6 @@ func Default() Config {
 		Context:        defaultContextConfig(),
 		ContextManager: defaultContextManagerConfig(),
 	}
-}
-
-func defaultSubagentsConfig() SubagentsConfig {
-	return SubagentsConfig{Enabled: false, MaxConcurrent: 1, MaxQueued: 32, TaskTimeoutSeconds: 300}
 }
 
 func defaultAgentCLIConfig() AgentCLIConfig {
@@ -229,7 +221,6 @@ func defaultSecurityConfig(root string) SecurityConfig {
 			PairingCodeTTLSeconds:   defaultApprovalPairingCodeTTLSeconds,
 			PendingTTLSeconds:       defaultApprovalPendingTTLSeconds,
 			ApprovalTokenTTLSeconds: defaultApprovalTokenTTLSeconds,
-			Moderator:               defaultApprovalModeratorConfig(),
 			Pairing:                 ApprovalDomainConfig{Mode: ApprovalModeAsk},
 			Exec:                    ApprovalDomainConfig{Mode: ApprovalModeTrusted},
 			SkillExecution:          ApprovalDomainConfig{Mode: ApprovalModeTrusted},
@@ -257,8 +248,6 @@ func defaultModelRoutingConfig() ModelRoutingConfig {
 	chat := ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIChatModel}}
 	return ModelRoutingConfig{
 		Chat:           chat,
-		Agents:         chat,
-		Subagents:      chat,
 		Summarization:  chat,
 		ContextManager: chat,
 		Embeddings:     ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIEmbedModel}},

@@ -131,37 +131,6 @@ func (d *DB) migrate(ctx context.Context) error {
 			INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.id, old.text);
 			INSERT INTO memory_fts(rowid, text) VALUES (new.id, new.text);
 		END;`,
-		`CREATE TABLE IF NOT EXISTS subagent_jobs(
-			id TEXT PRIMARY KEY,
-			parent_session_key TEXT NOT NULL,
-			child_session_key TEXT NOT NULL,
-			channel TEXT NOT NULL,
-			reply_to TEXT NOT NULL,
-			task TEXT NOT NULL,
-			status TEXT NOT NULL,
-			result_preview TEXT NOT NULL DEFAULT '',
-			artifact_id TEXT NOT NULL DEFAULT '',
-			error_text TEXT NOT NULL DEFAULT '',
-			requested_at INTEGER NOT NULL,
-			started_at INTEGER NOT NULL DEFAULT 0,
-			finished_at INTEGER NOT NULL DEFAULT 0,
-			attempts INTEGER NOT NULL DEFAULT 0,
-			metadata_json TEXT NOT NULL DEFAULT '{}'
-		);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_status_requested_at ON subagent_jobs(status, requested_at);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_parent_session ON subagent_jobs(parent_session_key, requested_at);`,
-		`CREATE INDEX IF NOT EXISTS subagent_jobs_recent_activity ON subagent_jobs(MAX(requested_at, started_at, finished_at) DESC, id DESC);`,
-		`CREATE TABLE IF NOT EXISTS mcp_tool_catalog(
-			server_name TEXT NOT NULL,
-			remote_name TEXT NOT NULL,
-			local_name TEXT NOT NULL,
-			status TEXT NOT NULL,
-			last_error TEXT NOT NULL DEFAULT '',
-			discovered_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(server_name, local_name)
-		);`,
-		`CREATE INDEX IF NOT EXISTS mcp_tool_catalog_status ON mcp_tool_catalog(status, updated_at);`,
 		`CREATE TABLE IF NOT EXISTS service_jobs(
 			id TEXT PRIMARY KEY,
 			kind TEXT NOT NULL,
@@ -576,39 +545,6 @@ func (d *DB) migrate(ctx context.Context) error {
 			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS approval_tokens_request_expires_at ON approval_tokens(approval_request_id, expires_at);`,
-		`CREATE TABLE IF NOT EXISTS skill_run_plans(
-			id TEXT PRIMARY KEY,
-			skill_id TEXT NOT NULL,
-			version TEXT NOT NULL DEFAULT '',
-			origin TEXT NOT NULL DEFAULT '',
-			trust_state TEXT NOT NULL DEFAULT '',
-			skill_dir TEXT NOT NULL DEFAULT '',
-			relative_path TEXT NOT NULL DEFAULT '',
-			entrypoint TEXT NOT NULL DEFAULT '',
-			args_json TEXT NOT NULL DEFAULT '[]',
-			stdin_text TEXT NOT NULL DEFAULT '',
-			timeout_seconds INTEGER NOT NULL DEFAULT 0,
-			command_json TEXT NOT NULL DEFAULT '[]',
-			script_hash TEXT NOT NULL DEFAULT '',
-			env_binding_hash TEXT NOT NULL DEFAULT '',
-			plan_hash TEXT NOT NULL DEFAULT '',
-			subject_hash TEXT NOT NULL DEFAULT '',
-			requester_agent_id TEXT NOT NULL DEFAULT '',
-			requester_session_id TEXT NOT NULL DEFAULT '',
-			execution_host_id TEXT NOT NULL DEFAULT '',
-			approval_request_id INTEGER,
-			status TEXT NOT NULL DEFAULT '',
-			result_json TEXT NOT NULL DEFAULT '',
-			last_error TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL DEFAULT 0,
-			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE SET NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS skill_run_plans_status_created_at ON skill_run_plans(status, created_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS skill_run_plans_approval_request_id ON skill_run_plans(approval_request_id);`,
-		`CREATE INDEX IF NOT EXISTS skill_run_plans_session_status ON skill_run_plans(requester_session_id, status, created_at DESC);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS skill_run_plans_active_session_plan_hash ON skill_run_plans(requester_session_id, plan_hash)
-			WHERE status IN ('prepared', 'planned', 'pending_approval', 'awaiting_resume', 'approved', 'running');`,
 		`CREATE TABLE IF NOT EXISTS agent_cli_runs(
 			id TEXT PRIMARY KEY,
 			job_id TEXT NOT NULL UNIQUE,
@@ -761,16 +697,10 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureMemoryDocsEmbedFingerprintColumn(ctx); err != nil {
 		return err
 	}
-	if err := d.ensureSkillRunPlanColumns(ctx); err != nil {
-		return err
-	}
 	if err := d.ensureApprovalAllowlistMatchColumns(ctx); err != nil {
 		return err
 	}
 	if err := d.ensureApprovalRequestContextColumn(ctx); err != nil {
-		return err
-	}
-	if err := d.ensureApprovalModeratorColumns(ctx); err != nil {
 		return err
 	}
 	if err := d.ensureMemoryVecIndexForExisting(ctx); err != nil {
@@ -1098,29 +1028,6 @@ func (d *DB) ensureMemoryDocsEmbedFingerprintColumn(ctx context.Context) error {
 	return err
 }
 
-func (d *DB) ensureSkillRunPlanColumns(ctx context.Context) error {
-	cols := []struct {
-		name string
-		ddl  string
-	}{
-		{name: "stdin_nonce", ddl: `ALTER TABLE skill_run_plans ADD COLUMN stdin_nonce BLOB NOT NULL DEFAULT X''`},
-		{name: "stdin_sha256", ddl: `ALTER TABLE skill_run_plans ADD COLUMN stdin_sha256 TEXT NOT NULL DEFAULT ''`},
-	}
-	for _, col := range cols {
-		has, err := d.tableHasColumn(ctx, "skill_run_plans", col.name)
-		if err != nil {
-			return err
-		}
-		if has {
-			continue
-		}
-		if _, err := d.SQL.ExecContext(ctx, col.ddl); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // ensureMemoryNotesMetaColumns adds lifecycle/ranking metadata columns to
 // memory_notes if they do not yet exist (additive migration), then backfills
 // rows that were written by the old consolidation path.
@@ -1248,35 +1155,6 @@ func (d *DB) ensureApprovalRequestContextColumn(ctx context.Context) error {
 	}
 	_, err = d.SQL.ExecContext(ctx, `ALTER TABLE approval_requests ADD COLUMN requester_context_json TEXT NOT NULL DEFAULT '{}'`)
 	return err
-}
-
-func (d *DB) ensureApprovalModeratorColumns(ctx context.Context) error {
-	columns := []struct {
-		name string
-		ddl  string
-	}{
-		{"moderator_status", `ALTER TABLE approval_requests ADD COLUMN moderator_status TEXT NOT NULL DEFAULT ''`},
-		{"moderator_risk", `ALTER TABLE approval_requests ADD COLUMN moderator_risk TEXT NOT NULL DEFAULT ''`},
-		{"moderator_action", `ALTER TABLE approval_requests ADD COLUMN moderator_action TEXT NOT NULL DEFAULT ''`},
-		{"moderator_reason", `ALTER TABLE approval_requests ADD COLUMN moderator_reason TEXT NOT NULL DEFAULT ''`},
-		{"moderator_model", `ALTER TABLE approval_requests ADD COLUMN moderator_model TEXT NOT NULL DEFAULT ''`},
-		{"moderator_policy_hash", `ALTER TABLE approval_requests ADD COLUMN moderator_policy_hash TEXT NOT NULL DEFAULT ''`},
-		{"moderator_reviewed_at", `ALTER TABLE approval_requests ADD COLUMN moderator_reviewed_at INTEGER NOT NULL DEFAULT 0`},
-		{"moderator_latency_ms", `ALTER TABLE approval_requests ADD COLUMN moderator_latency_ms INTEGER NOT NULL DEFAULT 0`},
-	}
-	for _, column := range columns {
-		exists, err := d.tableHasColumn(ctx, "approval_requests", column.name)
-		if err != nil {
-			return err
-		}
-		if exists {
-			continue
-		}
-		if _, err := d.SQL.ExecContext(ctx, column.ddl); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {

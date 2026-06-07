@@ -25,7 +25,6 @@ import (
 	"or3-intern/internal/jobs"
 	or3log "or3-intern/internal/log"
 	"or3-intern/internal/mcp"
-	"or3-intern/internal/doctoradmin"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/memorysvc"
 	"or3-intern/internal/providers"
@@ -66,7 +65,6 @@ type serviceServer struct {
 	doctorTurnMu          sync.Mutex
 	doctorTurnOnce        sync.Once
 	doctorActiveTurns     map[string]doctorSessionTurnLease
-	doctorAdmin           *doctoradmin.Registry
 	memorySvc             *memorysvc.Service
 }
 
@@ -133,7 +131,6 @@ type serviceModelCatalogItem struct {
 
 const (
 	serviceTurnsBodyLimit                    int64 = 1 << 20
-	serviceSubagentsBodyLimit                int64 = 1 << 20
 	servicePairingBodyLimit                  int64 = 64 << 10
 	serviceApprovalBodyLimit                 int64 = 64 << 10
 	serviceEmbeddingsBodyLimit               int64 = 64 << 10
@@ -196,7 +193,6 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	if db := server.serviceDB(); db != nil {
 		server.memorySvc = memorysvc.New(cfg, db, server.serviceEmbedProvider(), currentEmbedFingerprint(cfg))
 	}
-	server.ensureDoctorAdminRegistry()
 	if chatManager != nil {
 		server.chatManager = chatManager
 	} else if db := server.serviceDB(); db != nil {
@@ -533,9 +529,6 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 		jobID := strings.TrimSpace(parts[0])
 		snapshot, err := s.app().GetJob(jobID)
 		if err != nil {
-			if s.writePersistedSubagentJobSnapshot(w, r, jobID) {
-				return
-			}
 			if s.writePersistedAgentCLIRunSnapshot(w, r, jobID) {
 				return
 			}

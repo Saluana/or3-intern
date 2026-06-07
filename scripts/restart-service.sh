@@ -269,7 +269,7 @@ start_service() {
   fi
 
   echo "Starting or3-intern service in the background..."
-  nohup "$repo_root/or3-intern" "${launch_args[@]}" >>"$log_file" 2>&1 &
+  nohup "$repo_root/or3-intern" "${launch_args[@]}" </dev/null >>"$log_file" 2>&1 &
   local pid=$!
   echo "$pid" > "$pid_file"
 

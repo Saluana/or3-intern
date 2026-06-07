@@ -46,8 +46,6 @@ func ApplyProviderPreset(cfg *config.Config, choice string) {
 	providerKey := ConfigureProviderKeyFromBase(preset.apiBase)
 	if cfg.ModelRouting.Chat.Primary.Provider == "" || choice != "3" {
 		cfg.ModelRouting.Chat.Primary = config.ModelRef{Provider: providerKey, Model: preset.model}
-		cfg.ModelRouting.Agents.Primary = cfg.ModelRouting.Chat.Primary
-		cfg.ModelRouting.Subagents.Primary = cfg.ModelRouting.Chat.Primary
 		cfg.ModelRouting.Summarization.Primary = cfg.ModelRouting.Chat.Primary
 		cfg.ModelRouting.ContextManager.Primary = cfg.ModelRouting.Chat.Primary
 		cfg.ModelRouting.Embeddings.Primary = config.ModelRef{Provider: providerKey, Model: preset.embedModel}
@@ -174,8 +172,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Provider.EnableVision = value
 	case "runtime_consolidation_enabled":
 		cfg.ConsolidationEnabled = value
-	case "runtime_subagents_enabled":
-		cfg.Subagents.Enabled = value
 	case "context_dynamic_tools":
 		cfg.Context.Tools.DynamicExpose = value
 	case "context_task_card_enabled":
@@ -225,8 +221,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Security.Audit.VerifyOnStart = value
 	case "security_approvals_enabled":
 		cfg.Security.Approvals.Enabled = value
-	case "security_approval_moderator_enabled":
-		cfg.Security.Approvals.Moderator.Enabled = value
 	case "security_profiles_enabled":
 		cfg.Security.Profiles.Enabled = value
 	case "security_network_enabled":
@@ -363,27 +357,6 @@ func ApplyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		return true, nil
 	case "security_approval_message_mode":
 		cfg.Security.Approvals.MessageSend.Mode = config.ApprovalMode(choice)
-		return true, nil
-	case "security_approval_moderator_preset":
-		cfg.Security.Approvals.Moderator.Preset = config.ApprovalModeratorPreset(choice)
-		cfg.Security.Approvals.Moderator.Actions = config.ApprovalModeratorActionMap{}
-		config.NormalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
-		return true, nil
-	case "security_approval_moderator_failure_action":
-		cfg.Security.Approvals.Moderator.FailureAction = config.ApprovalModeratorAction(choice)
-		return true, nil
-	case "security_approval_moderator_action_low", "security_approval_moderator_action_medium", "security_approval_moderator_action_high", "security_approval_moderator_action_extreme":
-		action := config.ApprovalModeratorAction(choice)
-		switch fieldKey {
-		case "security_approval_moderator_action_low":
-			cfg.Security.Approvals.Moderator.Actions.Low = action
-		case "security_approval_moderator_action_medium":
-			cfg.Security.Approvals.Moderator.Actions.Medium = action
-		case "security_approval_moderator_action_high":
-			cfg.Security.Approvals.Moderator.Actions.High = action
-		case "security_approval_moderator_action_extreme":
-			cfg.Security.Approvals.Moderator.Actions.Extreme = action
-		}
 		return true, nil
 	default:
 		return false, nil
@@ -629,8 +602,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "provider_model":
 		cfg.Provider.Model = value
 		cfg.ModelRouting.Chat.Primary.Model = value
-		cfg.ModelRouting.Agents.Primary.Model = value
-		cfg.ModelRouting.Subagents.Primary.Model = value
 		return true, nil
 	case "provider_embed":
 		cfg.Provider.EmbedModel = value
@@ -693,24 +664,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return true, nil
 	case "routing_chat_fallbacks":
 		cfg.ModelRouting.Chat.Fallbacks = parseModelRefs(value)
-		return true, nil
-	case "routing_agents_provider":
-		cfg.ModelRouting.Agents.Primary.Provider = value
-		return true, nil
-	case "routing_agents_model":
-		cfg.ModelRouting.Agents.Primary.Model = value
-		return true, nil
-	case "routing_agents_fallbacks":
-		cfg.ModelRouting.Agents.Fallbacks = parseModelRefs(value)
-		return true, nil
-	case "routing_subagents_provider":
-		cfg.ModelRouting.Subagents.Primary.Provider = value
-		return true, nil
-	case "routing_subagents_model":
-		cfg.ModelRouting.Subagents.Primary.Model = value
-		return true, nil
-	case "routing_subagents_fallbacks":
-		cfg.ModelRouting.Subagents.Fallbacks = parseModelRefs(value)
 		return true, nil
 	case "routing_summarization_provider":
 		cfg.ModelRouting.Summarization.Primary.Provider = value
@@ -794,15 +747,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.MaxToolBytes, value, fieldKey)
 	case "runtime_max_media_bytes":
 		return setIntValue(&cfg.MaxMediaBytes, value, fieldKey)
-	case "runtime_max_tool_loops":
-		return setIntValue(&cfg.MaxToolLoops, value, fieldKey)
-	case "runtime_max_tool_loops_exceeded_action":
-		action := config.QuotaExceededAction(strings.ToLower(strings.TrimSpace(value)))
-		if action != config.QuotaExceededActionAsk && action != config.QuotaExceededActionFail {
-			return false, fmt.Errorf("%s must be ask or fail", fieldKey)
-		}
-		cfg.MaxToolLoopsExceededAction = action
-		return true, nil
 	case "runtime_memory_retrieve":
 		return setIntValue(&cfg.MemoryRetrieve, value, fieldKey)
 	case "runtime_vector_k":
@@ -824,12 +768,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.ConsolidationMaxInputChars, value, fieldKey)
 	case "runtime_consolidation_async_timeout":
 		return setIntValue(&cfg.ConsolidationAsyncTimeoutSeconds, value, fieldKey)
-	case "runtime_subagents_max_concurrent":
-		return setIntValue(&cfg.Subagents.MaxConcurrent, value, fieldKey)
-	case "runtime_subagents_max_queued":
-		return setIntValue(&cfg.Subagents.MaxQueued, value, fieldKey)
-	case "runtime_subagents_timeout":
-		return setIntValue(&cfg.Subagents.TaskTimeoutSeconds, value, fieldKey)
 	case "context_max_input_tokens":
 		return setIntValue(&cfg.Context.MaxInputTokens, value, fieldKey)
 	case "context_output_reserve":
@@ -1015,17 +953,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Security.Approvals.PendingTTLSeconds, value, fieldKey)
 	case "security_approvals_token_ttl":
 		return setIntValue(&cfg.Security.Approvals.ApprovalTokenTTLSeconds, value, fieldKey)
-	case "security_approval_moderator_provider":
-		cfg.Security.Approvals.Moderator.Provider = value
-		return true, nil
-	case "security_approval_moderator_model":
-		cfg.Security.Approvals.Moderator.Model = value
-		return true, nil
-	case "security_approval_moderator_timeout":
-		return setIntValue(&cfg.Security.Approvals.Moderator.TimeoutSeconds, value, fieldKey)
-	case "security_approval_moderator_user_policy":
-		cfg.Security.Approvals.Moderator.UserPolicy = value
-		return true, nil
 	case "security_profiles_default":
 		cfg.Security.Profiles.Default = value
 		return true, nil

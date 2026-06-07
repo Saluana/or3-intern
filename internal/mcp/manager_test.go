@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,7 +16,6 @@ import (
 type fakeSession struct {
 	closeErr error
 	listFn   func(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error)
-	callFn   func(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error)
 }
 
 func (s *fakeSession) Close() error {
@@ -29,13 +27,6 @@ func (s *fakeSession) ListTools(ctx context.Context, params *sdkmcp.ListToolsPar
 		return s.listFn(ctx, params)
 	}
 	return &sdkmcp.ListToolsResult{}, nil
-}
-
-func (s *fakeSession) CallTool(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
-	if s.callFn != nil {
-		return s.callFn(ctx, params)
-	}
-	return &sdkmcp.CallToolResult{}, nil
 }
 
 func TestBuildTransportVariants(t *testing.T) {
@@ -91,135 +82,6 @@ func TestBuildTransportVariants(t *testing.T) {
 	}
 }
 
-func TestRemoteTool_SchemaPropagationAndExecution(t *testing.T) {
-	var gotName string
-	var gotArgs map[string]any
-	tool := newRemoteToolSpec("alpha", config.MCPServerConfig{ToolTimeoutSeconds: 1}, &sdkmcp.Tool{
-		Name:        "Echo!",
-		Description: "Echoes input",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"text": map[string]any{"type": "string"},
-			},
-		},
-	}, &fakeSession{
-		callFn: func(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
-			gotName = params.Name
-			gotArgs = params.Arguments.(map[string]any)
-			return &sdkmcp.CallToolResult{
-				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "hello back"}},
-			}, nil
-		},
-	}).Tool()
-
-	if tool.Name() != "mcp_alpha_echo" {
-		t.Fatalf("unexpected tool name: %q", tool.Name())
-	}
-	schema := tool.Schema()
-	function, ok := schema["function"].(map[string]any)
-	if !ok {
-		t.Fatalf("unexpected schema: %#v", schema)
-	}
-	if function["description"] != "Echoes input" {
-		t.Fatalf("expected remote description to survive, got %#v", function["description"])
-	}
-
-	out, err := tool.Execute(context.Background(), map[string]any{"text": "hi"})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if out != "hello back" {
-		t.Fatalf("unexpected output: %q", out)
-	}
-	if gotName != "Echo!" {
-		t.Fatalf("expected remote tool name to be preserved, got %q", gotName)
-	}
-	if gotArgs["text"] != "hi" {
-		t.Fatalf("expected args to be forwarded, got %#v", gotArgs)
-	}
-}
-
-func TestRemoteTool_ExecuteTimeout(t *testing.T) {
-	tool := (&RemoteTool{
-		localName:   "mcp_alpha_slow",
-		serverName:  "alpha",
-		remoteName:  "slow",
-		description: "slow",
-		parameters:  defaultParameters(),
-		timeout:     10 * time.Millisecond,
-		session: &fakeSession{
-			callFn: func(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
-				<-ctx.Done()
-				return nil, ctx.Err()
-			},
-		},
-	})
-
-	_, err := tool.Execute(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
-	if !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("expected deadline error, got %v", err)
-	}
-}
-
-func TestRemoteTool_ExecuteRemoteError(t *testing.T) {
-	tool := (&RemoteTool{
-		localName:   "mcp_alpha_fail",
-		serverName:  "alpha",
-		remoteName:  "fail",
-		description: "fail",
-		parameters:  defaultParameters(),
-		timeout:     time.Second,
-		session: &fakeSession{
-			callFn: func(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
-				return &sdkmcp.CallToolResult{
-					IsError: true,
-					Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "remote denied"}},
-				}, nil
-			},
-		},
-	})
-
-	out, err := tool.Execute(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected remote error")
-	}
-	if out != "" {
-		t.Fatalf("expected empty output on remote error, got %q", out)
-	}
-	if !strings.Contains(err.Error(), "remote denied") {
-		t.Fatalf("expected remote error text to survive, got %v", err)
-	}
-}
-
-func TestResultToTextConvertsMixedContent(t *testing.T) {
-	res := &sdkmcp.CallToolResult{
-		Content: []sdkmcp.Content{
-			&sdkmcp.TextContent{Text: "plain text"},
-			&sdkmcp.ImageContent{MIMEType: "image/png", Data: []byte("1234")},
-			&sdkmcp.EmbeddedResource{Resource: &sdkmcp.ResourceContents{URI: "file:///tmp/data.txt", Text: "resource text"}},
-		},
-		StructuredContent: map[string]any{"ok": true},
-	}
-
-	got := resultToText(res, maxResultChars)
-	if !strings.Contains(got, "plain text") {
-		t.Fatalf("expected text content, got %q", got)
-	}
-	if !strings.Contains(got, "[image content omitted mime=image/png bytes=4]") {
-		t.Fatalf("expected image summary, got %q", got)
-	}
-	if !strings.Contains(got, "resource text") {
-		t.Fatalf("expected embedded resource text, got %q", got)
-	}
-	if !strings.Contains(got, `{"ok":true}`) {
-		t.Fatalf("expected structured content JSON, got %q", got)
-	}
-}
-
 func TestManagerConnect_PartialFailureAndRegistration(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"alpha": {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},
@@ -240,11 +102,6 @@ func TestManagerConnect_PartialFailureAndRegistration(t *testing.T) {
 							Description: "Echoes",
 							InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 						}},
-					}, nil
-				},
-				callFn: func(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
-					return &sdkmcp.CallToolResult{
-						Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "ok"}},
 					}, nil
 				},
 			}, nil
@@ -273,15 +130,6 @@ func TestManagerConnect_PartialFailureAndRegistration(t *testing.T) {
 	}
 	if !foundSuccess || !foundFailure {
 		t.Fatalf("expected success and failure startup logs, got %#v", logs)
-	}
-
-	spec := manager.tools[0]
-	out, err := spec.Tool().Execute(context.Background(), map[string]any{})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if out != "ok" {
-		t.Fatalf("unexpected MCP tool output: %q", out)
 	}
 }
 
@@ -380,29 +228,6 @@ func TestManagerRefreshAndReconnectWithBackoff(t *testing.T) {
 	}
 	if status["beta"].State != "off" {
 		t.Fatalf("expected beta off after hot reload, got %#v", status["beta"])
-	}
-}
-
-func TestManagerToolCatalog(t *testing.T) {
-	manager := NewManager(map[string]config.MCPServerConfig{
-		"alpha": {Enabled: true, Transport: "stdio", Command: "alpha", ToolTimeoutSeconds: 5},
-	})
-	manager.connect = func(ctx context.Context, name string, cfg config.MCPServerConfig) (session, error) {
-		return &fakeSession{
-			listFn: func(ctx context.Context, params *sdkmcp.ListToolsParams) (*sdkmcp.ListToolsResult, error) {
-				return &sdkmcp.ListToolsResult{Tools: []*sdkmcp.Tool{{Name: "echo", InputSchema: map[string]any{"type": "object"}}}}, nil
-			},
-		}, nil
-	}
-	if err := manager.Connect(context.Background()); err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	catalog := manager.ToolCatalog()
-	if len(catalog) != 1 {
-		t.Fatalf("expected one catalog entry, got %#v", catalog)
-	}
-	if catalog[0].ServerName != "alpha" || catalog[0].RemoteName != "echo" || catalog[0].LocalName != "mcp_alpha_echo" || catalog[0].Status != "connected" {
-		t.Fatalf("unexpected catalog entry: %#v", catalog[0])
 	}
 }
 

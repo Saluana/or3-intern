@@ -153,10 +153,6 @@ func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued appro
 func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
 	defer s.persistServiceJobSummary(context.Background(), jobID)
 	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
-	if strings.HasPrefix(sessionKey, "doctor-app-") && strings.TrimSpace(issued.Request.Type) == string(approval.SubjectToolQuota) {
-		s.runDoctorApprovedQuotaResumeJob(ctx, jobID, issued, identity)
-		return
-	}
 	meta := map[string]any{
 		"approval_request_id": issued.Request.ID,
 		"approved_resume":     true,
@@ -310,70 +306,6 @@ func approvalResumeWarning(err error) string {
 	return fmt.Sprintf("Approved, but the automatic resume did not start: %s", message)
 }
 
-func (s *serviceServer) handleSubagents(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/internal/v1/subagents/") {
-		if r.Method != http.MethodGet {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		jobID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/internal/v1/subagents/"))
-		if jobID == "" || strings.Contains(jobID, "/") {
-			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "subagent job not found"})
-			return
-		}
-		if !s.writePersistedSubagentJobSnapshot(w, r, jobID) {
-			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "subagent job not found"})
-		}
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		s.handleSubagentsList(w, r)
-		return
-	case http.MethodPost:
-		writeServiceJSON(w, http.StatusGone, map[string]any{
-			"error":   app.ErrLegacySubagentsRemoved.Error(),
-			"code":    "legacy_subagent_endpoint_removed",
-			"replace": "/internal/v1/agent-runs",
-		})
-		return
-	default:
-		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		return
-	}
-}
-
-func (s *serviceServer) handleSubagentsList(w http.ResponseWriter, r *http.Request) {
-	store := s.control().DB
-	if store == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "subagent history is not available"})
-		return
-	}
-	query := r.URL.Query()
-	filter := db.SubagentJobFilter{
-		Status:           strings.TrimSpace(query.Get("status")),
-		ParentSessionKey: strings.TrimSpace(query.Get("parent_session_key")),
-	}
-	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
-		parsed, err := strconv.Atoi(rawLimit)
-		if err != nil || parsed <= 0 {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "limit must be a positive integer"})
-			return
-		}
-		filter.Limit = parsed
-	}
-	jobs, err := store.ListSubagentJobs(r.Context(), filter)
-	if err != nil {
-		if errors.Is(err, db.ErrInvalidSubagentStatusFilter) {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		writeServiceError(w, r, http.StatusServiceUnavailable, "subagent history unavailable", err)
-		return
-	}
-	writeServiceValue(w, http.StatusOK, controlplane.BuildSubagentJobListResponse(jobs))
-}
-
 func limitServiceRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 	if r != nil && r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
@@ -500,7 +432,7 @@ func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-		att, err := s.serviceArtifacts().SaveNamed(r.Context(), sessionKey, filename, mimeType, data)
+	att, err := s.serviceArtifacts().SaveNamed(r.Context(), sessionKey, filename, mimeType, data)
 	if err != nil {
 		writeServiceError(w, r, http.StatusInternalServerError, "artifact upload failed", err)
 		return
@@ -513,36 +445,6 @@ func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Requ
 		"size_bytes":  att.SizeBytes,
 		"kind":        att.Kind,
 	})
-}
-
-func (s *serviceServer) writePersistedSubagentJobSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
-	store := s.control().DB
-	if store == nil {
-		return false
-	}
-	job, ok, err := store.GetSubagentJob(r.Context(), jobID)
-	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "subagent history unavailable", err)
-		return true
-	}
-	if !ok {
-		return false
-	}
-	response := controlplane.BuildSubagentJobResponse(job)
-	if requestedAt, ok := response["requested_at"]; ok {
-		response["created_at"] = requestedAt
-	}
-	if preview := strings.TrimSpace(job.ResultPreview); preview != "" {
-		response["final_text"] = preview
-	}
-	if strings.TrimSpace(job.ArtifactID) == "" {
-		if fullText := s.persistedSubagentFinalText(r.Context(), store, job); strings.TrimSpace(fullText) != "" {
-			response["final_text"] = fullText
-		}
-	}
-	response["events"] = s.persistedSubagentEvents(r.Context(), store, job)
-	writeServiceValue(w, http.StatusOK, response)
-	return true
 }
 
 func (s *serviceServer) writePersistedAgentCLIRunSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
@@ -595,86 +497,6 @@ func (s *serviceServer) agentCLIEventsToJobEvents(events []db.AgentCLIEvent) []j
 		})
 	}
 	return out
-}
-
-func (s *serviceServer) persistedSubagentFinalText(ctx context.Context, store *db.DB, job db.SubagentJob) string {
-	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
-		return ""
-	}
-	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 50)
-	if err != nil {
-		log.Printf("load persisted subagent final text failed: job=%s err=%v", job.ID, err)
-		return ""
-	}
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
-		if msg.Role == "assistant" && strings.TrimSpace(msg.Content) != "" {
-			return msg.Content
-		}
-	}
-	return ""
-}
-
-func (s *serviceServer) persistedSubagentEvents(ctx context.Context, store *db.DB, job db.SubagentJob) []jobs.Event {
-	if store == nil || strings.TrimSpace(job.ChildSessionKey) == "" {
-		return []jobs.Event{}
-	}
-	messages, err := store.GetLastMessages(ctx, job.ChildSessionKey, 100)
-	if err != nil {
-		log.Printf("load persisted subagent events failed: job=%s err=%v", job.ID, err)
-		return []jobs.Event{}
-	}
-	events := make([]jobs.Event, 0)
-	var sequence int64
-	emit := func(eventType string, data map[string]any) {
-		sequence++
-		events = append(events, jobs.Event{Sequence: sequence, Type: eventType, Data: data})
-	}
-	for _, msg := range messages {
-		payload := decodeServiceJSONMap(msg.PayloadJSON)
-		switch msg.Role {
-		case "assistant":
-			rawCalls, ok := payload["tool_calls"].([]any)
-			if !ok {
-				continue
-			}
-			for _, raw := range rawCalls {
-				call, ok := raw.(map[string]any)
-				if !ok {
-					continue
-				}
-				function, _ := call["function"].(map[string]any)
-				name := serviceJSONText(function, "name")
-				if name == "" {
-					name = serviceJSONText(call, "name")
-				}
-				arguments := serviceJSONText(function, "arguments")
-				data := map[string]any{"name": name, "arguments": arguments}
-				if id := serviceJSONText(call, "id"); id != "" {
-					data["tool_call_id"] = id
-				}
-				emit("tool_call", data)
-			}
-		case "tool":
-			name := serviceJSONText(payload, "tool")
-			if name == "" {
-				name = "tool"
-			}
-			result := strings.TrimSpace(msg.Content)
-			if preview := serviceJSONText(payload, "preview"); preview != "" {
-				result = preview
-			}
-			data := map[string]any{"name": name, "result": result}
-			if id := serviceJSONText(payload, "tool_call_id"); id != "" {
-				data["tool_call_id"] = id
-			}
-			if artifactID := serviceJSONText(payload, "artifact_id"); artifactID != "" {
-				data["artifact_id"] = artifactID
-			}
-			emit("tool_result", data)
-		}
-	}
-	return events
 }
 
 func serviceJSONText(values map[string]any, key string) string {
@@ -942,9 +764,6 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 		}
 		return fmt.Sprintf("The tool still needs approval before it can continue. Last tool: %s.", toolName), true
 	default:
-		if text, ok := doctorEmptyFinalSummaryFromToolResult(toolName, o.lastToolResult); ok {
-			return text, true
-		}
 		return fmt.Sprintf("The tool finished, but the model did not return a final message. Last tool: %s.", toolName), true
 	}
 }

@@ -21,6 +21,11 @@ type doctorSessionTurnLease struct {
 	id   string
 }
 
+func doctorUsesRunnerChat(runnerID string) bool {
+	runnerID = strings.TrimSpace(runnerID)
+	return runnerID != "" && !strings.EqualFold(runnerID, string(agentcli.RunnerOR3))
+}
+
 func (s *serviceServer) initDoctorTurnTracking() {
 	s.doctorTurnOnce.Do(func() {
 		s.doctorActiveTurns = map[string]doctorSessionTurnLease{}
@@ -113,7 +118,7 @@ func doctorSessionMessageResponse(messages []db.ChatMessage, adminBrain adminflo
 	payload := map[string]any{
 		"messages":    doctorAPIChatMessages(messages),
 		"admin_brain": adminBrain,
-		"transport": transport,
+		"transport":   transport,
 	}
 	for key, value := range extra {
 		payload[key] = value

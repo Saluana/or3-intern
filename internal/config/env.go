@@ -18,8 +18,6 @@ func ApplyEnvOverrides(cfg *Config) {
 		providerKey := inferProviderKey(v)
 		cfg.Provider.APIBase = v
 		cfg.ModelRouting.Chat.Primary.Provider = providerKey
-		cfg.ModelRouting.Agents.Primary.Provider = providerKey
-		cfg.ModelRouting.Subagents.Primary.Provider = providerKey
 		cfg.ModelRouting.Summarization.Primary.Provider = providerKey
 		cfg.ModelRouting.ContextManager.Primary.Provider = providerKey
 		cfg.ModelRouting.Embeddings.Primary.Provider = providerKey
@@ -32,8 +30,6 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_MODEL"); v != "" && shouldApplyEnvModelOverride(cfg) {
 		cfg.Provider.Model = v
 		cfg.ModelRouting.Chat.Primary.Model = v
-		cfg.ModelRouting.Agents.Primary.Model = v
-		cfg.ModelRouting.Subagents.Primary.Model = v
 		if cfg.AgentCLI.Enabled {
 			appendCompatEnvWarning(cfg,
 				"OR3_MODEL only affects legacy built-in agent paths; configure chat turns via agentCLI.defaultRunner and external runner models instead.")
@@ -74,23 +70,6 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvString("OR3_EMAIL_SMTP_USERNAME", &cfg.Channels.Email.SMTPUsername)
 	applyEnvString("OR3_EMAIL_SMTP_PASSWORD", &cfg.Channels.Email.SMTPPassword)
 	applyEnvString("OR3_EMAIL_FROM_ADDRESS", &cfg.Channels.Email.FromAddress)
-	applyEnvBool("OR3_SUBAGENTS_ENABLED", &cfg.Subagents.Enabled)
-	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_ENABLED")) != "" {
-		appendCompatEnvWarning(cfg,
-			"OR3_SUBAGENTS_ENABLED is deprecated in runner-first mode; use agentCLI and external runners for background work.")
-	}
-	applyEnvInt("OR3_SUBAGENTS_MAX_CONCURRENT", &cfg.Subagents.MaxConcurrent)
-	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_MAX_CONCURRENT")) != "" {
-		appendCompatEnvWarning(cfg, "OR3_SUBAGENTS_MAX_CONCURRENT is ignored while runner-first mode is active.")
-	}
-	applyEnvInt("OR3_SUBAGENTS_MAX_QUEUED", &cfg.Subagents.MaxQueued)
-	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_MAX_QUEUED")) != "" {
-		appendCompatEnvWarning(cfg, "OR3_SUBAGENTS_MAX_QUEUED is ignored while runner-first mode is active.")
-	}
-	applyEnvInt("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", &cfg.Subagents.TaskTimeoutSeconds)
-	if cfg.AgentCLI.Enabled && strings.TrimSpace(os.Getenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS")) != "" {
-		appendCompatEnvWarning(cfg, "OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS is ignored while runner-first mode is active.")
-	}
 	applyEnvBool("OR3_AGENT_CLI_ENABLED", &cfg.AgentCLI.Enabled)
 	applyEnvString("OR3_AGENT_CLI_DEFAULT_RUNNER", &cfg.AgentCLI.DefaultRunner)
 	if v := os.Getenv("OR3_AGENT_CLI_DISABLED_RUNNERS"); v != "" {
@@ -148,8 +127,6 @@ func shouldApplyEnvModelOverride(cfg *Config) bool {
 	}
 	for _, pair := range []struct{ got, want string }{
 		{cfg.ModelRouting.Chat.Primary.Model, defaults.ModelRouting.Chat.Primary.Model},
-		{cfg.ModelRouting.Agents.Primary.Model, defaults.ModelRouting.Agents.Primary.Model},
-		{cfg.ModelRouting.Subagents.Primary.Model, defaults.ModelRouting.Subagents.Primary.Model},
 	} {
 		if strings.TrimSpace(pair.got) != strings.TrimSpace(pair.want) {
 			return false

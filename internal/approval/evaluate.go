@@ -28,44 +28,6 @@ func (b *Broker) EvaluateExec(ctx context.Context, req ExecEvaluation) (Decision
 	)
 }
 
-func (b *Broker) EvaluateSkillExec(ctx context.Context, req SkillEvaluation) (Decision, error) {
-	subject := SkillExecutionSubject{
-		Type:            string(SubjectSkillExec),
-		SkillID:         strings.TrimSpace(req.SkillID),
-		Version:         strings.TrimSpace(req.Version),
-		Origin:          strings.TrimSpace(req.Origin),
-		TrustState:      strings.TrimSpace(req.TrustState),
-		ToolName:        firstNonEmpty(req.ToolName, "run_skill"),
-		PlanID:          strings.TrimSpace(req.PlanID),
-		PlanHash:        strings.TrimSpace(req.PlanHash),
-		ScriptHash:      strings.TrimSpace(req.ScriptHash),
-		ExecutionHostID: b.hostID(),
-		EnvBindingHash:  strings.TrimSpace(req.EnvBindingHash),
-		TimeoutSeconds:  req.TimeoutSeconds,
-		RequestingAgent: strings.TrimSpace(req.AgentID),
-		SessionID:       strings.TrimSpace(req.SessionID),
-	}
-	return b.evaluate(ctx, SubjectSkillExec, subject, req.ApprovalToken,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Agent: subject.RequestingAgent},
-		SkillAllowlistMatcher{SkillID: subject.SkillID, Version: subject.Version, Origin: subject.Origin, TrustState: subject.TrustState, PlanHash: subject.PlanHash, ScriptHash: subject.ScriptHash, EnvBindingHash: subject.EnvBindingHash, TimeoutSeconds: subject.TimeoutSeconds},
-	)
-}
-
-func (b *Broker) EvaluateSecretAccess(ctx context.Context, req SecretAccessEvaluation) (Decision, error) {
-	subject := SecretAccessSubject{
-		Type:            string(SubjectSecretAccess),
-		ExecutionHostID: b.hostID(),
-		SecretName:      strings.TrimSpace(req.SecretName),
-		Operation:       firstNonEmpty(req.Operation, "read"),
-		RequestingAgent: strings.TrimSpace(req.AgentID),
-		SessionID:       strings.TrimSpace(req.SessionID),
-	}
-	return b.evaluate(ctx, SubjectSecretAccess, subject, req.ApprovalToken,
-		AllowlistScope{HostID: subject.ExecutionHostID, Agent: subject.RequestingAgent},
-		nil,
-	)
-}
-
 func (b *Broker) EvaluateRunnerPermission(ctx context.Context, req RunnerPermissionEvaluation) (Decision, error) {
 	subject := RunnerPermissionSubject{
 		Type:            string(SubjectRunnerPermission),
@@ -80,24 +42,6 @@ func (b *Broker) EvaluateRunnerPermission(ctx context.Context, req RunnerPermiss
 	return b.evaluateWithMode(ctx, SubjectRunnerPermission, subject, req.ApprovalToken, b.Config.Exec.Mode,
 		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.RunnerID, Agent: subject.RequestingAgent},
 		RunnerPermissionAllowlistMatcher{RunnerID: subject.RunnerID, PermissionKind: subject.PermissionKind, Access: subject.Access, TargetPath: subject.TargetPath},
-	)
-}
-
-func (b *Broker) EvaluateToolQuota(ctx context.Context, req ToolQuotaEvaluation, mode config.ApprovalMode) (Decision, error) {
-	subject := ToolQuotaSubject{
-		Type:            string(SubjectToolQuota),
-		ExecutionHostID: b.hostID(),
-		Scope:           strings.TrimSpace(req.Scope),
-		LimitName:       strings.TrimSpace(req.LimitName),
-		ToolName:        strings.TrimSpace(req.ToolName),
-		Current:         req.Current,
-		Limit:           req.Limit,
-		RequestingAgent: strings.TrimSpace(req.AgentID),
-		SessionID:       strings.TrimSpace(req.SessionID),
-	}
-	return b.evaluateWithMode(ctx, SubjectToolQuota, subject, req.ApprovalToken, mode,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.ToolName, Agent: subject.RequestingAgent},
-		nil,
 	)
 }
 
@@ -140,7 +84,7 @@ func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, 
 			return dec, nil
 		}
 	}
-	return b.evaluateModerator(ctx, subjectType, subject, sh, scope, mode)
+	return b.requireApproval(ctx, subjectType, subject, sh, scope, mode)
 }
 
 func (b *Broker) checkExistingToken(ctx context.Context, approvalToken string, subjectHash string) (Decision, bool) {
@@ -219,12 +163,8 @@ func (b *Broker) modeFor(subjectType SubjectType) config.ApprovalMode {
 	switch subjectType {
 	case SubjectExec:
 		return b.Config.Exec.Mode
-	case SubjectSkillExec:
-		return b.Config.SkillExecution.Mode
 	case SubjectRunnerPermission:
 		return b.Config.Exec.Mode
-	case SubjectSecretAccess:
-		return b.Config.SecretAccess.Mode
 	case SubjectMessageSend:
 		return b.Config.MessageSend.Mode
 	default:

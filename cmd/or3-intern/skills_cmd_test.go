@@ -253,7 +253,7 @@ func TestResolveInstallRoot_PrefersManagedDirOverWorkspace(t *testing.T) {
 }
 
 func TestAvailableToolNames_ReturnsEmptyInRunnerFirst(t *testing.T) {
-	got := availableToolNames(false, false)
+	got := availableToolNames(false)
 	if len(got) != 0 {
 		t.Fatalf("expected no built-in model-callable tools, got %#v", got)
 	}
@@ -261,7 +261,7 @@ func TestAvailableToolNames_ReturnsEmptyInRunnerFirst(t *testing.T) {
 
 func TestFilterAdvertisedToolNames_ReturnsEmptyWithoutBuiltInTools(t *testing.T) {
 	cfg := config.Default()
-	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
+	got := filterAdvertisedToolNames(cfg, availableToolNames(false))
 	if len(got) != 0 {
 		t.Fatalf("expected no advertised built-in tools, got %#v", got)
 	}

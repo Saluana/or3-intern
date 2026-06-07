@@ -4,9 +4,9 @@
 
 The built-in OR3 provider/tool-loop agent has been removed from the primary
 execution path. Chat, channels, service turns, and automation use external
-runners (OpenCode recommended). `POST /internal/v1/turns` and `POST
-/internal/v1/subagents` return **410 Gone**. Install and authenticate a runner
-before starting new work.
+runners (OpenCode recommended). `POST /internal/v1/turns` returns **410 Gone**
+and `/internal/v1/subagents` is no longer registered. Install and authenticate a
+runner before starting new work.
 
 ## Config changes
 

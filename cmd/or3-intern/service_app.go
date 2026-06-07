@@ -251,11 +251,15 @@ func (s *serviceServer) bootstrapActiveJobCount(ctx context.Context) int {
 	if s == nil || s.control() == nil || s.control().DB == nil {
 		return 0
 	}
-	items, err := s.control().DB.ListSubagentJobs(ctx, db.SubagentJobFilter{Status: "active", Limit: 200})
+	queued, err := s.control().DB.ListAgentCLIRuns(ctx, db.AgentCLIRunFilter{Status: db.AgentCLIStatusQueued, Limit: 200})
 	if err != nil {
 		return 0
 	}
-	return len(items)
+	running, err := s.control().DB.ListAgentCLIRuns(ctx, db.AgentCLIRunFilter{Status: db.AgentCLIStatusRunning, Limit: 200})
+	if err != nil {
+		return len(queued)
+	}
+	return len(queued) + len(running)
 }
 
 func (s *serviceServer) bootstrapActiveTerminalCount() int {

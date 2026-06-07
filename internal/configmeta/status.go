@@ -6,10 +6,10 @@ import "or3-intern/internal/config"
 type FieldStatus string
 
 const (
-	FieldStatusActive         FieldStatus = "active"
-	FieldStatusDeprecated     FieldStatus = "deprecated"
-	FieldStatusHidden         FieldStatus = "hidden"
-	FieldStatusCompatibility  FieldStatus = "compatibility"
+	FieldStatusActive        FieldStatus = "active"
+	FieldStatusDeprecated    FieldStatus = "deprecated"
+	FieldStatusHidden        FieldStatus = "hidden"
+	FieldStatusCompatibility FieldStatus = "compatibility"
 )
 
 // StatusForConfigureKey returns the UI status for a configure TUI field key when runner-first is enabled.
@@ -69,21 +69,15 @@ func ListForConfig(cfg config.Config) []ConfigFieldMetadata {
 }
 
 var runnerFirstPathStatus = map[string]FieldStatus{
-	"provider.model":                         FieldStatusCompatibility,
-	"modelRouting.chat.primary.model":        FieldStatusCompatibility,
-	"modelRouting.chat.primary.provider":     FieldStatusCompatibility,
-	"modelRouting.agents.primary.model":      FieldStatusCompatibility,
-	"modelRouting.agents.primary.provider":   FieldStatusCompatibility,
-	"modelRouting.subagents.primary.model":   FieldStatusDeprecated,
-	"modelRouting.subagents.primary.provider": FieldStatusDeprecated,
-	"subagents.enabled":                      FieldStatusHidden,
-	"tools.enableExec":                       FieldStatusDeprecated,
-	"tools.braveAPIKey":                      FieldStatusDeprecated,
-	"skills.enableExec":                      FieldStatusDeprecated,
-	"context.tools.dynamicExpose":            FieldStatusDeprecated,
-	"context.taskCard.enforcePlan":           FieldStatusDeprecated,
-	"maxToolLoops":                           FieldStatusDeprecated,
-	"agentCLI.enabled":                       FieldStatusActive,
-	"agentCLI.defaultRunner":                 FieldStatusActive,
+	"provider.model":                     FieldStatusCompatibility,
+	"modelRouting.chat.primary.model":    FieldStatusCompatibility,
+	"modelRouting.chat.primary.provider": FieldStatusCompatibility,
+	"tools.enableExec":                   FieldStatusDeprecated,
+	"tools.braveAPIKey":                  FieldStatusDeprecated,
+	"skills.enableExec":                  FieldStatusDeprecated,
+	"context.tools.dynamicExpose":        FieldStatusDeprecated,
+	"context.taskCard.enforcePlan":       FieldStatusDeprecated,
+	"maxToolLoops":                       FieldStatusDeprecated,
+	"agentCLI.enabled":                   FieldStatusActive,
+	"agentCLI.defaultRunner":             FieldStatusActive,
 }
-

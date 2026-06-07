@@ -44,10 +44,6 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_EMAIL_SMTP_USERNAME",
 		"OR3_EMAIL_SMTP_PASSWORD",
 		"OR3_EMAIL_FROM_ADDRESS",
-		"OR3_SUBAGENTS_ENABLED",
-		"OR3_SUBAGENTS_MAX_CONCURRENT",
-		"OR3_SUBAGENTS_MAX_QUEUED",
-		"OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS",
 		"OR3_SERVICE_ENABLED",
 		"OR3_SERVICE_LISTEN",
 		"OR3_SERVICE_SECRET",
@@ -78,12 +74,6 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.MaxMediaBytes != 20*1024*1024 {
 		t.Errorf("expected MaxMediaBytes=%d, got %d", 20*1024*1024, cfg.MaxMediaBytes)
-	}
-	if cfg.MaxToolLoops != 6 {
-		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
-	}
-	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionAsk {
-		t.Errorf("expected MaxToolLoopsExceededAction=ask, got %q", cfg.MaxToolLoopsExceededAction)
 	}
 	if cfg.VectorK != 8 {
 		t.Errorf("expected VectorK=8, got %d", cfg.VectorK)
@@ -138,18 +128,6 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
 		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
-	}
-	if cfg.Subagents.Enabled {
-		t.Error("expected Subagents.Enabled=false by default")
-	}
-	if cfg.Subagents.MaxConcurrent != 1 {
-		t.Errorf("expected Subagents.MaxConcurrent=1, got %d", cfg.Subagents.MaxConcurrent)
-	}
-	if cfg.Subagents.MaxQueued != 32 {
-		t.Errorf("expected Subagents.MaxQueued=32, got %d", cfg.Subagents.MaxQueued)
-	}
-	if cfg.Subagents.TaskTimeoutSeconds != 300 {
-		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
 	if !cfg.AgentCLI.Enabled {
 		t.Error("expected AgentCLI.Enabled=true by default")
@@ -316,124 +294,6 @@ func TestLoad_RejectsUnknownApprovalMode(t *testing.T) {
 
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected unknown approval mode to fail")
-	}
-}
-
-func TestDefault_ApprovalModeratorBalancedActions(t *testing.T) {
-	cfg := Default()
-	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
-	if actions.Low != ApprovalModeratorActionApprove || actions.Medium != ApprovalModeratorActionApprove {
-		t.Fatalf("expected low/medium approve, got %#v", actions)
-	}
-	if actions.High != ApprovalModeratorActionEscalate || actions.Extreme != ApprovalModeratorActionDeny {
-		t.Fatalf("expected high escalate and extreme deny, got %#v", actions)
-	}
-}
-
-func TestLoad_ApprovalModeratorDefaultsWhenMissing(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator = ApprovalModeratorConfig{}
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if loaded.Security.Approvals.Moderator.Preset != ApprovalModeratorPresetBalanced {
-		t.Fatalf("expected balanced preset, got %q", loaded.Security.Approvals.Moderator.Preset)
-	}
-	if loaded.Security.Approvals.Moderator.TimeoutSeconds != defaultApprovalModeratorTimeoutSeconds {
-		t.Fatalf("expected default timeout, got %d", loaded.Security.Approvals.Moderator.TimeoutSeconds)
-	}
-}
-
-func TestLoad_RejectsInvalidApprovalModeratorConfiguredAction(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Enabled = true
-	cfg.Security.Approvals.Moderator.Actions.High = ApprovalModeratorAction("approvee")
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected invalid moderator action to fail")
-	}
-}
-
-func TestLoad_RejectsInvalidApprovalModeratorAction(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Enabled = true
-	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPreset("maybe")
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected invalid moderator preset to fail")
-	}
-}
-
-func TestLoad_RejectsApprovalModeratorFailureApprove(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Enabled = true
-	cfg.Security.Approvals.Moderator.FailureAction = ApprovalModeratorActionApprove
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected failureAction approve to fail")
-	}
-}
-
-func TestApprovalModeratorPartialOverrideUsesPresetFallback(t *testing.T) {
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPresetManual
-	cfg.Security.Approvals.Moderator.Actions = ApprovalModeratorActionMap{Low: ApprovalModeratorActionApprove}
-	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
-	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
-	if actions.Low != ApprovalModeratorActionApprove {
-		t.Fatalf("expected configured low action, got %q", actions.Low)
-	}
-	for _, level := range []ApprovalModeratorAction{actions.Medium, actions.High, actions.Extreme} {
-		if level != ApprovalModeratorActionEscalate {
-			t.Fatalf("expected manual preset fallback escalate, got %q", level)
-		}
-	}
-}
-
-func TestApprovalModeratorPresetManualEscalatesAll(t *testing.T) {
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPresetManual
-	cfg.Security.Approvals.Moderator.Actions = ApprovalModeratorActionMap{}
-	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
-	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
-	for _, level := range []ApprovalModeratorAction{actions.Low, actions.Medium, actions.High, actions.Extreme} {
-		if level != ApprovalModeratorActionEscalate {
-			t.Fatalf("expected manual preset to escalate all, got %#v", actions)
-		}
 	}
 }
 
@@ -952,11 +812,9 @@ func TestLoad_ValidFile(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	input := Config{
-		DBPath:                     "/tmp/test.db",
-		DefaultSessionKey:          "test:session",
-		HistoryMax:                 20,
-		MaxToolLoops:               3,
-		MaxToolLoopsExceededAction: QuotaExceededActionFail,
+		DBPath:            "/tmp/test.db",
+		DefaultSessionKey: "test:session",
+		HistoryMax:        20,
 		Provider: ProviderConfig{
 			APIBase:        "https://custom.api",
 			TimeoutSeconds: 30,
@@ -977,9 +835,6 @@ func TestLoad_ValidFile(t *testing.T) {
 	}
 	if cfg.HistoryMax != 20 {
 		t.Errorf("expected HistoryMax=20, got %d", cfg.HistoryMax)
-	}
-	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionFail {
-		t.Errorf("expected MaxToolLoopsExceededAction=fail, got %q", cfg.MaxToolLoopsExceededAction)
 	}
 	if cfg.MaxMediaBytes != Default().MaxMediaBytes {
 		t.Errorf("expected missing MaxMediaBytes to default to %d, got %d", Default().MaxMediaBytes, cfg.MaxMediaBytes)
@@ -1062,7 +917,6 @@ func TestLoad_EnvOverrides_RespectsPersistedModel(t *testing.T) {
 	cfg := Default()
 	cfg.Provider.Model = "deepseek/deepseek-v4-pro"
 	cfg.ModelRouting.Chat.Primary = ModelRef{Provider: "openrouter", Model: "deepseek/deepseek-v4-pro"}
-	cfg.ModelRouting.Agents.Primary = ModelRef{Provider: "openrouter", Model: "nvidia/nemotron-3-super-120b-a12b:free"}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
 	mustWriteTestFile(t, path, b)
 
@@ -1077,9 +931,6 @@ func TestLoad_EnvOverrides_RespectsPersistedModel(t *testing.T) {
 	}
 	if loaded.ModelRouting.Chat.Primary.Model != "deepseek/deepseek-v4-pro" {
 		t.Fatalf("expected persisted chat model to win over OR3_MODEL, got %q", loaded.ModelRouting.Chat.Primary.Model)
-	}
-	if loaded.ModelRouting.Agents.Primary.Model != "nvidia/nemotron-3-super-120b-a12b:free" {
-		t.Fatalf("expected persisted agents model to remain, got %q", loaded.ModelRouting.Agents.Primary.Model)
 	}
 }
 
@@ -1100,11 +951,6 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("OR3_EMBED_MODEL", "env-embed")
 	t.Setenv("OR3_EMBED_DIMENSIONS", "768")
 	t.Setenv("OR3_API_BASE", "https://env.api")
-	t.Setenv("OR3_SUBAGENTS_ENABLED", "true")
-	t.Setenv("OR3_SUBAGENTS_MAX_CONCURRENT", "3")
-	t.Setenv("OR3_SUBAGENTS_MAX_QUEUED", "12")
-	t.Setenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", "90")
-
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1129,18 +975,6 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.APIBase != "https://env.api" {
 		t.Errorf("expected APIBase='https://env.api', got %q", cfg.Provider.APIBase)
-	}
-	if !cfg.Subagents.Enabled {
-		t.Error("expected subagents enabled from env override")
-	}
-	if cfg.Subagents.MaxConcurrent != 3 {
-		t.Errorf("expected MaxConcurrent=3, got %d", cfg.Subagents.MaxConcurrent)
-	}
-	if cfg.Subagents.MaxQueued != 12 {
-		t.Errorf("expected MaxQueued=12, got %d", cfg.Subagents.MaxQueued)
-	}
-	if cfg.Subagents.TaskTimeoutSeconds != 90 {
-		t.Errorf("expected TaskTimeoutSeconds=90, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
 }
 
@@ -1251,27 +1085,6 @@ func TestLoadRepairableReturnsNeedsRepairForValidationError(t *testing.T) {
 	}
 	if report.State != ReadinessNeedsRepair {
 		t.Fatalf("expected needs-repair, got %s with issues %#v", report.State, report.Issues)
-	}
-}
-
-func TestLoad_SubagentNormalization(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	input := Default()
-	input.Subagents.MaxConcurrent = 0
-	input.Subagents.MaxQueued = 0
-	input.Subagents.TaskTimeoutSeconds = 0
-	b, _ := json.MarshalIndent(input, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Subagents.MaxConcurrent != 1 || cfg.Subagents.MaxQueued != 32 || cfg.Subagents.TaskTimeoutSeconds != 300 {
-		t.Fatalf("expected normalized subagent defaults, got %+v", cfg.Subagents)
 	}
 }
 
@@ -1674,9 +1487,6 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 	}
 	if cfg.MaxToolBytes != DefaultMaxToolBytes {
 		t.Errorf("expected MaxToolBytes=%d, got %d", DefaultMaxToolBytes, cfg.MaxToolBytes)
-	}
-	if cfg.MaxToolLoops != 6 {
-		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
 	}
 	if cfg.VectorScanLimit != 2000 {
 		t.Errorf("expected VectorScanLimit=2000, got %d", cfg.VectorScanLimit)

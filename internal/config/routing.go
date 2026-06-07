@@ -72,8 +72,6 @@ func normalizeProviderRouting(cfg *Config) {
 
 	if strings.TrimSpace(cfg.Provider.Model) != "" && (strings.TrimSpace(cfg.ModelRouting.Chat.Primary.Model) == "" || cfg.ModelRouting.Chat.Primary.Model == defaultOpenAIChatModel) {
 		cfg.ModelRouting.Chat.Primary.Model = strings.TrimSpace(cfg.Provider.Model)
-		cfg.ModelRouting.Agents.Primary.Model = strings.TrimSpace(cfg.Provider.Model)
-		cfg.ModelRouting.Subagents.Primary.Model = strings.TrimSpace(cfg.Provider.Model)
 	}
 	if strings.TrimSpace(cfg.Provider.EmbedModel) != "" && (strings.TrimSpace(cfg.ModelRouting.Embeddings.Primary.Model) == "" || cfg.ModelRouting.Embeddings.Primary.Model == defaultOpenAIEmbedModel) {
 		cfg.ModelRouting.Embeddings.Primary.Model = strings.TrimSpace(cfg.Provider.EmbedModel)
@@ -91,8 +89,6 @@ func normalizeProviderRouting(cfg *Config) {
 	chatFallback := ModelRef{Provider: legacyProvider, Model: firstNonEmpty(cfg.Provider.Model, defaultOpenAIChatModel)}
 	embedFallback := ModelRef{Provider: legacyProvider, Model: firstNonEmpty(cfg.Provider.EmbedModel, defaultOpenAIEmbedModel)}
 	cfg.ModelRouting.Chat = normalizeModelRole(cfg.ModelRouting.Chat, chatFallback)
-	cfg.ModelRouting.Agents = normalizeModelRole(cfg.ModelRouting.Agents, cfg.ModelRouting.Chat.Primary)
-	cfg.ModelRouting.Subagents = normalizeModelRole(cfg.ModelRouting.Subagents, cfg.ModelRouting.Agents.Primary)
 	cfg.ModelRouting.Summarization = normalizeModelRole(cfg.ModelRouting.Summarization, ModelRef{Provider: cfg.ModelRouting.Chat.Primary.Provider, Model: firstNonEmpty(cfg.ConsolidationModel, cfg.ModelRouting.Chat.Primary.Model)})
 	cfg.ModelRouting.ContextManager = normalizeModelRole(cfg.ModelRouting.ContextManager, ModelRef{Provider: cfg.ModelRouting.Summarization.Primary.Provider, Model: firstNonEmpty(cfg.ContextManager.Model, cfg.ModelRouting.Summarization.Primary.Model)})
 	cfg.ModelRouting.Embeddings = normalizeModelRole(cfg.ModelRouting.Embeddings, embedFallback)

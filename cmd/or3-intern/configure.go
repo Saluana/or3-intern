@@ -23,7 +23,7 @@ var configureSections = []struct {
 }{
 	{Key: "provider", Label: "Providers", Description: "Provider profiles, model routing, favorites, fallbacks, embeddings, and secrets"},
 	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
-	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, consolidation, and subagents"},
+	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, and consolidation"},
 	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, dynamic tools, task card, and context manager"},
 	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
 	{Key: "tools", Label: "Tools", Description: "Search, proxy, exec timeout, and PATH settings"},

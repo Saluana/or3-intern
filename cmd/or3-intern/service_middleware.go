@@ -17,7 +17,6 @@ import (
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
-	"or3-intern/internal/db"
 	or3log "or3-intern/internal/log"
 	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/tools"
@@ -709,7 +708,7 @@ func serviceLifecyclePayload(sessionKey string, meta map[string]any, extra map[s
 
 func isTerminalStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
+	case "completed", "failed", "aborted":
 		return true
 	default:
 		return false

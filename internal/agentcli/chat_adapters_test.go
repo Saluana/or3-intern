@@ -210,6 +210,22 @@ func TestOpenCodeBuildChatCommandNativeUsesSessionAndUserMessage(t *testing.T) {
 	assertArgsEqual(t, want, cmd.Args)
 }
 
+func TestOpenCodeBuildChatCommandReplayIgnoresNativeSessionRef(t *testing.T) {
+	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	cmd, err := adapter.BuildChatCommand(RunnerChatCommandRequest{
+		ReplayPrompt:     "full replay prompt",
+		UserMessage:      "continue from here",
+		NativeSessionRef: "session_123",
+		ContinuationMode: ContinuationReplay,
+		Model:            "gpt-5",
+	})
+	if err != nil {
+		t.Fatalf("BuildChatCommand: %v", err)
+	}
+	want := []string{"run", "--format", "json", "--model", "gpt-5", "full replay prompt"}
+	assertArgsEqual(t, want, cmd.Args)
+}
+
 func TestOpenCodeExtractNativeSessionRef(t *testing.T) {
 	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
 	payload, err := json.Marshal(map[string]any{

@@ -36,66 +36,6 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Label:       "Chat routing fallbacks (legacy)",
 		Description: "Fallback list for legacy built-in chat turns only.",
 	},
-	"routing_agents_provider": {
-		Status:      FieldStatusCompatibility,
-		Label:       "Agents routing provider (legacy)",
-		Description: "Compatibility routing for legacy agent-style work. Background jobs should use agent_cli_run with an external runner.",
-	},
-	"routing_agents_model": {
-		Status:      FieldStatusCompatibility,
-		Label:       "Agents routing model (legacy)",
-		Description: "Compatibility routing for legacy agent-style work. Background jobs should use agent_cli_run with an external runner instead.",
-	},
-	"routing_agents_fallbacks": {
-		Status:      FieldStatusCompatibility,
-		Label:       "Agents routing fallbacks (legacy)",
-		Description: "Fallback list for legacy agent routing only.",
-	},
-	"routing_subagents_provider": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Subagents provider (legacy)",
-		Description: "Deprecated: internal subagent jobs are disabled in runner-first mode. Use external runners for background work.",
-	},
-	"routing_subagents_model": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Subagents model (legacy)",
-		Description: "Deprecated: internal subagent jobs are disabled in runner-first mode.",
-	},
-	"routing_subagents_fallbacks": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Subagents fallbacks (legacy)",
-		Description: "Deprecated: internal subagent jobs are disabled in runner-first mode.",
-	},
-	"runtime_subagents_enabled": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Enable subagents (legacy)",
-		Description: "Deprecated in runner-first mode. External runners handle parallel and scheduled work instead of the built-in subagent manager.",
-	},
-	"runtime_subagents_max_concurrent": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Subagents max concurrent (legacy)",
-		Description: "Deprecated in runner-first mode.",
-	},
-	"runtime_subagents_max_queued": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Subagents max queued (legacy)",
-		Description: "Deprecated in runner-first mode.",
-	},
-	"runtime_subagents_timeout": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Subagents timeout (legacy)",
-		Description: "Deprecated in runner-first mode.",
-	},
-	"runtime_max_tool_loops": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Max tool loops (legacy)",
-		Description: "Deprecated: applies only to the legacy built-in tool loop, not external runner chat.",
-	},
-	"runtime_max_tool_loops_exceeded_action": {
-		Status:      FieldStatusDeprecated,
-		Label:       "Tool loop limit action (legacy)",
-		Description: "Deprecated with the legacy built-in tool loop.",
-	},
 	"tools_brave": {
 		Status:      FieldStatusDeprecated,
 		Label:       "Brave search API key (legacy)",

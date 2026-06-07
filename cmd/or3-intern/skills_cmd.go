@@ -369,7 +369,7 @@ func makePolicySet(values []string) map[string]struct{} {
 }
 
 func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
-	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
+	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled))
 	if len(cfg.Tools.MCPServers) == 0 {
 		return toolNames
 	}
@@ -514,9 +514,8 @@ func resolveInstallRoot(cfg config.Config) string {
 	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
 }
 
-func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
+func availableToolNames(includeCron bool) map[string]struct{} {
 	_ = includeCron
-	_ = includeSubagents
 	return map[string]struct{}{}
 }
 

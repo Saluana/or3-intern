@@ -33,10 +33,6 @@ const (
 )
 
 const (
-	// PayloadAgentTurn wakes the normal OR3 agent runtime.
-	PayloadAgentTurn = "agent_turn"
-	// PayloadSystemEvent is retained for compatibility with existing system-originated cron jobs.
-	PayloadSystemEvent = "system_event"
 	// PayloadAgentCLIRun enqueues an external agent CLI run.
 	PayloadAgentCLIRun = "agent_cli_run"
 )
@@ -57,7 +53,7 @@ type CronSchedule struct {
 
 // CronPayload is the user-visible work queued when a job fires.
 type CronPayload struct {
-	Kind       string               `json:"kind"` // "agent_turn"|"system_event"|"agent_cli_run"
+	Kind       string               `json:"kind"` // "agent_cli_run"
 	Message    string               `json:"message"`
 	Deliver    bool                 `json:"deliver"`
 	Channel    string               `json:"channel,omitempty"`
@@ -723,7 +719,7 @@ func (s *Service) armJobLocked(job CronJob) {
 func NormalizePayload(payload CronPayload) CronPayload {
 	payload.Kind = strings.TrimSpace(payload.Kind)
 	if payload.Kind == "" {
-		payload.Kind = PayloadAgentTurn
+		payload.Kind = PayloadAgentCLIRun
 	}
 	payload.SessionKey = strings.TrimSpace(payload.SessionKey)
 	payload.Channel = strings.TrimSpace(payload.Channel)
@@ -754,8 +750,6 @@ func NormalizePayload(payload CronPayload) CronPayload {
 func ValidatePayload(payload CronPayload) error {
 	payload = NormalizePayload(payload)
 	switch payload.Kind {
-	case PayloadAgentTurn, PayloadSystemEvent:
-		return nil
 	case PayloadAgentCLIRun:
 		if payload.AgentRun == nil {
 			return fmt.Errorf("agent_run is required for agent_cli_run payloads")

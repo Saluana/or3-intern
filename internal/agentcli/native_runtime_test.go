@@ -318,6 +318,44 @@ func TestOpenCodeExecuteSendsVariantOnlyWhenSupported(t *testing.T) {
 	}
 }
 
+func TestOpenCodeExecuteReplayIgnoresNativeSessionRef(t *testing.T) {
+	var postedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			w.WriteHeader(http.StatusOK)
+		case "/config/providers":
+			_, _ = w.Write([]byte(`{"providers":[]}`))
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"fresh_session"}`))
+		case "/session/fresh_session/message", "/session/stale_session/message":
+			postedPath = r.URL.Path
+			_, _ = w.Write([]byte(`{"type":"message","text":"done"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	_, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
+		Run: db.AgentCLIRun{ID: "run_1", JobID: "job_1", Task: "hello"},
+		Chat: RunnerChatCommandRequest{
+			UserMessage:      "hello",
+			NativeSessionRef: "stale_session",
+			ContinuationMode: ContinuationReplay,
+		},
+		Config: config.AgentCLIConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
+		Env:    []string{"PATH="},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if postedPath != "/session/fresh_session/message" {
+		t.Fatalf("postedPath = %q, want fresh replay session", postedPath)
+	}
+}
+
 func TestParseOpenCodeModelsCLIOutputPreservesProviderAndVariants(t *testing.T) {
 	models := parseOpenCodeModelsCLIOutput([]byte(`opencode-go/deepseek-v4-pro
 {
@@ -399,6 +437,39 @@ func TestOpenCodeExecuteEmitsStructuredResponseEvents(t *testing.T) {
 	}
 	if !foundQuestion {
 		t.Fatalf("expected question.asked event, got %+v", events)
+	}
+}
+
+func TestOpenCodeExecuteDoesNotTreatErrorEnvelopeAsFinalText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			w.WriteHeader(http.StatusOK)
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"sess_1"}`))
+		case "/session/sess_1/message":
+			_, _ = w.Write([]byte(`{"type":"error","timestamp":1780726148111,"sessionID":"sess_1","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_085b596b"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	output, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
+		Run:    db.AgentCLIRun{ID: "run_1", JobID: "job_1", Task: "hello"},
+		Chat:   RunnerChatCommandRequest{UserMessage: "hello"},
+		Config: config.AgentCLIConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
+		Env:    []string{"PATH="},
+	})
+	if err == nil {
+		t.Fatal("expected OpenCode error response to fail")
+	}
+	if output.FinalTextPreview != "" {
+		t.Fatalf("expected empty final text for error envelope, got %q", output.FinalTextPreview)
+	}
+	if output.StderrPreview != "Unexpected server error. Check server logs for details." {
+		t.Fatalf("stderr = %q", output.StderrPreview)
 	}
 }
 

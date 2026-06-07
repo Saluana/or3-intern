@@ -1,7 +1,6 @@
 package main
 
 import (
-	"or3-intern/internal/requestctx"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -11,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"or3-intern/internal/requestctx"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,16 +52,6 @@ func assertHTTPLegacyTurnsGone(t *testing.T, statusCode int, body string) {
 	}
 	if !strings.Contains(body, "legacy_turn_endpoint_removed") {
 		t.Fatalf("expected legacy_turn_endpoint_removed, got %s", body)
-	}
-}
-
-func assertHTTPLegacySubagentsPostGone(t *testing.T, statusCode int, body string) {
-	t.Helper()
-	if statusCode != http.StatusGone {
-		t.Fatalf("expected 410 for removed POST /internal/v1/subagents, got %d (%s)", statusCode, body)
-	}
-	if !strings.Contains(body, "legacy_subagent_endpoint_removed") {
-		t.Fatalf("expected legacy_subagent_endpoint_removed, got %s", body)
 	}
 }
 
@@ -187,34 +177,6 @@ func TestServiceObserver_RecoversEmptyFinalTextAfterToolWork(t *testing.T) {
 	}
 	if !strings.Contains(finalText, "tool finished") || !strings.Contains(finalText, "exec") {
 		t.Fatalf("expected visible fallback final text, got %q", finalText)
-	}
-}
-
-func TestServiceObserver_RecoversDoctorConfigSearchWithoutModelFinalText(t *testing.T) {
-	raw := encodeDoctorToolResult("doctor_config_search", true, "Found 1 Doctor-safe config fields.", map[string]any{
-		"count": 1,
-		"fields": []map[string]any{
-			{
-				"label":       "Default Model",
-				"key":         "model",
-				"path":        "provider.model",
-				"description": "The default model to use for chat and agents",
-				"current_value": map[string]any{
-					"value":   "nvidia/nemotron-3-super-120b-a12b:free",
-					"present": true,
-				},
-			},
-		},
-	})
-	observer := &serviceObserver{}
-	observer.OnToolResult(context.Background(), "doctor_config_search", raw, nil)
-
-	finalText, recovered := observer.finalTextForCompletion("")
-	if !recovered {
-		t.Fatal("expected empty final text to be recovered after doctor_config_search")
-	}
-	if !strings.Contains(finalText, "Default Model") || !strings.Contains(finalText, "nvidia/nemotron-3-super-120b-a12b:free") {
-		t.Fatalf("expected synthesized model answer, got %q", finalText)
 	}
 }
 
@@ -1133,17 +1095,6 @@ func TestServicePublicApprovalActionError_ExposesExpiredStatus(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceSubagentRequest_RejectsInvalidTimeoutTypes(t *testing.T) {
-	for _, body := range []string{
-		`{"parent_session_key":"svc:test","task":"run","tool_policy":{"mode":"deny_all"},"timeout_seconds":1.5}`,
-		`{"parent_session_key":"svc:test","task":"run","tool_policy":{"mode":"deny_all"},"timeout_seconds":"slow"}`,
-	} {
-		if _, err := decodeServiceSubagentRequest(strings.NewReader(body)); err == nil {
-			t.Fatalf("expected invalid timeout to fail for body %s", body)
-		}
-	}
-}
-
 func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
 	req, err := decodeServiceTurnRequest(strings.NewReader(`{
 		"intern_session_key":"svc:alias",
@@ -1697,7 +1648,7 @@ func TestServiceCron_CRUDAndRun(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
 		"name":"Morning summary",
 		"schedule":{"kind":"every","every_ms":3600000},
-		"payload":{"kind":"agent_turn","message":"Summarize overnight changes","session_key":"cron:test"}
+		"payload":{"kind":"agent_cli_run","session_key":"cron:test","agent_run":{"runner_id":"opencode","task":"Summarize overnight changes"}}
 	}`))
 	createReq = createReq.WithContext(context.WithValue(createReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
 	createRec := httptest.NewRecorder()
@@ -1847,7 +1798,10 @@ func TestServiceCron_RunDisabledWithoutForceReportsSkipped(t *testing.T) {
 		ID:       "disabled",
 		Enabled:  false,
 		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: 3600000},
-		Payload:  cron.CronPayload{Kind: cron.PayloadAgentTurn, Message: "skip me"},
+		Payload: cron.CronPayload{
+			Kind:     cron.PayloadAgentCLIRun,
+			AgentRun: &cron.CronAgentRunPayload{RunnerID: "opencode", Task: "skip me"},
+		},
 	}); err != nil {
 		t.Fatalf("cron add: %v", err)
 	}
@@ -1898,7 +1852,7 @@ func TestServiceCron_AgentCLIRunPayloadValidation(t *testing.T) {
 	unknownReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
 		"name":"Bad external review",
 		"schedule":{"kind":"every","every_ms":3600000},
-		"payload":{"kind":"agent_turn","message":"hello","surprise":true}
+		"payload":{"kind":"agent_cli_run","agent_run":{"runner_id":"opencode","task":"hello"},"surprise":true}
 	}`))
 	unknownReq = unknownReq.WithContext(context.WithValue(unknownReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
 	unknownRec := httptest.NewRecorder()
@@ -1997,37 +1951,6 @@ func TestDecodeServiceTurnRequest_AcceptsApprovalTokenAliases(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceSubagentRequest_AcceptsSessionAndToolPolicyAliases(t *testing.T) {
-	req, err := decodeServiceSubagentRequest(strings.NewReader(`{
-		"sessionKey":"svc:parent",
-		"task":"background task",
-		"promptSnapshot":[{"role":"user","content":"remember this"}],
-		"toolPolicy":{"mode":"allow_list","allowedTools":["read_file"]},
-		"timeout":9,
-		"profile_name":"or3-default",
-		"channel":"service",
-		"replyTo":"or3-net"
-	}`))
-	if err != nil {
-		t.Fatalf("decodeServiceSubagentRequest: %v", err)
-	}
-	if req.ParentSessionKey != "svc:parent" {
-		t.Fatalf("expected session key alias to populate parent session key, got %#v", req)
-	}
-	if len(req.Warnings) == 0 || !strings.Contains(req.Warnings[0], "subagent tool policy is ignored") {
-		t.Fatalf("expected tool policy warning, got %#v", req.Warnings)
-	}
-	if req.TimeoutSeconds != 9 {
-		t.Fatalf("expected timeout alias to populate timeout seconds, got %#v", req)
-	}
-	if len(req.PromptSnapshot) != 1 || req.PromptSnapshot[0].Role != "user" {
-		t.Fatalf("expected prompt snapshot alias to populate prompt snapshot, got %#v", req.PromptSnapshot)
-	}
-	if req.ReplyTo != "or3-net" {
-		t.Fatalf("expected replyTo alias to populate reply target, got %#v", req)
-	}
-}
-
 func TestDecodeServiceTurnRequest_IgnoresLegacyToolPolicyFields(t *testing.T) {
 	req, err := decodeServiceTurnRequest(strings.NewReader(`{
 		"session_key":"svc:key",
@@ -2048,17 +1971,6 @@ func TestDecodeServiceTurnRequest_RejectsUnknownFieldsAndTrailingJSON(t *testing
 		`{"session_key":"svc:test","message":"hi"} {"extra":true}`,
 	} {
 		if _, err := decodeServiceTurnRequest(strings.NewReader(body)); err == nil {
-			t.Fatalf("expected decode failure for body %q", body)
-		}
-	}
-}
-
-func TestDecodeServiceSubagentRequest_RejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
-	for _, body := range []string{
-		`{"parent_session_key":"svc:test","task":"run","unexpected":true}`,
-		`{"parent_session_key":"svc:test","task":"run"} []`,
-	} {
-		if _, err := decodeServiceSubagentRequest(strings.NewReader(body)); err == nil {
 			t.Fatalf("expected decode failure for body %q", body)
 		}
 	}
@@ -2270,20 +2182,6 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 			wantStatus: http.StatusNotFound,
 			wantBody:   "job not found",
 		},
-		{
-			name:       "subagents rejects non post",
-			method:     http.MethodDelete,
-			path:       "/internal/v1/subagents",
-			wantStatus: http.StatusMethodNotAllowed,
-			wantBody:   "method not allowed",
-		},
-		{
-			name:       "subagents list requires database",
-			method:     http.MethodGet,
-			path:       "/internal/v1/subagents",
-			wantStatus: http.StatusServiceUnavailable,
-			wantBody:   "subagent history is not available",
-		},
 	}
 
 	for _, tc := range tests {
@@ -2293,8 +2191,6 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 			switch {
 			case tc.path == "/internal/v1/turns":
 				server.handleTurns(rec, req)
-			case tc.path == "/internal/v1/subagents":
-				server.handleSubagents(rec, req)
 			default:
 				server.handleJobs(rec, req)
 			}
@@ -2349,18 +2245,6 @@ func TestServiceAbortJob_Matrix(t *testing.T) {
 	jobReg := jobs.NewRegistry(time.Minute, 32)
 	server := &serviceServer{database: database, jobs: jobReg}
 
-	queuedJob := db.SubagentJob{
-		ID:               "subagent-queued",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:queued",
-		Task:             "queued task",
-		Status:           db.SubagentStatusQueued,
-	}
-	if err := database.EnqueueSubagentJob(context.Background(), queuedJob); err != nil {
-		t.Fatalf("EnqueueSubagentJob queued: %v", err)
-	}
-	jobReg.RegisterWithID(queuedJob.ID, "subagent")
-
 	conflictJob := jobReg.RegisterWithID("job_conflict", "turn")
 	jobReg.Publish(conflictJob.ID, "started", map[string]any{"status": "running"})
 
@@ -2385,12 +2269,6 @@ func TestServiceAbortJob_Matrix(t *testing.T) {
 			jobID:      "job_missing",
 			wantStatus: http.StatusNotFound,
 			wantBody:   "job not found",
-		},
-		{
-			name:       "queued subagent is not abortable without legacy manager",
-			jobID:      queuedJob.ID,
-			wantStatus: http.StatusConflict,
-			wantBody:   "job is not abortable",
 		},
 		{
 			name:       "non cancelable running job conflicts",
@@ -2418,127 +2296,7 @@ func TestServiceAbortJob_Matrix(t *testing.T) {
 	}
 }
 
-func TestServiceSubagents_EnqueueAndAbortQueuedJob(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("q", 32), server)
-	defer httpServer.Close()
-
-	reqBody := `{"parent_session_key":"parent","task":"background task"}`
-	req := mustServiceRequest(t, httpServer, strings.Repeat("q", 32), http.MethodPost, "/internal/v1/subagents", reqBody)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do subagents: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacySubagentsPostGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceSubagents_ListReturnsSanitizedHistory(t *testing.T) {
-	disableRunnerFirstForLegacyServiceTests(t)
-	database, cleanup := openServiceTestDB(t)
-	defer cleanup()
-	jobReg := jobs.NewRegistry(time.Minute, 32)
-	server := &serviceServer{database: database, jobs: jobReg}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("l", 32), server)
-	defer httpServer.Close()
-
-	ctx := context.Background()
-	now := db.NowMS()
-	seed := []db.SubagentJob{
-		{ID: "list-a", ParentSessionKey: "alice", ChildSessionKey: "alice:s:a", Task: "research X", Status: db.SubagentStatusQueued, RequestedAt: now - 3000, MetadataJSON: `{"secret":"do-not-leak"}`},
-		{ID: "list-b", ParentSessionKey: "bob", ChildSessionKey: "bob:s:b", Task: "draft email", Status: db.SubagentStatusSucceeded, RequestedAt: now - 5000, FinishedAt: now - 1000, ResultPreview: "draft ready", MetadataJSON: `{"secret":"do-not-leak"}`},
-	}
-	for _, job := range seed {
-		if err := database.EnqueueSubagentJob(ctx, job); err != nil {
-			t.Fatalf("EnqueueSubagentJob %s: %v", job.ID, err)
-		}
-		if job.Status == db.SubagentStatusSucceeded {
-			if err := database.MarkSubagentSucceeded(ctx, job.ID, job.ResultPreview, ""); err != nil {
-				t.Fatalf("MarkSubagentSucceeded: %v", err)
-			}
-		}
-	}
-
-	req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?limit=10", "")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do list: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
-	}
-	body := mustReadBody(t, resp.Body)
-	if strings.Contains(body, "do-not-leak") {
-		t.Fatalf("response leaked metadata_json: %s", body)
-	}
-	if !strings.Contains(body, "list-a") || !strings.Contains(body, "list-b") {
-		t.Fatalf("expected both jobs in response: %s", body)
-	}
-	if !strings.Contains(body, `"kind":"subagent"`) {
-		t.Fatalf("expected sanitized kind in response: %s", body)
-	}
-	if !strings.Contains(body, `"task":"research X"`) || !strings.Contains(body, `"task":"draft email"`) {
-		t.Fatalf("expected task labels in response: %s", body)
-	}
-
-	t.Run("status filter", func(t *testing.T) {
-		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?status=terminal", "")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("Do list terminal: %v", err)
-		}
-		defer resp.Body.Close()
-		body := mustReadBody(t, resp.Body)
-		if strings.Contains(body, "list-a") {
-			t.Fatalf("queued job should not appear in terminal filter: %s", body)
-		}
-		if !strings.Contains(body, "list-b") {
-			t.Fatalf("succeeded job should appear in terminal filter: %s", body)
-		}
-	})
-
-	t.Run("invalid status rejected", func(t *testing.T) {
-		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?status=bogus", "")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("Do list bogus: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 for bogus status, got %d", resp.StatusCode)
-		}
-	})
-
-	t.Run("invalid limit rejected", func(t *testing.T) {
-		req := mustServiceRequest(t, httpServer, strings.Repeat("l", 32), http.MethodGet, "/internal/v1/subagents?limit=zero", "")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("Do list bad limit: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 for non-numeric limit, got %d", resp.StatusCode)
-		}
-	})
-
-	t.Run("requires authorization", func(t *testing.T) {
-		anonReq, err := http.NewRequest(http.MethodGet, httpServer.URL+"/internal/v1/subagents", nil)
-		if err != nil {
-			t.Fatalf("NewRequest: %v", err)
-		}
-		resp, err := http.DefaultClient.Do(anonReq)
-		if err != nil {
-			t.Fatalf("Do anon: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("expected 401, got %d", resp.StatusCode)
-		}
-	})
-}
-
-func TestServiceTurns_MaxToolLoopsReturnsFallbackResponse(t *testing.T) {
+func TestServiceTurns_RemovedEndpointReturnsGone(t *testing.T) {
 	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
 	defer httpServer.Close()
@@ -2564,7 +2322,7 @@ func TestServiceTurns_EmptyAssistantResponseReturnsFallbackText(t *testing.T) {
 	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 }
 
-func TestServiceTurns_MaxToolLoopsRequestsApprovalWhenBrokerAvailable(t *testing.T) {
+func TestServiceTurns_RemovedEndpointReturnsGoneWithBrokerAvailable(t *testing.T) {
 	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
 	defer httpServer.Close()
@@ -3049,74 +2807,6 @@ func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	}
 }
 
-func TestServiceApprovals_Approve_ReturnsPlanIDsWhenPresent(t *testing.T) {
-	disableRunnerFirstForLegacyServiceTests(t)
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.SkillExecution.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	plan, err := broker.DB.CreateSkillRunPlan(context.Background(), db.SkillRunPlanRecord{
-		ID:              "srp_service_plan",
-		SkillID:         "runner",
-		SkillDir:        "/tmp/runner",
-		Entrypoint:      "hello",
-		TimeoutSeconds:  30,
-		CommandJSON:     `["bash","/tmp/runner/tool.sh"]`,
-		ScriptHash:      "script-hash",
-		EnvBindingHash:  "env-hash",
-		PlanHash:        "plan-hash",
-		ExecutionHostID: "test-host",
-		Status:          "prepared",
-		CreatedAt:       1,
-	})
-	if err != nil {
-		t.Fatalf("CreateSkillRunPlan: %v", err)
-	}
-	decision, err := broker.EvaluateSkillExec(context.Background(), approval.SkillEvaluation{
-		SkillID:        "runner",
-		PlanID:         plan.ID,
-		PlanHash:       plan.PlanHash,
-		ScriptHash:     plan.ScriptHash,
-		EnvBindingHash: plan.EnvBindingHash,
-		TimeoutSeconds: plan.TimeoutSeconds,
-	})
-	if err != nil {
-		t.Fatalf("EvaluateSkillExec: %v", err)
-	}
-	if err := broker.DB.UpdateSkillRunPlanApproval(context.Background(), plan.ID, decision.RequestID, decision.SubjectHash, "pending_approval", 2); err != nil {
-		t.Fatalf("UpdateSkillRunPlanApproval: %v", err)
-	}
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("a", 32), server)
-	defer httpServer.Close()
-
-	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
-	if err != nil {
-		t.Fatalf("RotateDeviceToken: %v", err)
-	}
-
-	approveReq := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
-	approveReq.Header.Set("Authorization", "Bearer "+deviceToken)
-	approveResp, err := httpServer.Client().Do(approveReq)
-	if err != nil {
-		t.Fatalf("Do approve approval: %v", err)
-	}
-	defer approveResp.Body.Close()
-	if approveResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
-	}
-	payload := mustDecodeJSONBody(t, approveResp.Body)
-	if payload["plan_id"] != plan.ID {
-		t.Fatalf("expected plan_id %q, got %#v", plan.ID, payload)
-	}
-	planIDs, _ := payload["plan_ids"].([]any)
-	if len(planIDs) != 1 || planIDs[0] != plan.ID {
-		t.Fatalf("expected plan_ids to include %q, got %#v", plan.ID, payload)
-	}
-}
-
 func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
@@ -3173,59 +2863,6 @@ func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testin
 	}
 	if snapshot.Status != "failed" && snapshot.Status != "completed" {
 		t.Fatalf("expected terminal resume job after legacy replay disable, got %#v", snapshot)
-	}
-}
-
-func TestServiceApprovals_Approve_PlanLookupFailureWarnsButStillSucceeds(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Exec.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
-		ExecutablePath: "/bin/echo",
-		Argv:           []string{"hello"},
-		WorkingDir:     "/tmp",
-		ToolName:       "exec",
-	})
-	if err != nil {
-		t.Fatalf("EvaluateExec: %v", err)
-	}
-	_, deviceToken, err := broker.RotateDeviceToken(context.Background(), "operator-1", approval.RoleOperator, "Operator", nil)
-	if err != nil {
-		t.Fatalf("RotateDeviceToken: %v", err)
-	}
-	prevLookup := approvalSkillRunPlanLookup
-	approvalSkillRunPlanLookup = func(context.Context, *db.DB, int64, int) ([]db.SkillRunPlanRecord, error) {
-		return nil, fmt.Errorf("lookup down")
-	}
-	defer func() { approvalSkillRunPlanLookup = prevLookup }()
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("w", 32), server)
-	defer httpServer.Close()
-
-	req := mustJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/internal/v1/approvals/%d/approve", httpServer.URL, decision.RequestID), `{"note":"approved"}`)
-	req.Header.Set("Authorization", "Bearer "+deviceToken)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do approve: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected approval 200, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
-	}
-	payload := mustDecodeJSONBody(t, resp.Body)
-	if strings.TrimSpace(fmt.Sprint(payload["token"])) == "" {
-		t.Fatalf("expected token in response, got %#v", payload)
-	}
-	warnings, _ := payload["warnings"].([]any)
-	if len(warnings) != 1 {
-		t.Fatalf("expected one warning, got %#v", payload)
-	}
-	warning, _ := warnings[0].(map[string]any)
-	if warning["code"] != "plan_lookup_failed" {
-		t.Fatalf("expected plan lookup warning, got %#v", payload)
 	}
 }
 
@@ -4198,81 +3835,6 @@ func TestV1TurnsContractAliases(t *testing.T) {
 			t.Fatalf("expected tool policy warning, got %#v", req.Warnings)
 		}
 	})
-}
-
-// TestV1SubagentsContractAliases pins the accepted parent_session_key aliases and
-// timeout aliases for POST /internal/v1/subagents.
-func TestV1SubagentsContractAliases(t *testing.T) {
-	sessionAliases := []struct {
-		name    string
-		body    string
-		wantKey string
-	}{
-		{
-			name:    "session_key",
-			body:    `{"session_key":"svc:sk","task":"do it"}`,
-			wantKey: "svc:sk",
-		},
-		{
-			name:    "intern_session_key",
-			body:    `{"intern_session_key":"svc:isk","task":"do it"}`,
-			wantKey: "svc:isk",
-		},
-		{
-			name:    "sessionKey camelCase",
-			body:    `{"sessionKey":"svc:skc","task":"do it"}`,
-			wantKey: "svc:skc",
-		},
-		{
-			name:    "parentSessionKey camelCase",
-			body:    `{"parentSessionKey":"svc:psk","task":"do it"}`,
-			wantKey: "svc:psk",
-		},
-		{
-			name:    "internSessionKey camelCase",
-			body:    `{"internSessionKey":"svc:iskc","task":"do it"}`,
-			wantKey: "svc:iskc",
-		},
-	}
-	for _, tc := range sessionAliases {
-		t.Run(tc.name, func(t *testing.T) {
-			req, err := decodeServiceSubagentRequest(strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("decodeServiceSubagentRequest: %v", err)
-			}
-			if req.ParentSessionKey != tc.wantKey {
-				t.Fatalf("expected parent_session_key %q, got %q", tc.wantKey, req.ParentSessionKey)
-			}
-		})
-	}
-
-	timeoutAliases := []struct {
-		name    string
-		body    string
-		wantSec int
-	}{
-		{
-			name:    "timeout alias",
-			body:    `{"parent_session_key":"svc:p","task":"do it","timeout":30}`,
-			wantSec: 30,
-		},
-		{
-			name:    "timeoutSeconds camelCase alias",
-			body:    `{"parent_session_key":"svc:p","task":"do it","timeoutSeconds":60}`,
-			wantSec: 60,
-		},
-	}
-	for _, tc := range timeoutAliases {
-		t.Run(tc.name, func(t *testing.T) {
-			req, err := decodeServiceSubagentRequest(strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("decodeServiceSubagentRequest: %v", err)
-			}
-			if req.TimeoutSeconds != tc.wantSec {
-				t.Fatalf("expected TimeoutSeconds %d, got %d", tc.wantSec, req.TimeoutSeconds)
-			}
-		})
-	}
 }
 
 // TestV1ToolPolicyShape accepts legacy tool_policy fields but ignores enforcement.

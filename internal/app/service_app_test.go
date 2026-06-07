@@ -38,13 +38,3 @@ func TestReplayToolCall_ReturnsLegacyDisabled(t *testing.T) {
 		t.Fatalf("expected ErrLegacyToolReplayDisabled, got %v", err)
 	}
 }
-
-func TestStartSubagent_ReturnsLegacyRemoved(t *testing.T) {
-	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
-	app := NewServiceApp(cfg, nil, nil)
-	_, err := app.StartSubagent(context.Background(), SubagentRequest{Task: "background"})
-	if !errors.Is(err, ErrLegacySubagentsRemoved) {
-		t.Fatalf("expected ErrLegacySubagentsRemoved, got %v", err)
-	}
-}

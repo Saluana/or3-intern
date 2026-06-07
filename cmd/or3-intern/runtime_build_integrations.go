@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"log"
-	"path/filepath"
 
 	"or3-intern/internal/config"
 	"or3-intern/internal/mcp"
-	"or3-intern/internal/skills"
 )
 
 func buildRuntimeMCPManager(ctx context.Context, cfg config.Config) *mcp.Manager {
@@ -21,10 +19,4 @@ func buildRuntimeMCPManager(ctx context.Context, cfg config.Config) *mcp.Manager
 		log.Printf("mcp setup failed: %v", err)
 	}
 	return manager
-}
-
-func buildRuntimeSkillsInventory(ctx context.Context, cfg config.Config, cfgPath string, manager *mcp.Manager) skills.Inventory {
-	builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-	toolNames := loadAvailableToolNamesWithManager(ctx, cfg, manager)
-	return buildSkillsInventory(cfg, builtin, toolNames)
 }

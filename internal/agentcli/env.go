@@ -78,8 +78,8 @@ func defaultAgentCLIPathAppend() string {
 	var dirs []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		dirs = append(dirs,
-			filepath.Join(home, ".opencode", "bin"),
 			filepath.Join(home, ".bun", "bin"),
+			filepath.Join(home, ".opencode", "bin"),
 			filepath.Join(home, ".npm-global", "bin"),
 			filepath.Join(home, ".volta", "bin"),
 			filepath.Join(home, ".asdf", "shims"),

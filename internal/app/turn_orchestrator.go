@@ -298,9 +298,6 @@ var ErrLegacyToolReplayDisabled = errors.New("built-in tool replay is disabled i
 // ErrLegacyTurnEndpointRemoved is returned when clients call removed direct-turn APIs.
 var ErrLegacyTurnEndpointRemoved = errors.New("POST /internal/v1/turns was removed; use runner-chat endpoints (/internal/v1/runner-chat/turns)")
 
-// ErrLegacySubagentsRemoved is returned when clients try to create built-in subagent jobs.
-var ErrLegacySubagentsRemoved = errors.New("POST /internal/v1/subagents was removed; use POST /internal/v1/agent-runs for background runner work")
-
 func runnerTurnMeta(in map[string]any, migrated bool, legacyRunner, triggerKind string) map[string]any {
 	meta := cloneServiceMeta(in)
 	if meta == nil {

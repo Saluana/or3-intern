@@ -45,24 +45,6 @@ func (b *Broker) EvaluateRunnerPermission(ctx context.Context, req RunnerPermiss
 	)
 }
 
-func (b *Broker) EvaluateMessageSend(ctx context.Context, req MessageSendEvaluation) (Decision, error) {
-	subject := MessageSendSubject{
-		Type:            string(SubjectMessageSend),
-		ExecutionHostID: b.hostID(),
-		Channel:         strings.TrimSpace(req.Channel),
-		To:              strings.TrimSpace(req.To),
-		TextLength:      len(strings.TrimSpace(req.Text)),
-		MediaCount:      req.MediaCount,
-		ReplyInThread:   req.ReplyInThread,
-		RequestingAgent: strings.TrimSpace(req.AgentID),
-		SessionID:       strings.TrimSpace(req.SessionID),
-	}
-	return b.evaluate(ctx, SubjectMessageSend, subject, req.ApprovalToken,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: "send_message", Agent: subject.RequestingAgent},
-		nil,
-	)
-}
-
 func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
 	return b.evaluateWithMode(ctx, subjectType, subject, approvalToken, b.modeFor(subjectType), scope, matcher)
 }

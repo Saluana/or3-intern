@@ -43,19 +43,6 @@ func execFindings(cfg config.Config, opts Options) []Finding {
 	return findings
 }
 
-func publicIngressCanReachSkillExec(cfg config.Config) bool {
-	for _, channel := range openAccessChannelNames(cfg) {
-		_, profile, ok := resolveEffectiveProfile(cfg, "", channel)
-		if !ok {
-			return cfg.Hardening.PrivilegedTools
-		}
-		if profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script")) {
-			return true
-		}
-	}
-	return false
-}
-
 func publicIngressCanReachExec(cfg config.Config) bool {
 	if !cfg.Hardening.EnableExecShell || !cfg.Hardening.PrivilegedTools {
 		return false

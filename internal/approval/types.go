@@ -42,13 +42,12 @@ const (
 const defaultPageSize = 200
 
 type Broker struct {
-	DB        *db.DB
-	Audit     *security.AuditLogger
-	Config    config.ApprovalConfig
-	HostID    string
-	SignKey   []byte
-	Now       func() time.Time
-	Workspace string
+	DB      *db.DB
+	Audit   *security.AuditLogger
+	Config  config.ApprovalConfig
+	HostID  string
+	SignKey []byte
+	Now     func() time.Time
 }
 
 type Decision struct {
@@ -82,30 +81,6 @@ type ExecEvaluation struct {
 	ApprovalToken  string
 }
 
-type SkillEvaluation struct {
-	SkillID        string
-	Version        string
-	Origin         string
-	TrustState     string
-	ToolName       string
-	PlanID         string
-	PlanHash       string
-	ScriptHash     string
-	EnvBindingHash string
-	TimeoutSeconds int
-	AgentID        string
-	SessionID      string
-	ApprovalToken  string
-}
-
-type SecretAccessEvaluation struct {
-	SecretName    string
-	Operation     string
-	AgentID       string
-	SessionID     string
-	ApprovalToken string
-}
-
 type RunnerPermissionEvaluation struct {
 	RunnerID       string
 	PermissionKind string
@@ -114,28 +89,6 @@ type RunnerPermissionEvaluation struct {
 	AgentID        string
 	SessionID      string
 	ApprovalToken  string
-}
-
-type ToolQuotaEvaluation struct {
-	Scope         string
-	LimitName     string
-	ToolName      string
-	Current       int
-	Limit         int
-	AgentID       string
-	SessionID     string
-	ApprovalToken string
-}
-
-type MessageSendEvaluation struct {
-	Channel       string
-	To            string
-	Text          string
-	MediaCount    int
-	ReplyInThread bool
-	AgentID       string
-	SessionID     string
-	ApprovalToken string
 }
 
 type MessageSendSubject struct {

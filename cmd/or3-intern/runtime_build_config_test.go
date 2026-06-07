@@ -55,7 +55,7 @@ func TestValidateRuntimeStartupCommandAllowsUnsafeDevOverride(t *testing.T) {
 	}
 }
 
-func TestNewModelRefClientCarriesProviderKey(t *testing.T) {
+func TestNewModelRefClientUsesProviderConfig(t *testing.T) {
 	cfg := config.Default()
 	cfg.Providers["openrouter"] = config.ProviderProfileConfig{
 		APIBase:          "https://api.openai.com/v1",
@@ -67,10 +67,7 @@ func TestNewModelRefClientCarriesProviderKey(t *testing.T) {
 	if client == nil {
 		t.Fatal("expected client")
 	}
-	if client.ProviderName != "openrouter" {
-		t.Fatalf("expected provider name to be carried into runtime client, got %q", client.ProviderName)
-	}
-	if got := client.ProviderProfile("gpt-4").Name; got != "openrouter_compatible" {
-		t.Fatalf("expected openrouter runtime profile, got %q", got)
+	if client.APIBase != "https://api.openai.com/v1" {
+		t.Fatalf("expected provider API base, got %q", client.APIBase)
 	}
 }

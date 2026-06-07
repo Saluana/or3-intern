@@ -71,14 +71,6 @@ func webhookNoProfileFindings(cfg config.Config, opts Options) []Finding {
 			Summary:  "webhook can reach guarded tools because no access profile applies",
 		})
 	}
-	if cfg.Skills.EnableExec && cfg.Hardening.PrivilegedTools {
-		findings = append(findings, Finding{
-			ID:       "webhook.skills_without_profile",
-			Area:     "webhook",
-			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-			Summary:  "webhook can reach skill execution because no access profile applies",
-		})
-	}
 	return findings
 }
 
@@ -92,44 +84,12 @@ func webhookProfileFindings(cfg config.Config, opts Options, profileName string,
 			Summary:  fmt.Sprintf("webhook resolves to profile %q with privileged capability", profileName),
 		})
 	}
-	if profile.AllowSubagents {
-		findings = append(findings, Finding{
-			ID:       "webhook.profile_subagents",
-			Area:     "webhook",
-			Severity: SeverityWarn,
-			Summary:  fmt.Sprintf("webhook resolves to profile %q with subagents enabled", profileName),
-		})
-	}
-	if len(profile.WritablePaths) > 0 {
-		findings = append(findings, Finding{
-			ID:       "webhook.profile_writable_paths",
-			Area:     "webhook",
-			Severity: SeverityWarn,
-			Summary:  fmt.Sprintf("webhook resolves to profile %q with writable paths", profileName),
-		})
-	}
 	if hostListTooBroad(profile.AllowedHosts) {
 		findings = append(findings, Finding{
 			ID:       "webhook.profile_broad_hosts",
 			Area:     "webhook",
 			Severity: SeverityWarn,
 			Summary:  fmt.Sprintf("webhook resolves to profile %q with broad allowedHosts", profileName),
-		})
-	}
-	if cfg.Hardening.EnableExecShell && cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
-		findings = append(findings, Finding{
-			ID:       "webhook.exec_shell_exposure",
-			Area:     "webhook",
-			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-			Summary:  fmt.Sprintf("webhook can reach exec shell mode via profile %q", profileName),
-		})
-	}
-	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script")) {
-		findings = append(findings, Finding{
-			ID:       "webhook.skill_exec_exposure",
-			Area:     "webhook",
-			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-			Summary:  fmt.Sprintf("webhook can reach skill execution via profile %q", profileName),
 		})
 	}
 	return findings

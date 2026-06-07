@@ -147,7 +147,7 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 		if !cfg.Security.Approvals.Enabled {
 			return nil, nil
 		}
-		broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, Workspace: cfg.WorkspaceDir}
+		broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID}
 		return broker, nil
 	}
 	key, err := security.LoadOrCreateKey(keyFile)
@@ -156,12 +156,12 @@ func setupApprovalBroker(cfg config.Config, d *db.DB, audit *security.AuditLogge
 			return nil, fmt.Errorf("approval broker unavailable: %w", err)
 		}
 		if cfg.Security.Approvals.Enabled {
-			broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, Workspace: cfg.WorkspaceDir}
+			broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID}
 			return broker, nil
 		}
 		return nil, nil
 	}
-	broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key, Workspace: cfg.WorkspaceDir}
+	broker := &approval.Broker{DB: d, Audit: audit, Config: cfg.Security.Approvals, HostID: cfg.Security.Approvals.HostID, SignKey: key}
 	return broker, nil
 }
 

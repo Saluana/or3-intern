@@ -9,10 +9,10 @@ import (
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
+	"or3-intern/internal/capability"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/requestctx"
-	"or3-intern/internal/tools"
 	"or3-intern/internal/turns"
 )
 
@@ -34,7 +34,7 @@ type RunnerTurnRequest struct {
 	Actor         string
 	Role          string
 	ProfileName   string
-	Capability    tools.CapabilityLevel
+	Capability    capability.Level
 }
 
 // RunnerTurnResult contains durable identifiers for a started runner turn.

@@ -93,28 +93,3 @@ func jsonUnmarshalMap(raw string, out *map[string]any) error {
 	}
 	return json.Unmarshal([]byte(raw), out)
 }
-
-// PairingListItem is a redacted pairing request for list endpoints.
-type PairingListItem struct {
-	ID          int64  `json:"id"`
-	DeviceID    string `json:"device_id"`
-	Role        string `json:"role"`
-	DisplayName string `json:"display_name,omitempty"`
-	Origin      string `json:"origin,omitempty"`
-	Status      string `json:"status"`
-	RequestedAt int64  `json:"requested_at"`
-	ExpiresAt   int64  `json:"expires_at,omitempty"`
-}
-
-func ToPairingListItem(rec db.PairingRequestRecord) PairingListItem {
-	return PairingListItem{
-		ID:          rec.ID,
-		DeviceID:    rec.DeviceID,
-		Role:        rec.Role,
-		DisplayName: rec.DisplayName,
-		Origin:      rec.Origin,
-		Status:      rec.Status,
-		RequestedAt: rec.RequestedAt,
-		ExpiresAt:   rec.ExpiresAt,
-	}
-}

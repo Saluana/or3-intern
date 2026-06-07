@@ -17,6 +17,7 @@ import (
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
+	"or3-intern/internal/capability"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
@@ -162,7 +163,7 @@ func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, 
 	observer := &serviceObserver{ConversationObserver: jobs.ObserverForRegistry(s.jobs, jobID)}
 	finalText, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
 		IssuedApproval: issued,
-		Capability:     tools.CapabilityLevel(s.config.Service.MaxCapability),
+		Capability:     capability.Level(s.config.Service.MaxCapability),
 		Actor:          identity.Actor,
 		Role:           identity.Role,
 		Observer:       observer,

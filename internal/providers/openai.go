@@ -17,7 +17,6 @@ import (
 
 // Client talks to an OpenAI-compatible HTTP API.
 type Client struct {
-	ProviderName    string
 	APIBase         string
 	APIKey          string
 	HTTP            *http.Client
@@ -98,61 +97,6 @@ type ChatMessage struct {
 	Name       string     `json:"name,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-}
-
-// SupportsExplicitPromptCache reports whether the configured endpoint is known
-// to accept Anthropic-style cache-control metadata on message content blocks.
-// The default OpenAI-compatible path remains unchanged when this is false.
-func (c *Client) SupportsExplicitPromptCache() bool {
-	if c == nil {
-		return false
-	}
-	base := strings.ToLower(strings.TrimSpace(c.APIBase))
-	return strings.Contains(base, "anthropic") || strings.Contains(base, "claude")
-}
-
-// BuildCacheAwareSystemContent returns a system-message content payload that
-// preserves a stable prefix boundary for providers that understand explicit
-// cache-control metadata. Callers should use this only when
-// SupportsExplicitPromptCache returns true; otherwise a plain concatenated
-// string should be sent for maximum compatibility.
-func BuildCacheAwareSystemContent(stable, volatile string) any {
-	return BuildCacheAwareTieredContent(stable, "", volatile)
-}
-
-// BuildCacheAwareTieredContent renders static and session tiers as separate
-// cacheable blocks when supported; the turn tier is always uncached.
-func BuildCacheAwareTieredContent(static, session, turn string) any {
-	static = strings.TrimSpace(static)
-	session = strings.TrimSpace(session)
-	turn = strings.TrimSpace(turn)
-	parts := make([]map[string]any, 0, 3)
-	if static != "" {
-		parts = append(parts, cacheableTextBlock(static))
-	}
-	if session != "" {
-		parts = append(parts, cacheableTextBlock(session))
-	}
-	if turn != "" {
-		parts = append(parts, map[string]any{
-			"type": "text",
-			"text": turn,
-		})
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return parts
-}
-
-func cacheableTextBlock(text string) map[string]any {
-	return map[string]any{
-		"type": "text",
-		"text": text,
-		"cache_control": map[string]any{
-			"type": "ephemeral",
-		},
-	}
 }
 
 // ToolDef declares a callable tool in provider request format.

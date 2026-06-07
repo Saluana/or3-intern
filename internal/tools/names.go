@@ -3,21 +3,15 @@ package tools
 import "strings"
 
 const (
-	ToolNameExec        = "exec"
-	ToolNameReadFile    = "read_file"
-	ToolNameSearchFile  = "search_file"
-	ToolNameWriteFile   = "write_file"
-	ToolNameEditFile    = "edit_file"
-	ToolNameListDir     = "list_dir"
-	ToolNameWebFetch    = "web_fetch"
-	ToolNameWebSearch   = "web_search"
-	ToolNameSpawnSubagent = "spawn_subagent"
+	ToolNameExec      = "exec"
+	toolNameWriteFile = "write_file"
+	toolNameEditFile  = "edit_file"
 )
 
 // IsWriteToolName reports whether name is a legacy write/edit file tool.
 func IsWriteToolName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case ToolNameWriteFile, ToolNameEditFile:
+	case toolNameWriteFile, toolNameEditFile:
 		return true
 	default:
 		return false

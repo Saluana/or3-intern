@@ -1,9 +1,6 @@
 package config
 
-import (
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestSetChannelAccessLevelEnsuresBuiltins(t *testing.T) {
 	var profiles AccessProfilesConfig
@@ -18,21 +15,5 @@ func TestSetChannelAccessLevelEnsuresBuiltins(t *testing.T) {
 	}
 	if profiles.Profiles[AccessLevelOperator].MaxCapability != "guarded" {
 		t.Fatalf("expected operator builtin profile, got %#v", profiles.Profiles[AccessLevelOperator])
-	}
-}
-
-func TestExpandAccessProfileWorkspaceDir(t *testing.T) {
-	workspace := t.TempDir()
-	profile := AccessProfileConfig{WritablePaths: []string{AccessProfileWorkspaceDir, "${workspaceDir}/nested", ""}}
-	expanded := ExpandAccessProfile(profile, workspace)
-	if len(expanded.WritablePaths) != 2 {
-		t.Fatalf("expected two expanded paths, got %#v", expanded.WritablePaths)
-	}
-	if expanded.WritablePaths[0] != workspace {
-		t.Fatalf("expected workspace path, got %q", expanded.WritablePaths[0])
-	}
-	wantNested := filepath.Join(workspace, "nested")
-	if expanded.WritablePaths[1] != wantNested {
-		t.Fatalf("expected nested workspace path %q, got %q", wantNested, expanded.WritablePaths[1])
 	}
 }

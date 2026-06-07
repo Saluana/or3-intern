@@ -48,18 +48,7 @@ func StructuredTasksMap(env StructuredTaskEnvelope) map[string]any {
 	return out
 }
 
-func StructuredTasksFromMeta(meta map[string]any) (StructuredTaskEnvelope, bool) {
-	if len(meta) == 0 {
-		return StructuredTaskEnvelope{}, false
-	}
-	raw, ok := meta[MetaKeyStructuredTasks]
-	if !ok || raw == nil {
-		return StructuredTaskEnvelope{}, false
-	}
-	return normalizeStructuredTasks(raw)
-}
-
-func ParseStructuredTasksJSON(data []byte) (StructuredTaskEnvelope, bool) {
+func parseStructuredTasksJSON(data []byte) (StructuredTaskEnvelope, bool) {
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return StructuredTaskEnvelope{}, false
@@ -72,14 +61,14 @@ func ParseStructuredTasksText(text string) (StructuredTaskEnvelope, bool) {
 	if text == "" {
 		return StructuredTaskEnvelope{}, false
 	}
-	if env, ok := ParseStructuredTasksJSON([]byte(text)); ok {
+	if env, ok := parseStructuredTasksJSON([]byte(text)); ok {
 		return env, true
 	}
 	block, ok := extractStructuredTasksFence(text)
 	if !ok {
 		return StructuredTaskEnvelope{}, false
 	}
-	return ParseStructuredTasksJSON([]byte(block))
+	return parseStructuredTasksJSON([]byte(block))
 }
 
 func normalizeStructuredTasks(raw any) (StructuredTaskEnvelope, bool) {

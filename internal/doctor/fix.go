@@ -49,10 +49,6 @@ func ApplyAutomaticFixes(cfgPath string, cfg *config.Config, report Report) ([]A
 				return applied, err
 			}
 			applied = append(applied, AppliedFix{ID: finding.ID, Summary: "generated approvals key file"})
-		case "quotas.unset":
-			cfg.Hardening.Quotas = defaults.Hardening.Quotas
-			changedConfig = true
-			applied = append(applied, AppliedFix{ID: finding.ID, Summary: "restored default hardening quotas"})
 		case "privileged-exec.bubblewrap_path_empty":
 			cfg.Hardening.Sandbox.BubblewrapPath = defaults.Hardening.Sandbox.BubblewrapPath
 			changedConfig = true

@@ -178,15 +178,3 @@ func (b *Broker) allowlistPayloadFromRequest(req db.ApprovalRequestRecord) (stri
 		return "", "", AllowlistMatchKeys{}, nil
 	}
 }
-
-func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (int64, error) {
-	input, err := b.allowlistRecordFromRequest(ctx, req, actor)
-	if err != nil {
-		return 0, err
-	}
-	rec, err := b.AddAllowlistRecord(ctx, input)
-	if err != nil {
-		return 0, err
-	}
-	return rec.ID, nil
-}

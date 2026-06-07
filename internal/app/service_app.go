@@ -12,13 +12,13 @@ import (
 	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
+	"or3-intern/internal/capability"
 	"or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
 	"or3-intern/internal/streaming"
-	"or3-intern/internal/tools"
 	"or3-intern/internal/turns"
 )
 
@@ -79,7 +79,7 @@ type TurnRequest struct {
 	AllowedTools  []string
 	RestrictTools bool
 	ProfileName   string
-	Capability    tools.CapabilityLevel
+	Capability    capability.Level
 	ApprovalToken string
 	Actor         string
 	Role          string
@@ -91,12 +91,12 @@ type TurnResult struct {
 	RunnerTurn *RunnerTurnResult
 }
 
-func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, capability tools.CapabilityLevel, observer streaming.ConversationObserver, streamer channels.StreamingChannel) context.Context {
+func (a *ServiceApp) serviceRunContext(ctx context.Context, sessionKey, profileName, approvalToken, actor, role string, level capability.Level, observer streaming.ConversationObserver, streamer channels.StreamingChannel) context.Context {
 	runCtx := requestctx.ContextWithRequestSource(ctx, requestctx.RequestSourceService)
 	runCtx = requestctx.ContextWithSession(runCtx, strings.TrimSpace(sessionKey))
 	runCtx = requestctx.ContextWithApprovalToken(runCtx, approvalToken)
 	runCtx = requestctx.ContextWithRequesterIdentity(runCtx, actor, role)
-	runCtx = requestctx.ContextWithCapabilityCeiling(runCtx, capability)
+	runCtx = requestctx.ContextWithCapabilityCeiling(runCtx, level)
 	if observer != nil {
 		runCtx = streaming.ContextWithConversationObserver(runCtx, observer)
 	}
@@ -165,7 +165,7 @@ type ReplayToolCallRequest struct {
 	AllowedTools           []string
 	RestrictTools          bool
 	ProfileName            string
-	Capability             tools.CapabilityLevel
+	Capability             capability.Level
 	ApprovalToken          string
 	Actor                  string
 	Role                   string
@@ -175,7 +175,7 @@ type ReplayToolCallRequest struct {
 type ResumeApprovedRequest struct {
 	IssuedApproval approval.IssuedApproval
 	ProfileName    string
-	Capability     tools.CapabilityLevel
+	Capability     capability.Level
 	Actor          string
 	Role           string
 	Observer       streaming.ConversationObserver

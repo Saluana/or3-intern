@@ -108,7 +108,9 @@ See [security-and-hardening.md](security-and-hardening.md) for rollout guidance.
 
 #### `hardening.quotas`
 
-`hardening.quotas` limits tool use per message and per session. Per-message settings use the existing keys:
+`hardening.quotas` is retained for config compatibility with pre-runner-first installs. Runner-first builds do not enforce host-local model tool quotas; use runner-specific limits, service capability ceilings, access profiles, and approvals for current runtime control.
+
+Legacy per-message settings use these keys:
 
 - `maxToolCalls`
 - `maxExecCalls`
@@ -122,7 +124,7 @@ Per-session settings use:
 - `maxSessionWebCalls`
 - `maxSessionSubagentCalls`
 
-`exceededAction` controls what happens when either scope reaches a limit. The default is `ask`, which creates a pending `tool_quota` approval request and returns the request ID so an operator can approve continuation. Set it to `fail` to keep the older hard-stop behavior.
+`exceededAction` is also retained for compatibility, but current runner-first execution does not create `tool_quota` approval requests from these fields.
 
 ### `skills`
 
@@ -276,7 +278,7 @@ Configure each of these independently under `security.approvals`:
 | ---------------- | -------------------------------------------------------------------------- |
 | `pairing`        | Whether new device pairing requests are auto-approved, gated, or denied.   |
 | `exec`           | Shell and program execution via the `exec` tool.                           |
-| `skillExecution` | Skill execution via `run_skill` and the legacy `run_skill_script` wrapper. |
+| `skillExecution` | Legacy skill-execution approval domain retained for config compatibility; runner-first builds do not expose host-local `run_skill` tools. |
 | `secretAccess`   | (Future) Gate on decrypting or reading a named secret.                     |
 | `messageSend`    | (Future) Gate on sending an outbound message through a channel.            |
 

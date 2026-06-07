@@ -100,15 +100,17 @@ type Config struct {
 	ToolsFile              string `json:"toolsFile"`
 	BootstrapMaxChars      int    `json:"bootstrapMaxChars"`
 	BootstrapTotalMaxChars int    `json:"bootstrapTotalMaxChars"`
-	SessionCache           int    `json:"sessionCacheLimit"`
-	HistoryMax             int    `json:"historyMaxMessages"`
-	MaxToolBytes           int    `json:"maxToolBytes"`
-	MaxMediaBytes          int    `json:"maxMediaBytes"`
-	MemoryRetrieve         int    `json:"memoryRetrieveLimit"`
-	VectorK                int    `json:"vectorSearchK"`
-	FTSK                   int    `json:"ftsSearchK"`
-	VectorScanLimit        int    `json:"vectorScanLimit"`
-	WorkerCount            int    `json:"workerCount"`
+	// Deprecated: retained for config compatibility; runner-first runtime does not enforce it.
+	SessionCache int `json:"sessionCacheLimit"`
+	HistoryMax   int `json:"historyMaxMessages"`
+	// Deprecated: retained for config compatibility; runner-first runtime does not enforce it.
+	MaxToolBytes    int `json:"maxToolBytes"`
+	MaxMediaBytes   int `json:"maxMediaBytes"`
+	MemoryRetrieve  int `json:"memoryRetrieveLimit"`
+	VectorK         int `json:"vectorSearchK"`
+	FTSK            int `json:"ftsSearchK"`
+	VectorScanLimit int `json:"vectorScanLimit"`
+	WorkerCount     int `json:"workerCount"`
 
 	ConsolidationEnabled             bool           `json:"consolidationEnabled"`
 	ConsolidationModel               string         `json:"consolidationModel"`
@@ -152,16 +154,23 @@ type Config struct {
 }
 
 type ContextConfig struct {
-	Mode                string                 `json:"mode"`
-	MaxInputTokens      int                    `json:"maxInputTokens"`
-	OutputReserveTokens int                    `json:"outputReserveTokens"`
-	SafetyMarginTokens  int                    `json:"safetyMarginTokens"`
-	Sections            ContextSectionBudgets  `json:"sections"`
-	Retrieval           ContextRetrievalConfig `json:"retrieval"`
-	Pressure            ContextPressureConfig  `json:"pressure"`
-	Tools               ContextToolConfig      `json:"tools"`
-	Artifacts           ContextArtifactConfig  `json:"artifacts"`
-	TaskCard            ContextTaskCardConfig  `json:"taskCard"`
+	Mode           string `json:"mode"`
+	MaxInputTokens int    `json:"maxInputTokens"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	OutputReserveTokens int `json:"outputReserveTokens"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	SafetyMarginTokens int `json:"safetyMarginTokens"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce these budgets.
+	Sections ContextSectionBudgets `json:"sections"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	Retrieval ContextRetrievalConfig `json:"retrieval"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	Pressure ContextPressureConfig `json:"pressure"`
+	Tools    ContextToolConfig     `json:"tools"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	Artifacts ContextArtifactConfig `json:"artifacts"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	TaskCard ContextTaskCardConfig `json:"taskCard"`
 }
 
 type ContextSectionBudgets struct {
@@ -217,15 +226,16 @@ type ContextManagerConfig struct {
 
 // HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
 type HardeningConfig struct {
-	GuardedTools        bool                  `json:"guardedTools"`
-	PrivilegedTools     bool                  `json:"privilegedTools"`
-	EnableExecShell     bool                  `json:"enableExecShell"`
-	ExecAllowedPrograms []string              `json:"execAllowedPrograms"`
-	ChildEnvAllowlist   []string              `json:"childEnvAllowlist"`
-	IsolateChannelPeers bool                  `json:"isolateChannelPeers"`
-	MetadataScanner     MetadataScannerConfig `json:"metadataScanner"`
-	Sandbox             SandboxConfig         `json:"sandbox"`
-	Quotas              HardeningQuotaConfig  `json:"quotas"`
+	GuardedTools        bool     `json:"guardedTools"`
+	PrivilegedTools     bool     `json:"privilegedTools"`
+	EnableExecShell     bool     `json:"enableExecShell"`
+	ExecAllowedPrograms []string `json:"execAllowedPrograms"`
+	ChildEnvAllowlist   []string `json:"childEnvAllowlist"`
+	IsolateChannelPeers bool     `json:"isolateChannelPeers"`
+	// Deprecated: retained for config compatibility; runner-first runtime does not consume it.
+	MetadataScanner MetadataScannerConfig `json:"metadataScanner"`
+	Sandbox         SandboxConfig         `json:"sandbox"`
+	Quotas          HardeningQuotaConfig  `json:"quotas"`
 }
 
 type MetadataScannerConfig struct {
@@ -250,16 +260,18 @@ const (
 
 // HardeningQuotaConfig limits how many sensitive tool calls a message and session may issue.
 type HardeningQuotaConfig struct {
-	Enabled                 bool                `json:"enabled"`
-	ExceededAction          QuotaExceededAction `json:"exceededAction"`
-	MaxToolCalls            int                 `json:"maxToolCalls"`
-	MaxExecCalls            int                 `json:"maxExecCalls"`
-	MaxWebCalls             int                 `json:"maxWebCalls"`
-	MaxSubagentCalls        int                 `json:"maxSubagentCalls"`
-	MaxSessionToolCalls     int                 `json:"maxSessionToolCalls"`
-	MaxSessionExecCalls     int                 `json:"maxSessionExecCalls"`
-	MaxSessionWebCalls      int                 `json:"maxSessionWebCalls"`
-	MaxSessionSubagentCalls int                 `json:"maxSessionSubagentCalls"`
+	Enabled        bool                `json:"enabled"`
+	ExceededAction QuotaExceededAction `json:"exceededAction"`
+	MaxToolCalls   int                 `json:"maxToolCalls"`
+	MaxExecCalls   int                 `json:"maxExecCalls"`
+	MaxWebCalls    int                 `json:"maxWebCalls"`
+	// Deprecated: subagents were removed in the runner-first runtime.
+	MaxSubagentCalls    int `json:"maxSubagentCalls"`
+	MaxSessionToolCalls int `json:"maxSessionToolCalls"`
+	MaxSessionExecCalls int `json:"maxSessionExecCalls"`
+	MaxSessionWebCalls  int `json:"maxSessionWebCalls"`
+	// Deprecated: subagents were removed in the runner-first runtime.
+	MaxSessionSubagentCalls int `json:"maxSessionSubagentCalls"`
 }
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
@@ -712,11 +724,12 @@ type AccessProfilesConfig struct {
 
 // AccessProfileConfig limits tools, hosts, and write paths for a profile.
 type AccessProfileConfig struct {
-	MaxCapability  string   `json:"maxCapability"`
-	AllowedTools   []string `json:"allowedTools"`
-	AllowedHosts   []string `json:"allowedHosts"`
-	WritablePaths  []string `json:"writablePaths"`
-	AllowSubagents bool     `json:"allowSubagents"`
+	MaxCapability string   `json:"maxCapability"`
+	AllowedTools  []string `json:"allowedTools"`
+	AllowedHosts  []string `json:"allowedHosts"`
+	WritablePaths []string `json:"writablePaths"`
+	// Deprecated: subagents were removed in the runner-first runtime.
+	AllowSubagents bool `json:"allowSubagents"`
 }
 
 // NetworkPolicyConfig defines outbound network restrictions.

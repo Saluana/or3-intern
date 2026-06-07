@@ -1,9 +1,6 @@
 package config
 
-import (
-	"path/filepath"
-	"strings"
-)
+import "strings"
 
 const (
 	AccessLevelReader   = "reader"
@@ -74,9 +71,6 @@ func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 				"web_fetch",
 				"web_fetch_markdown",
 				"exec",
-				"run_skill",
-				"run_skill_script",
-				"spawn_subagent",
 				"send_message",
 				"cron",
 			},
@@ -95,19 +89,6 @@ func NormalizeAccessLevel(level string) string {
 		return AccessLevelOperator
 	case AccessLevelAdmin, "owner", "administrator":
 		return AccessLevelAdmin
-	default:
-		return ""
-	}
-}
-
-func AccessLevelToDeviceRole(level string) string {
-	switch NormalizeAccessLevel(level) {
-	case AccessLevelReader:
-		return "viewer"
-	case AccessLevelAdmin:
-		return "admin"
-	case AccessLevelOperator:
-		return "operator"
 	default:
 		return ""
 	}
@@ -177,29 +158,4 @@ func MigrateLegacyServiceAccessChannel(cfg *Config) {
 		level = AccessLevelReader
 	}
 	SetChannelAccessLevel(&cfg.Security.Profiles, "service", level)
-}
-
-func ExpandAccessProfile(profile AccessProfileConfig, workspaceDir string) AccessProfileConfig {
-	workspaceDir = strings.TrimSpace(workspaceDir)
-	expanded := profile
-	expanded.AllowedTools = append([]string{}, profile.AllowedTools...)
-	expanded.AllowedHosts = append([]string{}, profile.AllowedHosts...)
-	expanded.WritablePaths = make([]string, 0, len(profile.WritablePaths))
-	for _, raw := range profile.WritablePaths {
-		value := strings.TrimSpace(raw)
-		if value == "" {
-			continue
-		}
-		if workspaceDir != "" {
-			value = strings.ReplaceAll(value, AccessProfileWorkspaceDir, workspaceDir)
-		}
-		if strings.Contains(value, AccessProfileWorkspaceDir) {
-			continue
-		}
-		if abs, err := filepath.Abs(value); err == nil {
-			value = abs
-		}
-		expanded.WritablePaths = append(expanded.WritablePaths, value)
-	}
-	return expanded
 }

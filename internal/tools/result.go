@@ -8,7 +8,5 @@ type (
 )
 
 var (
-	EncodeToolResult  = actionresult.Encode
-	DecodeToolResult  = actionresult.Decode
-	EncodeToolFailure = actionresult.EncodeFailure
+	DecodeToolResult = actionresult.Decode
 )

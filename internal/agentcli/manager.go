@@ -115,7 +115,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels workers and waits for them to exit.
+// Stop cancels workers and waits for them to exit. It also stops any
+// registered native runtimes (managed opencode servers, etc.) so process
+// groups are cleaned up on shutdown. External servers are never killed.
 func (m *Manager) Stop(ctx context.Context) error {
 	if m == nil {
 		return nil
@@ -127,6 +129,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 	cancel := m.cancel
 	m.started = false
+	runtimes := m.Runtimes
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -139,12 +142,24 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var firstErr error
 	select {
 	case <-done:
-		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		firstErr = ctx.Err()
 	}
+	// Best-effort native runtime shutdown. Use a bounded timeout so a
+	// stuck managed process doesn't block the service indefinitely.
+	if runtimes != nil {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), agentCLIFinalizeTimeout)
+		defer cancelStop()
+		runtimes.ForEach(func(runtime NativeRunnerRuntime) {
+			if err := runtime.Stop(stopCtx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		})
+	}
+	return firstErr
 }
 
 // Enqueue validates, persists, and signals a new CLI run.
@@ -387,6 +402,10 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 	}
 
 	if out, handled := m.tryExecuteNativeRun(runCtx, run); handled {
+		if out.PendingNativeApproval {
+			m.pauseRunForNativeApproval(run, out)
+			return
+		}
 		finalStatus := db.AgentCLIStatusSucceeded
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			finalStatus = db.AgentCLIStatusTimedOut
@@ -565,6 +584,7 @@ func (m *Manager) tryExecuteNativeRun(ctx context.Context, run db.AgentCLIRun) (
 	}
 	if errors.Is(err, errNativeApprovalRequired) {
 		out.ExitCode = -1
+		out.PendingNativeApproval = true
 		if out.StderrPreview == "" {
 			out.StderrPreview = err.Error()
 		}
@@ -627,6 +647,90 @@ func (m *Manager) recoverRunPanic(run db.AgentCLIRun) {
 		log.Printf("agent CLI worker recovered panic: run=%s err=%v", run.ID, recovered)
 		m.finalizeRun(context.Background(), run, db.AgentCLIStatusFailed, "agent CLI worker recovered after an internal failure", ProcessOutput{ExitCode: -1})
 	}
+}
+
+func (m *Manager) pauseRunForNativeApproval(run db.AgentCLIRun, out ProcessOutput) {
+	status := db.AgentCLIStatusApprovalRequired
+	m.emitCompletion(run, status, out)
+	if m.Jobs != nil {
+		m.Jobs.PauseForApproval(run.JobID, map[string]any{
+			"runner_id": run.RunnerID,
+			"run_id":    run.ID,
+			"status":    status,
+		})
+	}
+}
+
+// ResumeNativeRunAfterApproval continues a native run that paused for operator
+// approval. The underlying agent_cli_runs row must still be running.
+func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.AgentCLIRun) error {
+	if m == nil {
+		return errors.New("agent CLI manager not configured")
+	}
+	chatReq, ok := buildRuntimeChatRequest(run)
+	if !ok {
+		return errors.New("run is not a native chat execution")
+	}
+	if m.Runtimes == nil {
+		return errors.New("no runner registry configured")
+	}
+	runtime, ok := m.Runtimes.Get(RunnerID(run.RunnerID))
+	if !ok {
+		return errors.New("runner runtime not found")
+	}
+	continuer, ok := runtime.(NativeTurnContinuer)
+	if !ok {
+		return errors.New("runner does not support native approval continuation")
+	}
+	cfg := m.configSnapshot()
+	env := nativeEnv(cfg)
+	runnerID := RunnerID(run.RunnerID)
+	if additionalEnv, err := m.runnerAdditionalEnv(runnerID, parseAgentRunMeta(run.MetaJSON)); err != nil {
+		return err
+	} else if len(additionalEnv) > 0 {
+		env = mergeEnvOverlay(env, additionalEnv)
+	}
+	var maxSeq int64
+	out, err := continuer.ContinuePendingTurn(ctx, NativeRuntimeExecuteRequest{
+		Run:    run,
+		Chat:   chatReq,
+		Config: cfg,
+		Env:    env,
+		OnEvent: func(e AgentRunEvent) {
+			e.JobID = run.JobID
+			e.RunnerID = run.RunnerID
+			updateMaxSeq(&maxSeq, e.Seq)
+			m.persistEvent(run, e)
+			if m.Jobs != nil {
+				m.Jobs.Publish(run.JobID, e.Type, eventToMap(e))
+			}
+		},
+	})
+	out.EventSeq = maxSeq
+	if errors.Is(err, errNativeApprovalRequired) {
+		m.pauseRunForNativeApproval(run, out)
+		return nil
+	}
+	finalStatus := db.AgentCLIStatusSucceeded
+	errMsg := ""
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		finalStatus = db.AgentCLIStatusTimedOut
+		errMsg = "timed out"
+	} else if errors.Is(ctx.Err(), context.Canceled) {
+		finalStatus = db.AgentCLIStatusAborted
+		errMsg = "aborted"
+	} else if err != nil || out.ExitCode != 0 {
+		finalStatus = db.AgentCLIStatusFailed
+		if err != nil && errMsg == "" {
+			errMsg = err.Error()
+		}
+		if errMsg == "" {
+			errMsg = out.StderrPreview
+		}
+	}
+	m.emitCompletion(run, finalStatus, out)
+	m.finalizeRun(ctx, run, finalStatus, errMsg, out)
+	return err
 }
 
 func (m *Manager) finalizeRun(ctx context.Context, run db.AgentCLIRun, status, errMsg string, out ProcessOutput) {
@@ -772,7 +876,7 @@ func (m *Manager) buildCommandSpecForRun(ctx context.Context, run db.AgentCLIRun
 	cfg := m.configSnapshot()
 	meta := parseAgentRunMeta(run.MetaJSON)
 	model := strings.TrimSpace(run.Model)
-	if RunnerID(run.RunnerID) == RunnerOpenCode && model != "" {
+	if RunnerID(run.RunnerID) == RunnerOpenCode && model != "" && strings.TrimSpace(asString(meta["runner_chat_continuation_mode"])) != string(ContinuationNative) {
 		model = OpenCodeCLIModelFlag(ctx, cfg, nativeEnv(cfg), model)
 	}
 	req := AgentRunRequest{

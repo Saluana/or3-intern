@@ -497,3 +497,91 @@ func assertPayloadField(t *testing.T, raw json.RawMessage, key, want string) {
 		t.Fatalf("payload[%q]=%q want %q in %s", key, got, want, string(raw))
 	}
 }
+
+func TestNormalizeOpenCodeTokenUsageEvent(t *testing.T) {
+	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	events := adapter.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 1, Payload: json.RawMessage(`{"type":"token.usage","usage":{"input_tokens":120,"output_tokens":40,"cached_input_tokens":20,"total_tokens":160,"model":"claude-3-5-sonnet"}}`)})
+	if len(events) != 1 || events[0].Type != runtimeEventTokenUsage {
+		t.Fatalf("expected single token.usage event, got %#v", events)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	usage, ok := payload["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected usage map, got %#v", payload)
+	}
+	if got, _ := usage["input_tokens"].(float64); got != 120 {
+		t.Fatalf("input_tokens = %v, want 120", usage["input_tokens"])
+	}
+	if got, _ := usage["output_tokens"].(float64); got != 40 {
+		t.Fatalf("output_tokens = %v, want 40", usage["output_tokens"])
+	}
+	if got, _ := usage["cached_input_tokens"].(float64); got != 20 {
+		t.Fatalf("cached_input_tokens = %v, want 20", usage["cached_input_tokens"])
+	}
+}
+
+func TestNormalizeOpenCodeConfigWarningEvent(t *testing.T) {
+	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	events := adapter.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 1, Payload: json.RawMessage(`{"type":"config.warning","code":"missing_api_key","message":"Anthropic key not set","kind":"missing"}`)})
+	if len(events) != 1 || events[0].Type != runtimeEventConfigWarning {
+		t.Fatalf("expected config.warning event, got %#v", events)
+	}
+	if !strings.Contains(string(events[0].Payload), `"code":"missing_api_key"`) {
+		t.Fatalf("expected code in payload, got %s", string(events[0].Payload))
+	}
+}
+
+func TestNormalizeOpenCodeModelRerouteEvent(t *testing.T) {
+	adapter := &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}
+	events := adapter.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 1, Payload: json.RawMessage(`{"type":"model.reroute","from":"gpt-5","to":"gpt-5-mini","reason":"rate limit"}`)})
+	if len(events) != 1 || events[0].Type != runtimeEventModelReroute {
+		t.Fatalf("expected model.reroute event, got %#v", events)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload["from"] != "gpt-5" || payload["to"] != "gpt-5-mini" {
+		t.Fatalf("expected from/to in payload, got %#v", payload)
+	}
+}
+
+func TestNormalizeCodexTokenUsageEvent(t *testing.T) {
+	adapter := &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}
+	events := adapter.NormalizeChatEvent(AgentRunEvent{Type: "structured", Seq: 1, Payload: json.RawMessage(`{"type":"item/tokenCount/updated","usage":{"input_tokens":50,"output_tokens":30,"total_tokens":80}}`)})
+	if len(events) != 1 || events[0].Type != runtimeEventTokenUsage {
+		t.Fatalf("expected single token.usage event, got %#v", events)
+	}
+}
+
+func TestExtractTokenUsageFromVariousShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want map[string]int64
+	}{
+		{"snake_case", `{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`, map[string]int64{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}},
+		{"camelCase", `{"tokenUsage":{"inputTokens":10,"outputTokens":5,"totalTokens":15}}`, map[string]int64{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}},
+		{"tokens", `{"tokens":{"input":1,"output":2,"total":3}}`, map[string]int64{"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(tc.raw), &obj); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			usage := extractTokenUsage(obj)
+			if usage == nil {
+				t.Fatalf("expected usage, got nil")
+			}
+			for key, want := range tc.want {
+				if got, ok := usage[key].(int64); !ok || got != want {
+					t.Fatalf("usage[%q] = %v, want %d", key, usage[key], want)
+				}
+			}
+		})
+	}
+}

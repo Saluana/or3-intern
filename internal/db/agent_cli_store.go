@@ -14,7 +14,8 @@ const (
 	AgentCLIStatusSucceeded = "succeeded"
 	AgentCLIStatusFailed    = "failed"
 	AgentCLIStatusAborted   = "aborted"
-	AgentCLIStatusTimedOut  = "timed_out"
+	AgentCLIStatusTimedOut           = "timed_out"
+	AgentCLIStatusApprovalRequired   = "approval_required"
 )
 
 var ErrAgentCLIQueueFull = errors.New("agent CLI queue is full")

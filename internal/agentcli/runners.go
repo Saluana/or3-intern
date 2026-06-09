@@ -107,6 +107,71 @@ type RunnerModelInfo struct {
 	Default          bool     `json:"default,omitempty"`
 	Reasoning        []string `json:"reasoning,omitempty"`
 	ReasoningDefault string   `json:"reasoning_default,omitempty"`
+	// Options are per-model option descriptors (reasoning, fast mode, etc).
+	Options []RunnerModelOption `json:"options,omitempty"`
+	// Capabilities describes what the model/runner supports for this entry.
+	Capabilities RunnerModelCapabilities `json:"capabilities,omitempty"`
+}
+
+// RunnerModelOption describes a configurable option for a model entry.
+type RunnerModelOption struct {
+	ID           string                   `json:"id"`
+	Label        string                   `json:"label,omitempty"`
+	Description  string                   `json:"description,omitempty"`
+	Type         string                   `json:"type"`
+	Values       []RunnerModelOptionValue `json:"values,omitempty"`
+	DefaultValue string                   `json:"default_value,omitempty"`
+	CurrentValue string                   `json:"current_value,omitempty"`
+}
+
+// RunnerModelOptionValue describes one selectable value for a select option.
+type RunnerModelOptionValue struct {
+	Value       string `json:"value"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// RunnerModelCapabilities lists feature flags the runner advertises for a model.
+type RunnerModelCapabilities struct {
+	ReasoningEffort bool `json:"reasoning_effort,omitempty"`
+	FastMode        bool `json:"fast_mode,omitempty"`
+	Variants        bool `json:"variants,omitempty"`
+	Agents          bool `json:"agents,omitempty"`
+	ToolUse         bool `json:"tool_use,omitempty"`
+}
+
+// RunnerProviderInfo is a single provider entry from server discovery.
+type RunnerProviderInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Default     bool   `json:"default,omitempty"`
+	// Source identifies how the provider was discovered (server, cli, static).
+	Source string `json:"source,omitempty"`
+}
+
+// RunnerAgentInfo describes a runner-defined agent/persona entry.
+type RunnerAgentInfo struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Default     bool   `json:"default,omitempty"`
+	BuiltIn     bool   `json:"built_in,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+}
+
+// RunnerNativeHealth is a small snapshot of native backend readiness.
+type RunnerNativeHealth struct {
+	Reachable      bool   `json:"reachable"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	LatencyMS      int64  `json:"latency_ms,omitempty"`
+	ServerVersion  string `json:"server_version,omitempty"`
+	LastCheckedAt  int64  `json:"last_checked_at,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+	AuthStatus     string `json:"auth_status,omitempty"`
+	AuthDetail     string `json:"auth_detail,omitempty"`
+	StartedAt      int64  `json:"started_at,omitempty"`
+	IdleTimeoutSec int    `json:"idle_timeout_seconds,omitempty"`
 }
 
 // RunnerRuntimeInfo is discovery/status metadata for native-first backends.
@@ -119,8 +184,40 @@ type RunnerRuntimeInfo struct {
 	Message        string                 `json:"message,omitempty"`
 	Fallback       bool                   `json:"fallback"`
 	FallbackReason string                 `json:"fallback_reason,omitempty"`
+	NextAction     string                 `json:"next_action,omitempty"`
+	Version        string                 `json:"version,omitempty"`
+	AuthStatus     AuthStatus             `json:"auth_status,omitempty"`
+	AuthDetail     string                 `json:"auth_detail,omitempty"`
 	Models         []RunnerModelInfo      `json:"models,omitempty"`
 	DefaultModel   string                 `json:"default_model,omitempty"`
+	Providers      []RunnerProviderInfo   `json:"providers,omitempty"`
+	Agents         []RunnerAgentInfo      `json:"agents,omitempty"`
+	Health         *RunnerNativeHealth    `json:"health,omitempty"`
+	Refs           RunnerRuntimeRefs      `json:"refs,omitempty"`
+	Options        []RunnerRuntimeOption  `json:"options,omitempty"`
+	Skills         []string               `json:"skills,omitempty"`
+}
+
+// RunnerRuntimeRefs are caller-supplied references to a live runtime (e.g. an
+// app-server session id, a managed server PID, or a request id awaiting reply).
+type RunnerRuntimeRefs struct {
+	SessionID     string `json:"session_id,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
+	TurnID        string `json:"turn_id,omitempty"`
+	ProcessID     int    `json:"process_id,omitempty"`
+	ServerID      string `json:"server_id,omitempty"`
+	LastRequestID string `json:"last_request_id,omitempty"`
+}
+
+// RunnerRuntimeOption describes a runtime-level option (e.g. fast mode).
+type RunnerRuntimeOption struct {
+	ID           string                   `json:"id"`
+	Label        string                   `json:"label,omitempty"`
+	Description  string                   `json:"description,omitempty"`
+	Type         string                   `json:"type"`
+	Values       []RunnerModelOptionValue `json:"values,omitempty"`
+	DefaultValue string                   `json:"default_value,omitempty"`
+	CurrentValue string                   `json:"current_value,omitempty"`
 }
 
 // OutputMode describes how the CLI output is formatted.
@@ -337,4 +434,57 @@ type NativeRunnerChatAdapter interface {
 	// session ref when one is found. Returning ("", false) means no ref
 	// was extracted from this input.
 	ExtractNativeSessionRef(event AgentRunEvent) (string, bool)
+}
+
+// NativeRequestKind classifies a native request the runtime is asking the
+// host to resolve (approval, question, free-form input, ...).
+type NativeRequestKind string
+
+const (
+	NativeRequestApproval NativeRequestKind = "approval"
+	NativeRequestQuestion NativeRequestKind = "question"
+	NativeRequestInput    NativeRequestKind = "input"
+	NativeRequestUnknown  NativeRequestKind = "unknown"
+)
+
+// NativeRequestRef is a runtime-stable handle to a pending native request.
+// The runtime can be told to "respond" to this ref (approve/reject) so the
+// active turn can continue without a process restart.
+type NativeRequestRef struct {
+	RunnerID   RunnerID          `json:"runner_id"`
+	Kind       NativeRequestKind `json:"kind"`
+	RequestID  string            `json:"request_id"`
+	ThreadID   string            `json:"thread_id,omitempty"`
+	TurnID     string            `json:"turn_id,omitempty"`
+	SessionID  string            `json:"session_id,omitempty"`
+	Method     string            `json:"method,omitempty"`
+	Summary    string            `json:"summary,omitempty"`
+	IssuedAt   int64             `json:"issued_at,omitempty"`
+	RawPayload json.RawMessage   `json:"raw_payload,omitempty"`
+}
+
+// NativeRequestDecision is the user's response to a NativeRequestRef.
+type NativeRequestDecision struct {
+	Decision    string          `json:"decision"`
+	Message     string          `json:"message,omitempty"`
+	AlwaysAllow bool            `json:"always_allow,omitempty"`
+	Raw         json.RawMessage `json:"raw,omitempty"`
+}
+
+// NativeRequestResponder is implemented by runtimes that can accept
+// responses to a pending native request and resume the active turn.
+type NativeRequestResponder interface {
+	NativeRunnerRuntime
+	// RespondToNativeRequest resolves a pending native request and
+	// resumes the underlying turn. Returning a non-nil error indicates
+	// the runtime could not resume (e.g. session is dead); callers should
+	// fall back to the approval-token retry path.
+	RespondToNativeRequest(ctx context.Context, ref NativeRequestRef, decision NativeRequestDecision) error
+}
+
+// NativeTurnContinuer is implemented by native runtimes that can keep
+// waiting for turn completion after the manager pauses for approval.
+type NativeTurnContinuer interface {
+	NativeRunnerRuntime
+	ContinuePendingTurn(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error)
 }

@@ -319,6 +319,20 @@ func (d *DB) FinalizeRunnerChatTurn(ctx context.Context, id string, in RunnerCha
 	return err
 }
 
+// MarkRunnerChatTurnApprovalResumed transitions an approval_required turn
+// back to running so the manager can resume the underlying agent CLI run
+// with a freshly-issued approval token.
+func (d *DB) MarkRunnerChatTurnApprovalResumed(ctx context.Context, id string, resumedAt int64) error {
+	if resumedAt == 0 {
+		resumedAt = NowMS()
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_chat_turns SET status=?, started_at=COALESCE(NULLIF(started_at,0),?), completed_at=0
+		 WHERE id=? AND status=?`,
+		RunnerChatTurnStatusRunning, resumedAt, id, RunnerChatTurnStatusApprovalRequired)
+	return err
+}
+
 // SetRunnerChatTurnUserMessageID sets the persisted user message ID for a turn.
 func (d *DB) SetRunnerChatTurnUserMessageID(ctx context.Context, id string, messageID int64) error {
 	_, err := d.SQL.ExecContext(ctx,

@@ -40,8 +40,9 @@ type ProcessOutput struct {
 	StdoutPreview    string
 	StderrPreview    string
 	FinalTextPreview string
-	DurationMS       int64
-	EventSeq         int64
+	DurationMS            int64
+	EventSeq              int64
+	PendingNativeApproval bool
 }
 
 // Run launches a command and streams events through the provided callback.

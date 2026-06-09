@@ -145,6 +145,12 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 				return
 			}
 			s.handleRunnerChatTurnAbort(w, r, store, sessionID, turnID)
+		case "approve", "reject", "cancel":
+			if r.Method != http.MethodPost {
+				writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+				return
+			}
+			s.handleRunnerChatTurnDecision(w, r, store, sessionID, turnID, tail)
 		default:
 			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		}
@@ -519,6 +525,61 @@ func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http
 		return
 	}
 	writeServiceJSON(w, http.StatusAccepted, map[string]any{"status": "aborting"})
+}
+
+func (s *serviceServer) handleRunnerChatTurnDecision(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID, decision string) {
+	if s.runnerChatWriteUnavailable() {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		return
+	}
+	if _, ok := s.loadRunnerChatTurnForSession(w, r, store, sessionID, turnID); !ok {
+		return
+	}
+	limitServiceRequestBody(w, r, serviceRunnerChatBodyLimit)
+	var body struct {
+		Note         string `json:"note"`
+		AllowSession bool   `json:"allow_session"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeServiceJSONLoose(r.Body, &body); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "invalid request", err)
+			return
+		}
+	}
+	actor := serviceAuthIdentityFromContext(r.Context()).Actor
+	result, err := s.chatManager.RespondToTurnApproval(r.Context(), turnID, agentcli.RespondToTurnApprovalOpts{
+		Decision:     decision,
+		Note:         body.Note,
+		AllowSession: body.AllowSession,
+		Actor:        actor,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, db.ErrRunnerChatTurnNotFound):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat turn not found", "code": "runner_chat_turn_not_found"})
+		case errors.Is(err, db.ErrRunnerChatSessionNotFound):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+		default:
+			writeServiceError(w, r, http.StatusBadRequest, "approval decision failed", err)
+		}
+		return
+	}
+	response := map[string]any{
+		"status":            "ok",
+		"decision":          decision,
+		"route":             result.Route,
+		"approval_id":       result.ApprovalID,
+		"native_continued":  result.NativeContinued,
+		"fallback_to_token": result.FallbackToToken,
+		"allowlist_session": result.AllowlistSession,
+	}
+	if result.AllowlistID != 0 {
+		response["allowlist_id"] = result.AllowlistID
+	}
+	if result.Token != "" {
+		response["token"] = result.Token
+	}
+	writeServiceJSON(w, http.StatusAccepted, response)
 }
 
 func isTerminalRunnerChatStatus(status string) bool {

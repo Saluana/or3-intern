@@ -216,6 +216,24 @@ func emitCodexNotificationStructured(seq *int64, onEvent func(AgentRunEvent), me
 	emitNativeStructured(seq, onEvent, payload)
 }
 
+func runtimeVersionFromBinary(ctx context.Context, env []string, binary string, args ...string) string {
+	path, err := ResolveExecutable(binary, env)
+	if err != nil {
+		return ""
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, path, args...)
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return firstLine(out)
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
@@ -282,33 +300,58 @@ type OpenCodeNativeRuntime struct {
 	cmd            *exec.Cmd
 	client         *http.Client
 	activeSessions map[string]string
+	activeRequests map[string]NativeRequestRef
+	lifecycle      *openCodeLifecycle
 }
 
 func NewOpenCodeNativeRuntime() *OpenCodeNativeRuntime {
-	return &OpenCodeNativeRuntime{client: &http.Client{}, activeSessions: map[string]string{}}
+	return &OpenCodeNativeRuntime{client: &http.Client{}, activeSessions: map[string]string{}, activeRequests: map[string]NativeRequestRef{}}
 }
+
+// Compile-time assertion that OpenCodeNativeRuntime supports request responses.
+var _ NativeRequestResponder = (*OpenCodeNativeRuntime)(nil)
+var _ NativeTurnContinuer = (*OpenCodeNativeRuntime)(nil)
 
 func (r *OpenCodeNativeRuntime) ID() RunnerID { return RunnerOpenCode }
 
 func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.AgentCLIConfig, env []string) RunnerRuntimeInfo {
 	info := defaultRuntimeInfo(cfg, RunnerOpenCode, true)
 	info.Kind = RuntimeNative
+	info.Version = firstNonEmpty(info.Version, runtimeVersionFromBinary(ctx, env, "opencode", "--version"))
 	if mode := runnerRuntimeMode(cfg, RunnerOpenCode); mode == RuntimeModeCLI {
 		return defaultRuntimeInfo(cfg, RunnerOpenCode, true)
 	}
-	if configured := strings.TrimRight(strings.TrimSpace(cfg.NativeServerURLs[string(RunnerOpenCode)]), "/"); configured != "" && r.health(ctx, configured) == nil {
-		info.Endpoint = configured
-		info.State = RuntimeStateReady
-		info.Ownership = RuntimeOwnershipExternal
-		info.Fallback = false
-		info.FallbackReason = ""
-		info.Models = r.models(ctx, configured)
+	if configured := strings.TrimRight(strings.TrimSpace(cfg.NativeServerURLs[string(RunnerOpenCode)]), "/"); configured != "" {
+		if r.health(ctx, configured) == nil {
+			info.Endpoint = configured
+			info.State = RuntimeStateReady
+			info.Ownership = RuntimeOwnershipExternal
+			info.Fallback = false
+			info.FallbackReason = ""
+			info.NextAction = openCodeExternalReadyAction()
+			if inventory, err := openCodeInventoryFromServer(ctx, r.client, configured); err == nil {
+				info.Models = inventory.Models
+				info.Providers = inventory.Providers
+				info.Agents = inventory.Agents
+			} else {
+				info.Models = r.models(ctx, configured)
+			}
+			health := RunnerNativeHealth{Reachable: true, Endpoint: configured, StartedAt: time.Now().UnixMilli(), LastCheckedAt: time.Now().UnixMilli()}
+			info.Health = &health
+			return info
+		}
+		info.State = RuntimeStateError
+		info.Fallback = true
+		info.FallbackReason = "external opencode server is unreachable"
+		info.Message = "configured opencode server did not respond to /global/health"
+		info.NextAction = "verify the configured opencode server is running and reachable"
 		return info
 	}
 	if !executableAvailable("opencode", env) {
 		info.State = RuntimeStateUnavailable
 		info.Fallback = true
 		info.FallbackReason = "opencode binary is not installed"
+		info.NextAction = "install opencode or set nativeServerUrls.opencode to an existing server"
 		return info
 	}
 	r.mu.Lock()
@@ -319,6 +362,7 @@ func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.AgentCLICon
 		info.State = RuntimeStateFallback
 		info.Fallback = true
 		info.FallbackReason = "native runtime will start when first used"
+		info.NextAction = "send a message and the managed server will start on demand"
 		info.Models = r.modelsFromCLI(ctx, env)
 		return info
 	}
@@ -328,6 +372,7 @@ func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.AgentCLICon
 		info.Message = err.Error()
 		info.Fallback = true
 		info.FallbackReason = "health check failed"
+		info.NextAction = "the managed server will be restarted on the next turn"
 		return info
 	}
 	info.State = RuntimeStateReady
@@ -337,11 +382,28 @@ func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.AgentCLICon
 	}
 	info.Fallback = false
 	info.FallbackReason = ""
-	info.Models = r.models(ctx, endpoint)
+	if inventory, err := openCodeInventoryFromServer(ctx, r.client, endpoint); err == nil {
+		info.Models = inventory.Models
+		info.Providers = inventory.Providers
+		info.Agents = inventory.Agents
+	}
 	if len(info.Models) == 0 {
 		info.Models = r.modelsFromCLI(ctx, env)
 	}
+	health, _, _ := r.lifecycleSnapshot()
+	info.Health = &health
 	return info
+}
+
+func openCodeExternalReadyAction() string {
+	return "external opencode server is ready; OR3 will not manage its lifecycle"
+}
+
+func (r *OpenCodeNativeRuntime) lifecycleSnapshot() (RunnerNativeHealth, string, bool) {
+	if r.lifecycle == nil {
+		return RunnerNativeHealth{}, "", false
+	}
+	return r.lifecycle.snapshot()
 }
 
 func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error) {
@@ -394,6 +456,9 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 			approvalRequired.Store(true)
 			cancelMessage()
 		}
+		if ref, ok := detectOpenCodePermissionRequestRef(e, sessionID); ok {
+			r.trackRequest(ref)
+		}
 		if req.OnEvent != nil {
 			req.OnEvent(e)
 		}
@@ -426,7 +491,6 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 
 	if messageErr != nil {
 		if approvalRequired.Load() {
-			r.abortSessionBestEffort(endpoint, sessionID)
 			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 		}
 		return ProcessOutput{ExitCode: -1, StderrPreview: messageErr.Error(), DurationMS: time.Since(started).Milliseconds()}, messageErr
@@ -435,7 +499,6 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 		emitOpenCodeResponseEvents(&seq, onEvent, sessionID, response)
 	}
 	if approvalRequired.Load() {
-		r.abortSessionBestEffort(endpoint, sessionID)
 		return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 	}
 	if errMsg := extractOpenCodeErrorMessage(response); errMsg != "" {
@@ -461,16 +524,177 @@ func (r *OpenCodeNativeRuntime) Abort(ctx context.Context, jobID string) error {
 
 func (r *OpenCodeNativeRuntime) Stop(ctx context.Context) error {
 	r.mu.Lock()
-	cmd := r.cmd
+	lc := r.lifecycle
+	r.lifecycle = nil
 	r.cmd = nil
 	r.endpoint = ""
 	r.ownership = RuntimeOwnershipNone
 	r.mu.Unlock()
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		return cmd.Wait()
+	if lc == nil {
+		return nil
 	}
-	return nil
+	return lc.Stop(ctx)
+}
+
+// RespondToNativeRequest sends the user's decision back to the running
+// opencode server. Returns an error when no managed server exists or the
+// request id is no longer tracked.
+func (r *OpenCodeNativeRuntime) RespondToNativeRequest(ctx context.Context, ref NativeRequestRef, decision NativeRequestDecision) error {
+	r.mu.Lock()
+	endpoint := r.endpoint
+	if r.activeRequests != nil {
+		if tracked, ok := r.activeRequests[ref.RequestID]; ok {
+			if ref.SessionID == "" {
+				ref.SessionID = tracked.SessionID
+			}
+			if ref.ThreadID == "" {
+				ref.ThreadID = tracked.ThreadID
+			}
+			if ref.Summary == "" {
+				ref.Summary = tracked.Summary
+			}
+		}
+	}
+	r.mu.Unlock()
+	if endpoint == "" {
+		return errors.New("opencode server is not running")
+	}
+	// OpenCode's HTTP API exposes a permission reply endpoint. The
+	// sessionId is required; permissionId identifies the request.
+	sessionID := firstNonEmpty(ref.SessionID, ref.ThreadID)
+	if sessionID == "" {
+		return errors.New("opencode request is missing session id")
+	}
+	body := map[string]any{"response": decision.Decision}
+	if strings.EqualFold(decision.Decision, "reject") || strings.EqualFold(decision.Decision, "deny") {
+		body["response"] = "denied"
+	}
+	if strings.EqualFold(decision.Decision, "approve") {
+		body["response"] = "always"
+	}
+	if decision.Message != "" {
+		body["message"] = decision.Message
+	}
+	// Best-effort: try a few plausible endpoints. The server may have
+	// renamed the route across versions; the chat manager handles failures
+	// by falling back to the existing approval-token retry.
+	candidates := []string{
+		fmt.Sprintf("%s/session/%s/permissions/%s", endpoint, sessionID, ref.RequestID),
+		fmt.Sprintf("%s/permissions/%s", endpoint, ref.RequestID),
+	}
+	for _, url := range candidates {
+		_, err := httpPostJSON(ctx, r.client, url, body, nil)
+		if err == nil {
+			r.untrackRequest(ref.RequestID)
+			return nil
+		}
+	}
+	return errors.New("opencode could not accept the request response")
+}
+
+// ContinuePendingTurn waits for assistant output after the user approved a
+// permission request. The session must still be tracked for the same job id.
+func (r *OpenCodeNativeRuntime) ContinuePendingTurn(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error) {
+	started := time.Now()
+	var seq int64
+	endpoint, err := r.ensureServer(ctx, req.Config, req.Env)
+	if err != nil {
+		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
+	}
+	r.mu.Lock()
+	sessionID := r.activeSessions[req.Run.JobID]
+	r.mu.Unlock()
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(req.Chat.NativeSessionRef)
+	}
+	if sessionID == "" {
+		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("opencode session not found for job %s", req.Run.JobID)
+	}
+	approvalRequired := atomic.Bool{}
+	onEvent := func(e AgentRunEvent) {
+		if _, ok := detectOpenCodePermissionRequest(e); ok {
+			approvalRequired.Store(true)
+		}
+		if ref, ok := detectOpenCodePermissionRequestRef(e, sessionID); ok {
+			r.trackRequest(ref)
+		}
+		if req.OnEvent != nil {
+			req.OnEvent(e)
+		}
+	}
+	streamState := newOpenCodeStreamState()
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		_ = streamOpenCodeGlobalEvents(streamCtx, r.client, endpoint, sessionID, onEvent, &seq, streamState)
+	}()
+	waitCtx, cancelWait := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelWait()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			cancelStream()
+			select {
+			case <-streamDone:
+			case <-time.After(750 * time.Millisecond):
+			}
+			if approvalRequired.Load() {
+				return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+			}
+			if err := waitCtx.Err(); err != nil {
+				return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+			}
+			return ProcessOutput{ExitCode: -1, StderrPreview: "timed out waiting for opencode turn", DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("timed out waiting for opencode turn")
+		case <-ticker.C:
+			if approvalRequired.Load() {
+				cancelStream()
+				select {
+				case <-streamDone:
+				case <-time.After(750 * time.Millisecond):
+				}
+				return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+			}
+			if streamState.streamedText.Load() {
+				cancelStream()
+				select {
+				case <-streamDone:
+				case <-time.After(750 * time.Millisecond):
+				}
+				finalText := openCodeStreamFinalText(streamState)
+				if finalText != "" {
+					onEvent(textChunkEvent(&seq, finalText))
+				}
+				return ProcessOutput{ExitCode: 0, StdoutPreview: finalText, FinalTextPreview: finalText, DurationMS: time.Since(started).Milliseconds()}, nil
+			}
+		}
+	}
+}
+
+func openCodeStreamFinalText(state *openCodeStreamState) string {
+	if state == nil {
+		return ""
+	}
+	var parts []string
+	for _, text := range state.lastTextByPart {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+// httpPostJSON is a small helper for the respond path; falls back to
+// the package-level httpJSON for compatibility.
+func httpPostJSON(ctx context.Context, client *http.Client, url string, body any, out any) (int, error) {
+	if err := httpJSON(ctx, client, http.MethodPost, url, body, out); err != nil {
+		return 0, err
+	}
+	return http.StatusOK, nil
 }
 
 func (r *OpenCodeNativeRuntime) ensureServer(ctx context.Context, cfg config.AgentCLIConfig, env []string) (string, error) {
@@ -480,63 +704,61 @@ func (r *OpenCodeNativeRuntime) ensureServer(ctx context.Context, cfg config.Age
 			r.endpoint = configured
 			r.cmd = nil
 			r.ownership = RuntimeOwnershipExternal
+			if r.lifecycle != nil && r.lifecycle.isExternal() {
+				_ = r.lifecycle.Stop(ctx)
+				r.lifecycle = nil
+			}
 			r.mu.Unlock()
 			return configured, nil
 		}
+		return "", fmt.Errorf("configured opencode server %s is not reachable", configured)
 	}
 	r.mu.Lock()
 	endpoint := r.endpoint
-	ownership := r.ownership
+	lc := r.lifecycle
 	r.mu.Unlock()
-	if endpoint != "" && r.health(ctx, endpoint) == nil {
+	if endpoint != "" && lc != nil && !lc.isExternal() && r.health(ctx, endpoint) == nil {
+		lc.touch()
 		return endpoint, nil
 	}
-	if endpoint != "" && ownership == RuntimeOwnershipExternal {
+	if endpoint == "" {
+		binary, err := ResolveExecutable("opencode", env)
+		if err != nil {
+			return "", err
+		}
+		idleTimeout := time.Duration(cfg.NativeServerIdleSeconds) * time.Second
+		if idleTimeout <= 0 {
+			idleTimeout = 5 * time.Minute
+		}
+		lc = newOpenCodeLifecycle(RuntimeOwnershipManaged, idleTimeout)
+		start := openCodeStart(ctx, binary, openCodeStartOptions{
+			Env:           env,
+			StartupBudget: time.Duration(cfg.NativeServerStartupSeconds) * time.Second,
+		})
+		if start.Error != "" {
+			_ = lc.Stop(context.Background())
+			return "", fmt.Errorf("%s: %s", start.Error, strings.TrimSpace(start.Output))
+		}
+		lc.adoptProcess(start.Process, start.URL)
 		r.mu.Lock()
-		if r.endpoint == endpoint {
-			r.endpoint = ""
-			r.ownership = RuntimeOwnershipNone
-		}
+		r.endpoint = start.URL
+		r.cmd = start.Process.cmd
+		r.ownership = RuntimeOwnershipManaged
+		r.lifecycle = lc
 		r.mu.Unlock()
+		return start.URL, nil
 	}
-	port, err := freeLoopbackPort()
-	if err != nil {
-		return "", err
+	// Existing endpoint but unhealthy: clean up and try again.
+	if lc != nil {
+		_ = lc.Stop(context.Background())
 	}
-	binary, err := ResolveExecutable("opencode", env)
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.CommandContext(context.Background(), binary, "serve", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port))
-	cmd.Env = env
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	endpoint = fmt.Sprintf("http://127.0.0.1:%d", port)
 	r.mu.Lock()
-	r.endpoint = endpoint
-	r.cmd = cmd
-	r.ownership = RuntimeOwnershipManaged
+	r.endpoint = ""
+	r.cmd = nil
+	r.ownership = RuntimeOwnershipNone
+	r.lifecycle = nil
 	r.mu.Unlock()
-	startup := time.Duration(cfg.NativeServerStartupSeconds) * time.Second
-	if startup <= 0 {
-		startup = 10 * time.Second
-	}
-	deadline := time.Now().Add(startup)
-	for time.Now().Before(deadline) {
-		if err := r.health(ctx, endpoint); err == nil {
-			return endpoint, nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(150 * time.Millisecond):
-		}
-	}
-	_ = r.Stop(context.Background())
-	return "", fmt.Errorf("opencode server did not become healthy")
+	return r.ensureServer(ctx, cfg, env)
 }
 
 func (r *OpenCodeNativeRuntime) trackSession(jobID, sessionID string) {
@@ -555,6 +777,41 @@ func (r *OpenCodeNativeRuntime) untrackSession(jobID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.activeSessions, jobID)
+}
+
+// trackRequest records a pending native request so the chat manager can
+// later respond to it via RespondToNativeRequest.
+func (r *OpenCodeNativeRuntime) trackRequest(ref NativeRequestRef) {
+	if ref.RequestID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.activeRequests == nil {
+		r.activeRequests = map[string]NativeRequestRef{}
+	}
+	r.activeRequests[ref.RequestID] = ref
+}
+
+// untrackRequest removes a tracked native request.
+func (r *OpenCodeNativeRuntime) untrackRequest(requestID string) {
+	if requestID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.activeRequests, requestID)
+}
+
+// listRequests returns the tracked request refs.
+func (r *OpenCodeNativeRuntime) listRequests() []NativeRequestRef {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]NativeRequestRef, 0, len(r.activeRequests))
+	for _, ref := range r.activeRequests {
+		out = append(out, ref)
+	}
+	return out
 }
 
 func (r *OpenCodeNativeRuntime) abortSession(ctx context.Context, endpoint, sessionID string) error {
@@ -606,7 +863,12 @@ func normalizeOpenCodeNativeEventType(raw string) string {
 }
 
 func (r *OpenCodeNativeRuntime) health(ctx context.Context, endpoint string) error {
-	return httpJSON(ctx, r.client, http.MethodGet, endpoint+"/global/health", nil, nil)
+	if r.client == nil {
+		r.client = &http.Client{Timeout: 2 * time.Second}
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return httpJSON(healthCtx, r.client, http.MethodGet, endpoint+"/global/health", nil, nil)
 }
 
 func (r *OpenCodeNativeRuntime) models(ctx context.Context, endpoint string) []RunnerModelInfo {
@@ -688,15 +950,32 @@ func resolveOpenCodeModel(catalog []RunnerModelInfo, requested string) *RunnerMo
 	return nil
 }
 
-// CodexNativeRuntime talks to codex app-server over stdio JSON-RPC.
-type CodexNativeRuntime struct{}
+// CodexNativeRuntime talks to codex app-server over stdio JSON-RPC. It owns
+// a process-scoped session cache so that consecutive turns can reuse the
+// same app-server, thread, and turn refs. The cache is bounded by an idle
+// timeout and is torn down by Stop.
+type CodexNativeRuntime struct {
+	mu            sync.Mutex
+	activeSession *codexSession
+	activeJobID   string
+	lastUsedAt    atomic.Int64
+	idleTimeout   time.Duration
+}
 
-func NewCodexNativeRuntime() *CodexNativeRuntime { return &CodexNativeRuntime{} }
-func (r *CodexNativeRuntime) ID() RunnerID       { return RunnerCodex }
+// Compile-time assertion that CodexNativeRuntime supports request responses.
+var _ NativeRequestResponder = (*CodexNativeRuntime)(nil)
+var _ NativeTurnContinuer = (*CodexNativeRuntime)(nil)
+
+func NewCodexNativeRuntime() *CodexNativeRuntime {
+	return &CodexNativeRuntime{idleTimeout: 5 * time.Minute}
+}
+
+func (r *CodexNativeRuntime) ID() RunnerID { return RunnerCodex }
 
 func (r *CodexNativeRuntime) Info(ctx context.Context, cfg config.AgentCLIConfig, env []string) RunnerRuntimeInfo {
 	info := defaultRuntimeInfo(cfg, RunnerCodex, true)
 	info.Kind = RuntimeNative
+	info.Version = firstNonEmpty(info.Version, runtimeVersionFromBinary(ctx, env, "codex", "--version"))
 	if mode := runnerRuntimeMode(cfg, RunnerCodex); mode == RuntimeModeCLI {
 		return defaultRuntimeInfo(cfg, RunnerCodex, true)
 	}
@@ -704,13 +983,23 @@ func (r *CodexNativeRuntime) Info(ctx context.Context, cfg config.AgentCLIConfig
 		info.State = RuntimeStateUnavailable
 		info.Fallback = true
 		info.FallbackReason = "codex binary is not installed"
+		info.NextAction = "install codex or set runtimeMode.codex=cli to use the CLI fallback"
 		return info
 	}
 	info.State = RuntimeStateFallback
 	info.Fallback = true
 	info.FallbackReason = "codex app-server is started per turn"
 	info.Ownership = RuntimeOwnershipManaged
-	info.Models = r.models(ctx, cfg, env)
+	info.NextAction = "send a message and the codex app-server session will start on demand"
+	models := r.models(ctx, cfg, env)
+	info.Models = models
+	authStatus, authDetail := r.probeAuth(ctx, cfg, env)
+	if authStatus != "" {
+		info.AuthStatus = authStatus
+	}
+	if authDetail != "" {
+		info.AuthDetail = authDetail
+	}
 	if model := strings.TrimSpace(cfg.DefaultModels[string(RunnerCodex)]); model != "" {
 		info.DefaultModel = model
 		if len(info.Models) == 0 {
@@ -723,7 +1012,51 @@ func (r *CodexNativeRuntime) Info(ctx context.Context, cfg config.AgentCLIConfig
 			}
 		}
 	}
+	r.mu.Lock()
+	sess := r.activeSession
+	threadID := ""
+	turnID := ""
+	startedAt := int64(0)
+	if sess != nil {
+		threadID = sess.ActiveThread()
+		turnID = sess.ActiveTurn()
+		startedAt = sess.startedAt.UnixMilli()
+	}
+	r.mu.Unlock()
+	if sess != nil {
+		health := RunnerNativeHealth{
+			Reachable:     true,
+			Endpoint:      "stdio://",
+			StartedAt:     startedAt,
+			LastCheckedAt: time.Now().UnixMilli(),
+			Detail:        "codex app-server session is alive",
+		}
+		info.Health = &health
+		info.Refs = RunnerRuntimeRefs{ThreadID: threadID, TurnID: turnID}
+	}
 	return info
+}
+
+// probeAuth starts a one-shot app-server session to read account/auth info.
+// It returns AuthReady when an account email or id is reported, otherwise
+// AuthMissing or AuthUnknown. The session is closed before returning.
+func (r *CodexNativeRuntime) probeAuth(ctx context.Context, cfg config.AgentCLIConfig, env []string) (AuthStatus, string) {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	binary, err := ResolveExecutable("codex", env)
+	if err != nil {
+		return AuthUnknown, ""
+	}
+	sess, err := startCodexSession(probeCtx, binary, codexSessionConfig{Env: env})
+	if err != nil {
+		return AuthUnknown, err.Error()
+	}
+	defer sess.Close(context.Background())
+	probes := probeCodexSession(probeCtx, sess)
+	if probes.Account.LoggedIn {
+		return AuthReady, probes.Account.Email
+	}
+	return AuthMissing, "codex account is not authenticated"
 }
 
 func (r *CodexNativeRuntime) models(ctx context.Context, cfg config.AgentCLIConfig, env []string) []RunnerModelInfo {
@@ -781,84 +1114,78 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 	if err != nil {
 		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
 	}
-	cmd := exec.CommandContext(ctx, binary, "app-server", "--listen", "stdio://")
-	cmd.Env = req.Env
-	cmd.Dir = req.Run.Cwd
-	stdin, err := cmd.StdinPipe()
+	sess, err := r.acquireSession(ctx, binary, req)
 	if err != nil {
 		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
-	}
-	if err := cmd.Start(); err != nil {
-		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
-	}
-	client := newCodexRPC(stdin, stdout)
 	approvalRequired := atomic.Bool{}
 	stderrDone := make(chan string, 1)
 	go func() {
-		data, _ := io.ReadAll(io.LimitReader(stderr, 65536))
-		stderrDone <- string(data)
+		// Stderr was already drained by startCodexSession; nothing more to
+		// read here. Emit an empty buffer to keep the wait path simple.
+		stderrDone <- ""
 	}()
-	client.start(func(method string, params map[string]any) {
-		emitCodexNotificationStructured(&seq, req.OnEvent, method, params)
-	}, func(id int64, method string, params map[string]any) map[string]any {
-		approvalRequired.Store(true)
-		emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": method, "method": method, "params": params, "request_id": id})
-		select {
-		case client.turnDone <- errNativeApprovalRequired:
-		default:
-		}
-		return map[string]any{"error": map[string]any{"code": -32001, "message": "approval required in OR3"}}
-	})
-	defer client.close()
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	if _, err := client.call(ctx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "or3-intern", "version": "native-runner"}}); err != nil {
+	// Capture notifications and server-issued requests so the chat manager
+	// can render approvals and runtime warnings. Each request is also
+	// stored as a NativeRequestRef for later response.
+	sess.rpc.beginTurn()
+	sess.rpc.start(
+		func(method string, params map[string]any) {
+			emitCodexNotificationStructured(&seq, req.OnEvent, method, params)
+		},
+		func(id int64, method string, params map[string]any) map[string]any {
+			approvalRequired.Store(true)
+			ref := sess.RegisterRequestRef(id, method, params)
+			payload := map[string]any{
+				"type":       method,
+				"method":     method,
+				"params":     params,
+				"request_id": id,
+			}
+			if ref.RequestID != "" {
+				payload["native_request_ref"] = map[string]any{
+					"request_id": ref.RequestID,
+					"kind":       string(ref.Kind),
+					"method":     ref.Method,
+					"thread_id":  ref.ThreadID,
+					"turn_id":    ref.TurnID,
+					"summary":    ref.Summary,
+				}
+			}
+			emitNativeStructured(&seq, req.OnEvent, payload)
+			select {
+			case sess.rpc.turnDone <- errNativeApprovalRequired:
+			default:
+			}
+			return map[string]any{"error": map[string]any{"code": -32001, "message": "approval required in OR3"}}
+		},
+	)
+	defer func() {
+		r.lastUsedAt.Store(time.Now().UnixMilli())
+	}()
+	threadParams := map[string]any{"cwd": req.Run.Cwd}
+	if model := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)]); model != "" {
+		threadParams["model"] = model
+	}
+	threadID, err := sess.StartThread(ctx, "", threadParams)
+	if err != nil {
 		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 	}
-	_ = client.notify("initialized", map[string]any{})
-	threadParams := map[string]any{"cwd": req.Run.Cwd}
-	var threadResp map[string]any
 	if req.Chat.NativeSessionRef != "" && req.Chat.ContinuationMode == ContinuationNative {
-		resumed, err := client.call(ctx, "thread/resume", map[string]any{"threadId": req.Chat.NativeSessionRef, "cwd": req.Run.Cwd})
-		if err == nil {
-			threadResp = resumed
-			threadParams = nil
+		// Try resuming a known thread id; fall back to a fresh start.
+		resumedID, resumeErr := sess.StartThread(ctx, req.Chat.NativeSessionRef, threadParams)
+		if resumeErr == nil && resumedID != "" {
+			threadID = resumedID
 		}
 	}
-	if threadParams != nil {
-		if model := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)]); model != "" {
-			threadParams["model"] = model
-		}
-	}
-	if threadResp != nil {
-		// Resumed above.
-	} else if threadParams == nil {
-		threadResp = map[string]any{"threadId": req.Chat.NativeSessionRef}
-	} else {
-		threadResp, err = client.call(ctx, "thread/start", threadParams)
-		if err != nil {
-			return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
-		}
-	}
-	threadID := firstNonEmpty(fmt.Sprint(threadResp["threadId"]), fmt.Sprint(threadResp["thread_id"]), req.Chat.NativeSessionRef)
-	if threadID == "<nil>" || threadID == "" {
-		threadID = req.Chat.NativeSessionRef
-	}
-	emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": "thread.started", "thread_id": threadID, "raw": threadResp})
+	emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": "thread.started", "thread_id": threadID})
 	turnParams := map[string]any{"threadId": threadID, "input": ChatExecutionInput(req.Chat, req.Run.Task), "cwd": req.Run.Cwd}
 	selectedModel := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)])
 	if model := selectedModel; model != "" {
 		turnParams["model"] = model
 	}
 	if thinking := requestedThinkingLevel(req.Chat.Meta); thinking != "" {
-		if r.codexSupportsEffort(ctx, client, selectedModel, thinking) {
+		if r.codexSupportsEffort(ctx, sess.rpc, selectedModel, thinking) {
 			turnParams["effort"] = thinking
 		}
 	}
@@ -868,13 +1195,13 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 	if permission, ok := runnerPermissionFromMeta(req.Chat.Meta); ok && permission.Access == runnerPermissionAccessWrite {
 		turnParams["writableRoots"] = []string{permission.TargetPath}
 	}
-	if _, err := client.call(ctx, "turn/start", turnParams); err != nil {
+	if _, err := sess.StartTurn(ctx, threadID, turnParams); err != nil {
 		if approvalRequired.Load() {
 			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 		}
 		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 	}
-	if err := client.waitForTurn(ctx); err != nil {
+	if err := sess.rpc.waitForTurn(ctx); err != nil {
 		if approvalRequired.Load() {
 			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 		}
@@ -885,7 +1212,7 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 		}
 		return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(stderrText, err.Error()), DurationMS: time.Since(started).Milliseconds()}, err
 	}
-	final := client.finalText()
+	final := sess.rpc.finalText()
 	stderrText := ""
 	select {
 	case stderrText = <-stderrDone:
@@ -894,8 +1221,116 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 	return ProcessOutput{ExitCode: 0, StdoutPreview: final, StderrPreview: stderrText, FinalTextPreview: final, DurationMS: time.Since(started).Milliseconds()}, nil
 }
 
-func (r *CodexNativeRuntime) Abort(ctx context.Context, jobID string) error { return nil }
-func (r *CodexNativeRuntime) Stop(ctx context.Context) error                { return nil }
+// acquireSession returns a live app-server session, reusing the previous
+// session when possible. It enforces a lazy idle expiry: a session older
+// than the runtime's idle timeout is torn down before a new one is started.
+func (r *CodexNativeRuntime) acquireSession(ctx context.Context, binary string, req NativeRuntimeExecuteRequest) (*codexSession, error) {
+	r.mu.Lock()
+	sess := r.activeSession
+	jobID := r.activeJobID
+	r.mu.Unlock()
+	timeout := r.idleTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	if sess != nil {
+		if jobID != "" && jobID != req.Run.JobID {
+			// Different job wants the session; tear it down.
+			_ = sess.Close(context.Background())
+			r.clearSession()
+			sess = nil
+		} else if time.Since(sess.startedAt) > timeout {
+			_ = sess.Close(context.Background())
+			r.clearSession()
+			sess = nil
+		}
+	}
+	if sess == nil {
+		newSess, err := startCodexSession(ctx, binary, codexSessionConfig{Env: req.Env, Cwd: req.Run.Cwd})
+		if err != nil {
+			return nil, err
+		}
+		sess = newSess
+	}
+	r.mu.Lock()
+	r.activeSession = sess
+	r.activeJobID = req.Run.JobID
+	r.mu.Unlock()
+	r.lastUsedAt.Store(time.Now().UnixMilli())
+	return sess, nil
+}
+
+func (r *CodexNativeRuntime) clearSession() {
+	r.mu.Lock()
+	r.activeSession = nil
+	r.activeJobID = ""
+	r.mu.Unlock()
+}
+
+// Abort interrupts the active turn (if any) on the cached session. The
+// session itself is preserved so subsequent turns can resume normally.
+func (r *CodexNativeRuntime) Abort(ctx context.Context, jobID string) error {
+	r.mu.Lock()
+	sess := r.activeSession
+	activeJobID := r.activeJobID
+	r.mu.Unlock()
+	if sess == nil {
+		return nil
+	}
+	if activeJobID != "" && jobID != "" && activeJobID != jobID {
+		return nil
+	}
+	return sess.AbortTurn(ctx)
+}
+
+// Stop terminates any cached app-server session. Safe to call multiple
+// times and from Manager.Stop during service shutdown.
+func (r *CodexNativeRuntime) Stop(ctx context.Context) error {
+	r.mu.Lock()
+	sess := r.activeSession
+	r.activeSession = nil
+	r.activeJobID = ""
+	r.mu.Unlock()
+	if sess == nil {
+		return nil
+	}
+	return sess.Close(ctx)
+}
+
+// RespondToNativeRequest resumes the active turn by sending the user's
+// decision back to the app-server. Returns a non-nil error when no live
+// session exists; callers should fall back to the approval-token retry.
+func (r *CodexNativeRuntime) RespondToNativeRequest(ctx context.Context, ref NativeRequestRef, decision NativeRequestDecision) error {
+	r.mu.Lock()
+	sess := r.activeSession
+	r.mu.Unlock()
+	if sess == nil {
+		return errors.New("codex session is not alive")
+	}
+	return sess.RespondToRequest(ctx, ref, decision)
+}
+
+// ContinuePendingTurn waits for the active codex app-server turn to finish
+// after the user approved a pending native request.
+func (r *CodexNativeRuntime) ContinuePendingTurn(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error) {
+	started := time.Now()
+	r.mu.Lock()
+	sess := r.activeSession
+	jobID := r.activeJobID
+	r.mu.Unlock()
+	if sess == nil || (jobID != "" && jobID != req.Run.JobID) {
+		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("codex session is not alive for job %s", req.Run.JobID)
+	}
+	sess.rpc.beginTurn()
+	if err := sess.rpc.waitForTurn(ctx); err != nil {
+		if errors.Is(err, errNativeApprovalRequired) {
+			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+		}
+		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+	}
+	final := sess.rpc.finalText()
+	return ProcessOutput{ExitCode: 0, StdoutPreview: final, FinalTextPreview: final, DurationMS: time.Since(started).Milliseconds()}, nil
+}
 
 func (r *CodexNativeRuntime) codexSupportsEffort(ctx context.Context, client *codexRPC, modelID, effort string) bool {
 	modelID = strings.TrimSpace(modelID)
@@ -941,6 +1376,8 @@ type codexRPC struct {
 	stdin        io.WriteCloser
 	scanner      *bufio.Scanner
 	mu           sync.Mutex
+	handlerMu    sync.RWMutex
+	started      atomic.Bool
 	nextID       int64
 	pending      map[int64]chan rpcResponse
 	done         chan struct{}
@@ -948,6 +1385,8 @@ type codexRPC struct {
 	turnComplete atomic.Bool
 	textMu       sync.Mutex
 	text         strings.Builder
+	onNotify     func(string, map[string]any)
+	onRequest    func(int64, string, map[string]any) map[string]any
 }
 
 type rpcResponse struct {
@@ -962,6 +1401,13 @@ func newCodexRPC(stdin io.WriteCloser, stdout io.Reader) *codexRPC {
 }
 
 func (c *codexRPC) start(onNotification func(string, map[string]any), onRequest func(int64, string, map[string]any) map[string]any) {
+	c.handlerMu.Lock()
+	c.onNotify = onNotification
+	c.onRequest = onRequest
+	c.handlerMu.Unlock()
+	if !c.started.CompareAndSwap(false, true) {
+		return
+	}
 	go func() {
 		defer close(c.done)
 		for c.scanner.Scan() {
@@ -972,15 +1418,21 @@ func (c *codexRPC) start(onNotification func(string, map[string]any), onRequest 
 			method, _ := msg["method"].(string)
 			params, _ := msg["params"].(map[string]any)
 			if id, ok := numberID(msg["id"]); ok {
-				if method != "" && onRequest != nil {
-					_ = c.write(map[string]any{"id": id, "jsonrpc": "2.0", "result": onRequest(id, method, params)})
+				c.handlerMu.RLock()
+				requestHandler := c.onRequest
+				c.handlerMu.RUnlock()
+				if method != "" && requestHandler != nil {
+					_ = c.write(map[string]any{"id": id, "jsonrpc": "2.0", "result": requestHandler(id, method, params)})
 					continue
 				}
 				c.handleResponse(id, msg)
 				continue
 			}
-			if onNotification != nil && method != "" {
-				onNotification(method, params)
+			c.handlerMu.RLock()
+			notificationHandler := c.onNotify
+			c.handlerMu.RUnlock()
+			if notificationHandler != nil && method != "" {
+				notificationHandler(method, params)
 			}
 			if delta := extractText(params); delta != "" {
 				c.textMu.Lock()
@@ -1009,6 +1461,20 @@ func (c *codexRPC) start(onNotification func(string, map[string]any), onRequest 
 			}
 		}
 	}()
+}
+
+func (c *codexRPC) beginTurn() {
+	c.textMu.Lock()
+	c.text.Reset()
+	c.textMu.Unlock()
+	c.turnComplete.Store(false)
+	for {
+		select {
+		case <-c.turnDone:
+		default:
+			return
+		}
+	}
 }
 
 func (c *codexRPC) call(ctx context.Context, method string, params map[string]any) (map[string]any, error) {

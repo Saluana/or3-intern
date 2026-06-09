@@ -66,9 +66,11 @@ type turnMirrorState struct {
 }
 
 type runnerApprovalState struct {
-	Request  RunnerPermissionRequest
-	Decision approval.Decision
-	Message  string
+	Request       RunnerPermissionRequest
+	Decision      approval.Decision
+	Message       string
+	NativeRequest NativeRequestRef
+	HasNative     bool
 }
 
 const runnerChatMessageEventPayloadLimit = 300
@@ -326,6 +328,265 @@ func (cm *ChatManager) AbortTurn(ctx context.Context, turnID string) error {
 	})
 }
 
+// RespondToTurnApprovalOpts captures the user decision for an outstanding
+// approval attached to a runner chat turn.
+type RespondToTurnApprovalOpts struct {
+	Decision     string // approve | reject | cancel
+	Note         string
+	AllowSession bool
+	Actor        string
+}
+
+// RespondToTurnApprovalResult summarises the path the chat manager took to
+// resolve a pending approval. The app uses the route to render feedback
+// ("runner resumed inline" vs "approval token issued").
+type RespondToTurnApprovalResult struct {
+	Route            string
+	ApprovalID       int64
+	NativeContinued  bool
+	FallbackToToken  bool
+	Token            string
+	AllowlistID      int64
+	AllowlistSession bool
+}
+
+// RespondToTurnApproval drives a pending approval attached to a turn. It
+// first attempts the live continuation path via the native runtime's
+// NativeRequestResponder. When the runtime is missing, dead, or refuses the
+// decision, it falls back to the approval-token retry flow.
+func (cm *ChatManager) RespondToTurnApproval(ctx context.Context, turnID string, opts RespondToTurnApprovalOpts) (RespondToTurnApprovalResult, error) {
+	if cm == nil || cm.DB == nil {
+		return RespondToTurnApprovalResult{}, errors.New("chat manager not configured")
+	}
+	turn, err := cm.DB.GetRunnerChatTurn(ctx, turnID)
+	if err != nil {
+		return RespondToTurnApprovalResult{}, err
+	}
+	if turn.Status != db.RunnerChatTurnStatusApprovalRequired {
+		return RespondToTurnApprovalResult{}, fmt.Errorf("turn %s is not waiting for approval (status=%s)", turnID, turn.Status)
+	}
+	sess, err := cm.DB.GetRunnerChatSession(ctx, turn.SessionID)
+	if err != nil {
+		return RespondToTurnApprovalResult{}, err
+	}
+
+	// Refresh the session so we observe the latest native_session_ref and
+	// continuation state.
+	if latest, err := cm.DB.GetRunnerChatSession(ctx, sess.ID); err == nil {
+		sess = latest
+	}
+
+	approvalID, ref, hasRef := cm.lastApprovalRef(ctx, turn)
+	if approvalID == 0 {
+		return RespondToTurnApprovalResult{}, errors.New("no approval is attached to this turn")
+	}
+
+	decision := strings.ToLower(strings.TrimSpace(opts.Decision))
+	if decision == "" {
+		decision = "approve"
+	}
+	actor := firstNonEmptyStr(opts.Actor, "app:runner-chat")
+	note := strings.TrimSpace(opts.Note)
+
+	// Deny/cancel paths short-circuit the live responder.
+	if decision == "reject" || decision == "deny" || decision == "cancel" {
+		if cm.Broker == nil {
+			return RespondToTurnApprovalResult{}, errors.New("approval broker unavailable")
+		}
+		if decision == "cancel" {
+			if err := cm.Broker.CancelRequest(ctx, approvalID, actor, note); err != nil {
+				return RespondToTurnApprovalResult{}, err
+			}
+		} else {
+			if err := cm.Broker.DenyRequest(ctx, approvalID, actor, note); err != nil {
+				return RespondToTurnApprovalResult{}, err
+			}
+		}
+		cm.appendApprovalResponseEvent(ctx, turn, sess, decision, RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID, NativeContinued: false})
+		_ = cm.DB.FinalizeRunnerChatTurn(ctx, turn.ID, db.RunnerChatTurnFinalize{
+			Status:       mapJobStatusToTurnStatus("failed"),
+			ErrorMessage: "approval " + decision,
+			CompletedAt:  db.NowMS(),
+		})
+		return RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID}, nil
+	}
+
+	// Approval path: authorize with the broker first, then try the live
+	// responder. If the responder is gone, the issued token remains the
+	// fallback for the next submitted turn.
+	responder, ok := cm.lookupNativeResponder(sess.RunnerID)
+	issued, err := cm.Broker.ApproveRequest(ctx, approvalID, actor, opts.AllowSession, note)
+	if err != nil {
+		return RespondToTurnApprovalResult{}, err
+	}
+	if ok && hasRef {
+		respErr := responder.RespondToNativeRequest(ctx, ref, NativeRequestDecision{
+			Decision:    "approve",
+			Message:     note,
+			AlwaysAllow: opts.AllowSession,
+		})
+		if respErr == nil {
+			cm.appendApprovalResponseEvent(ctx, turn, sess, "approve", RespondToTurnApprovalResult{Route: "native", ApprovalID: approvalID, NativeContinued: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession})
+			_ = cm.DB.MarkRunnerChatTurnApprovalResumed(ctx, turn.ID, db.NowMS())
+			cm.resumeTurnAfterNativeApproval(sess, turn)
+			return RespondToTurnApprovalResult{Route: "native", ApprovalID: approvalID, NativeContinued: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession}, nil
+		}
+		log.Printf("chat manager: native responder failed turn=%s runner=%s ref=%s err=%v; falling back to approval token", turn.ID, sess.RunnerID, ref.RequestID, respErr)
+	}
+
+	// Fallback: issue an approval token. The next turn submission carries
+	// it via ApprovalToken and the broker will accept it inline.
+	cm.appendApprovalResponseEvent(ctx, turn, sess, "approve", RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID, FallbackToToken: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession})
+	_ = cm.DB.MarkRunnerChatTurnApprovalResumed(ctx, turn.ID, db.NowMS())
+	return RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID, FallbackToToken: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession}, nil
+}
+
+// lastApprovalRef walks the persisted chat events for a turn and returns
+// the most recent approval id plus the native request ref attached to it.
+func (cm *ChatManager) lastApprovalRef(ctx context.Context, turn db.RunnerChatTurn) (int64, NativeRequestRef, bool) {
+	events, err := cm.DB.ListRunnerChatEvents(ctx, turn.ID, 0, 1000)
+	if err != nil {
+		return 0, NativeRequestRef{}, false
+	}
+	var approvalID int64
+	var ref NativeRequestRef
+	var hasRef bool
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.Type != "approval_required" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err != nil {
+			continue
+		}
+		if raw, ok := payload["approval_id"].(float64); ok && approvalID == 0 {
+			approvalID = int64(raw)
+		}
+		if raw, ok := payload["approval_request_id"].(float64); ok && approvalID == 0 {
+			approvalID = int64(raw)
+		}
+		if !hasRef {
+			if raw, ok := payload["native_request_ref"].(map[string]any); ok {
+				ref = nativeRequestRefFromMap(raw)
+				if ref.RequestID != "" {
+					hasRef = true
+				}
+			}
+		}
+		if approvalID != 0 {
+			return approvalID, ref, hasRef
+		}
+	}
+	return approvalID, ref, hasRef
+}
+
+func nativeRequestRefFromMap(raw map[string]any) NativeRequestRef {
+	ref := NativeRequestRef{
+		RunnerID:  RunnerID(asString(raw["runner_id"])),
+		Kind:      NativeRequestKind(asString(raw["kind"])),
+		RequestID: asString(raw["request_id"]),
+		SessionID: asString(raw["session_id"]),
+		ThreadID:  asString(raw["thread_id"]),
+		Method:    asString(raw["method"]),
+		Summary:   asString(raw["summary"]),
+	}
+	if v, ok := raw["issued_at"].(float64); ok {
+		ref.IssuedAt = int64(v)
+	}
+	return ref
+}
+
+// lookupNativeResponder returns the registered native runtime as a
+// NativeRequestResponder if the runtime exposes that interface.
+func (cm *ChatManager) lookupNativeResponder(runnerID string) (NativeRequestResponder, bool) {
+	if cm == nil || cm.Manager == nil || cm.Manager.Runtimes == nil {
+		return nil, false
+	}
+	runtime, ok := cm.Manager.Runtimes.Get(RunnerID(runnerID))
+	if !ok || runtime == nil {
+		return nil, false
+	}
+	responder, ok := runtime.(NativeRequestResponder)
+	return responder, ok
+}
+
+func (cm *ChatManager) resumeTurnAfterNativeApproval(sess db.RunnerChatSession, turn db.RunnerChatTurn) {
+	if cm == nil || cm.Manager == nil || cm.DB == nil {
+		return
+	}
+	if strings.TrimSpace(turn.AgentCLIRunID) == "" || strings.TrimSpace(turn.AgentCLIJobID) == "" {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		run, ok, err := cm.DB.GetAgentCLIRun(ctx, turn.AgentCLIRunID)
+		if err != nil || !ok {
+			log.Printf("chat manager: resume after approval load run failed: turn=%s err=%v ok=%v", turn.ID, err, ok)
+			return
+		}
+		if run.Status != db.AgentCLIStatusRunning {
+			log.Printf("chat manager: resume after approval skipped: turn=%s run_status=%s", turn.ID, run.Status)
+			return
+		}
+		if cm.Jobs != nil {
+			cm.Jobs.Reopen(turn.AgentCLIJobID)
+			cm.Jobs.Publish(turn.AgentCLIJobID, "resumed", map[string]any{
+				"status":                 db.AgentCLIStatusRunning,
+				"runner_id":              sess.RunnerID,
+				"runner_chat_turn_id":    turn.ID,
+				"runner_chat_session_id": sess.ID,
+				"resumed_after_approval": true,
+			})
+		}
+		latestTurn, err := cm.DB.GetRunnerChatTurn(ctx, turn.ID)
+		if err != nil {
+			log.Printf("chat manager: resume after approval load turn failed: turn=%s err=%v", turn.ID, err)
+			return
+		}
+		latestSess, err := cm.DB.GetRunnerChatSession(ctx, sess.ID)
+		if err != nil {
+			log.Printf("chat manager: resume after approval load session failed: turn=%s err=%v", turn.ID, err)
+			return
+		}
+		go cm.mirrorJobEvents(latestSess, latestTurn, turn.AgentCLIJobID)
+		if err := cm.Manager.ResumeNativeRunAfterApproval(ctx, run); err != nil {
+			log.Printf("chat manager: resume after approval failed: turn=%s err=%v", turn.ID, err)
+		}
+	}()
+}
+
+func (cm *ChatManager) appendApprovalResponseEvent(ctx context.Context, turn db.RunnerChatTurn, sess db.RunnerChatSession, decision string, res RespondToTurnApprovalResult) {
+	payload, _ := json.Marshal(map[string]any{
+		"status":                 "approval_response",
+		"code":                   "approval_response",
+		"decision":               decision,
+		"approval_id":            res.ApprovalID,
+		"route":                  res.Route,
+		"native_continued":       res.NativeContinued,
+		"fallback_to_token":      res.FallbackToToken,
+		"allowlist_session":      res.AllowlistSession,
+		"runner_id":              sess.RunnerID,
+		"runner_chat_session_id": sess.ID,
+		"runner_chat_turn_id":    turn.ID,
+	})
+	seq := db.NowMS()
+	if maxSeq, err := cm.DB.MaxRunnerChatEventSeq(ctx, turn.ID); err == nil && seq <= maxSeq {
+		seq = maxSeq + 1
+	}
+	if err := cm.DB.AppendRunnerChatEvent(ctx, db.RunnerChatEvent{
+		TurnID:      turn.ID,
+		SessionID:   sess.ID,
+		JobID:       turn.AgentCLIJobID,
+		Seq:         seq,
+		TS:          db.NowMS(),
+		Type:        "approval_response",
+		PayloadJSON: string(payload),
+	}); err != nil {
+		log.Printf("chat manager: append approval response event failed: turn=%s err=%v", turn.ID, err)
+	}
+}
+
 // ReconcileOnStartup marks any running/queued turns as aborted. Should be
 // called once on service start, after the Manager has reconciled its own
 // agent_cli_runs.
@@ -494,9 +755,17 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 	if events := cm.runnerChatEventsPayload(turn.ID); len(events) > 0 {
 		assistantPayload["runner_chat_events"] = events
 	}
-	assistantMsgID, err := cm.appendMessage(context.Background(), sess.AppSessionKey, "assistant", assistantContent, assistantPayload)
-	if err != nil {
-		log.Printf("chat manager: persist assistant message failed: turn=%s err=%v", turn.ID, err)
+	assistantMsgID := turn.AssistantMessageID
+	if status == db.RunnerChatTurnStatusApprovalRequired || assistantMsgID == 0 {
+		var err error
+		assistantMsgID, err = cm.appendMessage(context.Background(), sess.AppSessionKey, "assistant", assistantContent, assistantPayload)
+		if err != nil {
+			log.Printf("chat manager: persist assistant message failed: turn=%s err=%v", turn.ID, err)
+		}
+	} else {
+		if err := cm.updateAssistantMessage(context.Background(), assistantMsgID, assistantContent, assistantPayload); err != nil {
+			log.Printf("chat manager: update assistant message failed: turn=%s err=%v", turn.ID, err)
+		}
 	}
 
 	if err := cm.DB.FinalizeRunnerChatTurn(context.Background(), turn.ID, db.RunnerChatTurnFinalize{
@@ -558,18 +827,52 @@ func (cm *ChatManager) maybeCaptureRunnerPermission(turn db.RunnerChatTurn, sess
 	}
 	var permission RunnerPermissionRequest
 	var ok bool
+	var nativeRef NativeRequestRef
+	var hasNative bool
 	switch RunnerID(sess.RunnerID) {
 	case RunnerOpenCode:
 		permission, ok = detectOpenCodePermissionRequest(raw)
+		if !ok {
+			// Fallback: detect a structured permission request ref even when
+			// the stderr heuristic does not match. This ensures the chat
+			// manager can drive the live continuation flow whenever the
+			// runner emits a structured event with an id.
+			if ref, ok2 := detectOpenCodePermissionRequestRef(raw, sess.NativeSessionRef); ok2 {
+				nativeRef = ref
+				hasNative = true
+			}
+		}
 	case RunnerCodex:
 		permission, ok = detectCodexStructuredPermissionRequest(raw)
+		if !ok {
+			if ref, ok2 := detectCodexPermissionRequestRef(raw); ok2 {
+				nativeRef = ref
+				hasNative = true
+			}
+		}
 	default:
 		return
 	}
-	if !ok {
+	if !ok && !hasNative {
 		return
 	}
-	cm.appendRunnerApprovalRequired(turn, sess, jobID, state, permission)
+	if !ok {
+		// Synthesise a minimal permission request from the native ref so the
+		// approval pipeline stays consistent.
+		permission = RunnerPermissionRequest{
+			RunnerID:   string(nativeRef.RunnerID),
+			Kind:       runnerPermissionKindFilesystem,
+			Access:     runnerPermissionAccessRead,
+			TargetPath: nativeRef.Summary,
+		}
+		if normalized, ok2 := NormalizeRunnerPermissionRequest(permission); ok2 {
+			permission = normalized
+		} else {
+			permission.TargetPath = "(native request)"
+			permission, _ = NormalizeRunnerPermissionRequest(permission)
+		}
+	}
+	cm.appendRunnerApprovalRequired(turn, sess, jobID, state, permission, nativeRef, hasNative)
 }
 
 func (cm *ChatManager) maybeCaptureCodexRunnerPermission(turn db.RunnerChatTurn, sess db.RunnerChatSession, state *turnMirrorState, finalText string) {
@@ -580,11 +883,14 @@ func (cm *ChatManager) maybeCaptureCodexRunnerPermission(turn db.RunnerChatTurn,
 	if !ok {
 		return
 	}
-	cm.appendRunnerApprovalRequired(turn, sess, turn.AgentCLIJobID, state, permission)
+	cm.appendRunnerApprovalRequired(turn, sess, turn.AgentCLIJobID, state, permission, NativeRequestRef{}, false)
 }
 
-func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, permission RunnerPermissionRequest) {
-	if cm == nil || cm.Broker == nil || state == nil {
+func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, permission RunnerPermissionRequest, nativeRef NativeRequestRef, hasNative bool) {
+	if cm == nil || state == nil {
+		return
+	}
+	if cm.Broker == nil {
 		return
 	}
 	decision, err := cm.Broker.EvaluateRunnerPermission(context.Background(), approval.RunnerPermissionEvaluation{
@@ -594,13 +900,31 @@ func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess
 		TargetPath:     permission.TargetPath,
 		SessionID:      sess.AppSessionKey,
 	})
-	if err != nil || !decision.RequiresApproval || decision.RequestID == 0 {
+	if err != nil {
+		log.Printf("chat manager: runner permission evaluation failed: turn=%s err=%v", turn.ID, err)
+		return
+	}
+	// If the broker has nothing to ask for, the runner can continue inline;
+	// skip emitting the approval_required event so the app doesn't render a
+	// dead approval card. We still record the native request for replay.
+	if !decision.RequiresApproval || decision.RequestID == 0 {
+		if hasNative {
+			state.permission = &runnerApprovalState{
+				Request:       permission,
+				Decision:      decision,
+				Message:       runnerPermissionApprovalMessage(permission),
+				NativeRequest: nativeRef,
+				HasNative:     true,
+			}
+		}
 		return
 	}
 	state.permission = &runnerApprovalState{
-		Request:  permission,
-		Decision: decision,
-		Message:  runnerPermissionApprovalMessage(permission),
+		Request:       permission,
+		Decision:      decision,
+		Message:       runnerPermissionApprovalMessage(permission),
+		NativeRequest: nativeRef,
+		HasNative:     hasNative,
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"status":              "approval_required",
@@ -610,6 +934,7 @@ func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess
 		"approval_state":      "pending",
 		"message":             state.permission.Message,
 		"runner_permission":   runnerPermissionToMap(permission),
+		"native_request_ref":  nativeRequestRefToMap(nativeRef, hasNative),
 	})
 	if err := cm.DB.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{
 		TurnID:      turn.ID,
@@ -622,6 +947,33 @@ func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess
 	}); err != nil {
 		log.Printf("chat manager: append approval event failed: turn=%s err=%v", turn.ID, err)
 	}
+}
+
+func nativeRequestRefToMap(ref NativeRequestRef, hasNative bool) map[string]any {
+	if !hasNative {
+		return nil
+	}
+	out := map[string]any{
+		"runner_id":  string(ref.RunnerID),
+		"kind":       string(ref.Kind),
+		"request_id": ref.RequestID,
+	}
+	if ref.SessionID != "" {
+		out["session_id"] = ref.SessionID
+	}
+	if ref.ThreadID != "" {
+		out["thread_id"] = ref.ThreadID
+	}
+	if ref.Method != "" {
+		out["method"] = ref.Method
+	}
+	if ref.Summary != "" {
+		out["summary"] = ref.Summary
+	}
+	if ref.IssuedAt > 0 {
+		out["issued_at"] = ref.IssuedAt
+	}
+	return out
 }
 
 func runnerPermissionApprovalMessage(permission RunnerPermissionRequest) string {
@@ -641,7 +993,7 @@ func runnerPermissionApprovalMessage(permission RunnerPermissionRequest) string 
 }
 
 func shouldSuppressRunnerFailureEvent(raw AgentRunEvent) bool {
-	if raw.Type == "completion" && raw.Status == db.AgentCLIStatusFailed {
+	if raw.Type == "completion" && (raw.Status == db.AgentCLIStatusFailed || raw.Status == db.AgentCLIStatusApprovalRequired) {
 		return true
 	}
 	return raw.Type == "error"
@@ -712,6 +1064,20 @@ func (cm *ChatManager) countMessages(sessionKey string) (int64, error) {
 	err := cm.DB.SQL.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM messages WHERE session_key=?`, sessionKey).Scan(&n)
 	return n, err
+}
+
+func (cm *ChatManager) updateAssistantMessage(ctx context.Context, messageID int64, content string, payload map[string]any) error {
+	if cm == nil || cm.DB == nil || messageID <= 0 {
+		return errors.New("chat manager not configured")
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = cm.DB.SQL.ExecContext(ctx,
+		`UPDATE messages SET content=?, payload_json=? WHERE id=?`,
+		content, string(payloadJSON), messageID)
+	return err
 }
 
 // appendMessage writes into the shared `messages` table and returns the new id.

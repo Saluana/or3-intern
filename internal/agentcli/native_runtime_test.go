@@ -475,7 +475,6 @@ func TestOpenCodeExecuteDoesNotTreatErrorEnvelopeAsFinalText(t *testing.T) {
 
 func TestOpenCodeExecuteStopsOnPermissionRequest(t *testing.T) {
 	const sessionID = "sess_permission"
-	abortCalled := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/global/health":
@@ -501,12 +500,6 @@ func TestOpenCodeExecuteStopsOnPermissionRequest(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"` + sessionID + `"}`))
 		case "/session/" + sessionID + "/message":
 			_, _ = w.Write([]byte(`{"type":"message","permission":{"type":"permission.write","path":"/tmp/project/file.txt"}}`))
-		case "/session/" + sessionID + "/abort":
-			select {
-			case abortCalled <- struct{}{}:
-			default:
-			}
-			_, _ = w.Write([]byte(`true`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -533,11 +526,6 @@ func TestOpenCodeExecuteStopsOnPermissionRequest(t *testing.T) {
 	}
 	if !sawApprovalEvent {
 		t.Fatal("expected permission event to be emitted")
-	}
-	select {
-	case <-abortCalled:
-	case <-time.After(time.Second):
-		t.Fatal("expected OpenCode session abort after permission request")
 	}
 }
 

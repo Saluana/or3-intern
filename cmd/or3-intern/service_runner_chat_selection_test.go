@@ -697,3 +697,54 @@ func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 		t.Fatalf("expected JSON-safe turn payload: %v", err)
 	}
 }
+
+func TestServiceRunnerChat_ApproveRejectsWithoutApproval(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	cfg := config.Default()
+	cfg.AgentCLI.Enabled = true
+	registry := newDiscoveryRegistry()
+	jobsReg := jobs.NewRegistry(time.Minute, 32)
+	manager := &agentcli.Manager{DB: database, Jobs: jobsReg, Cfg: cfg.AgentCLI, Registry: registry}
+	chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobsReg}
+	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
+	defer fixture.httpServer.Close()
+
+	created := mustServiceDoJSON(t, fixture, http.MethodPost, "/internal/v1/runner-chat/sessions", `{"app_session_key":"svc:approval","runner_id":"opencode","continuation_mode":"replay"}`)
+	sessionID := created["id"].(string)
+	turn := mustServiceDoJSON(t, fixture, http.MethodPost, "/internal/v1/runner-chat/sessions/"+sessionID+"/turns", `{"user_message":"hi"}`)
+	turnID := turn["turn_id"].(string)
+	// Without a registered approval, the endpoint must respond 400 with a
+	// descriptive error code so the app can render the right UX.
+	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodPost, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/approve", sessionID, turnID), `{"note":"test","allow_session":true}`)
+	resp, err := fixture.httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing approval, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	body := mustDecodeJSONBody(t, resp.Body)
+	if !strings.Contains(fmt.Sprint(body["error"]), "approval decision failed") {
+		t.Fatalf("expected approval decision failure, got %#v", body)
+	}
+}
+
+func TestServiceRunnerChat_ApproveRejectsWrongMethod(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	defer fixture.httpServer.Close()
+
+	sess, _ := seedRunnerChatTerminalTurn(t, database)
+	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/rct-stream/approve", sess.ID), "")
+	resp, err := fixture.httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do wrong-method: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+}

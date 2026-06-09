@@ -21,6 +21,9 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 	}
 	status := info.Status
 	authStatus := info.AuthStatus
+	if authStatus == "" {
+		authStatus = info.Runtime.AuthStatus
+	}
 	out := map[string]any{
 		"id":                id,
 		"display_name":      display,
@@ -29,16 +32,33 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 		"supports":          spec.Supports,
 		"chat_capabilities": spec.Supports.Chat,
 	}
-	if info.Runtime.Kind != "" || len(info.Runtime.Models) > 0 || info.Runtime.DefaultModel != "" {
+	if info.Runtime.Kind != "" || len(info.Runtime.Models) > 0 || info.Runtime.DefaultModel != "" || info.Runtime.State != "" {
 		out["runtime"] = info.Runtime
 		if len(info.Runtime.Models) > 0 {
 			out["models"] = info.Runtime.Models
+		}
+		if len(info.Runtime.Providers) > 0 {
+			out["providers"] = info.Runtime.Providers
+		}
+		if len(info.Runtime.Agents) > 0 {
+			out["agents"] = info.Runtime.Agents
+		}
+		if len(info.Runtime.Skills) > 0 {
+			out["skills"] = info.Runtime.Skills
+		}
+		if len(info.Runtime.Options) > 0 {
+			out["runner_options"] = info.Runtime.Options
+		}
+		if info.Runtime.Health != nil {
+			out["native_health"] = info.Runtime.Health
 		}
 		if strings.TrimSpace(info.Runtime.DefaultModel) != "" {
 			defaultModel = info.Runtime.DefaultModel
 		}
 	}
 	if v := strings.TrimSpace(info.Version); v != "" {
+		out["version"] = v
+	} else if v := strings.TrimSpace(info.Runtime.Version); v != "" {
 		out["version"] = v
 	}
 	if v := strings.TrimSpace(info.BinaryPath); v != "" {
@@ -61,6 +81,18 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 	}
 	if defaultCwd != "" {
 		out["default_cwd"] = defaultCwd
+	}
+	if next := strings.TrimSpace(info.Runtime.NextAction); next != "" {
+		out["next_action"] = next
+	}
+	if info.Runtime.FallbackReason != "" {
+		out["fallback_reason"] = info.Runtime.FallbackReason
+	}
+	if info.Runtime.Message != "" {
+		out["runtime_message"] = info.Runtime.Message
+	}
+	if authDetail := strings.TrimSpace(info.Runtime.AuthDetail); authDetail != "" {
+		out["auth_detail"] = authDetail
 	}
 	return out
 }

@@ -19,6 +19,10 @@ const (
 	runtimeEventTurnCompleted        = "turn.completed"
 	runtimeEventRuntimeWarning       = "runtime.warning"
 	runtimeEventRuntimeError         = "runtime.error"
+	runtimeEventTokenUsage           = "token.usage"
+	runtimeEventConfigWarning        = "config.warning"
+	runtimeEventModelReroute         = "model.reroute"
+	runtimeEventSkillInvoked         = "skill.invoked"
 	runtimeStreamAssistantText       = "assistant_text"
 	runtimeStreamReasoningText       = "reasoning_text"
 	runtimeStreamReasoningSummary    = "reasoning_summary_text"
@@ -40,6 +44,9 @@ const (
 	runtimeRequestFileReadApproval   = "file_read_approval"
 	runtimeRequestFileChangeApproval = "file_change_approval"
 	runtimeRequestUnknown            = "unknown"
+	runtimeConfigWarningMissing      = "missing"
+	runtimeConfigWarningDeprecated   = "deprecated"
+	runtimeConfigWarningExperimental = "experimental"
 )
 
 func (a *OpenCodeAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
@@ -388,6 +395,14 @@ func normalizeOpenCodeStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 		return normalizeOpenCodeToolUse(raw, obj)
 	case "permission.asked", "permission.replied", "question.asked", "question.replied", "session.error", "session.status":
 		return normalizeOpenCodeRuntimeEvent(raw, obj)
+	case "config.warning", "config_warning", "warning":
+		return configWarningEvent(raw, obj)
+	case "model.reroute", "model_reroute", "model.routed":
+		return modelRerouteEvent(raw, obj)
+	case "token.usage", "token_usage":
+		return tokenUsageEvent(raw, obj)
+	case "skill.invoked", "skill_invoked":
+		return skillInvokedEvent(raw, obj)
 	default:
 		return nil
 	}
@@ -446,6 +461,14 @@ func normalizeCodexStructuredChatEvent(raw AgentRunEvent) []RunnerChatEvent {
 	case "error":
 		msg := extractString(firstNonNil(obj["message"], obj["error"]))
 		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: msg, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": msg}, raw.Payload)}}
+	case "token.usage", "token_usage", "item/tokenCount/updated":
+		return tokenUsageEvent(raw, obj)
+	case "config.warning", "config_warning", "warning":
+		return configWarningEvent(raw, obj)
+	case "model.reroute", "model_reroute", "model.routed":
+		return modelRerouteEvent(raw, obj)
+	case "skill.invoked", "skill_invoked":
+		return skillInvokedEvent(raw, obj)
 	default:
 		if event := normalizeCodexMethodEvent(raw, obj, method); len(event) > 0 {
 			return event
@@ -1189,6 +1212,14 @@ func normalizeCodexMethodEvent(raw AgentRunEvent, obj map[string]any, method str
 	case "error", "session/error":
 		msg := extractString(firstNonNil(params["message"], params["error"], obj["message"], obj["error"]))
 		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: msg, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": msg}, raw.Payload)}}
+	case "config.warning", "config_warning", "warning":
+		return configWarningEvent(raw, obj)
+	case "model.reroute", "model_reroute", "model.routed":
+		return modelRerouteEvent(raw, obj)
+	case "token.usage", "token_usage", "item/tokenCount/updated":
+		return tokenUsageEvent(raw, obj)
+	case "skill.invoked", "skill_invoked":
+		return skillInvokedEvent(raw, obj)
 	}
 	return nil
 }
@@ -1262,6 +1293,138 @@ func runtimeStreamKindFromClaude(obj map[string]any) string {
 	return runtimeStreamAssistantText
 }
 
+// extractTokenUsage reads a {input, output, cached, total, ...} object
+// from any of the common shapes the runtimes emit.
+func extractTokenUsage(obj map[string]any) map[string]any {
+	usage := mapAnyValue(obj, "usage")
+	if usage == nil {
+		usage = mapAnyValue(obj, "token_usage")
+	}
+	if usage == nil {
+		usage = mapAnyValue(obj, "tokenUsage")
+	}
+	if usage == nil {
+		usage = mapAnyValue(obj, "tokens")
+	}
+	if usage == nil {
+		return nil
+	}
+	fields := map[string]any{}
+	for _, key := range []string{"input_tokens", "inputTokens", "input"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["input_tokens"] = int64(v)
+			break
+		}
+	}
+	for _, key := range []string{"output_tokens", "outputTokens", "output"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["output_tokens"] = int64(v)
+			break
+		}
+	}
+	for _, key := range []string{"cached_input_tokens", "cachedInputTokens", "cached_input", "cache_read_input_tokens"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["cached_input_tokens"] = int64(v)
+			break
+		}
+	}
+	for _, key := range []string{"total_tokens", "totalTokens", "total"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["total_tokens"] = int64(v)
+			break
+		}
+	}
+	if model, ok := usage["model"].(string); ok && strings.TrimSpace(model) != "" {
+		fields["model"] = strings.TrimSpace(model)
+	} else if model, ok := obj["model"].(string); ok && strings.TrimSpace(model) != "" {
+		fields["model"] = strings.TrimSpace(model)
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// tokenUsageEvent emits a runtimeEventTokenUsage event when the payload
+// contains any of the well-known token-usage shapes.
+func tokenUsageEvent(raw AgentRunEvent, obj map[string]any) []RunnerChatEvent {
+	usage := extractTokenUsage(obj)
+	if usage == nil {
+		return nil
+	}
+	return []RunnerChatEvent{{Type: runtimeEventTokenUsage, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTokenUsage, map[string]any{"usage": usage}, raw.Payload)}}
+}
+
+// configWarningEvent emits a runtimeEventConfigWarning event when the
+// payload advertises a non-fatal configuration issue.
+func configWarningEvent(raw AgentRunEvent, obj map[string]any) []RunnerChatEvent {
+	eventType := strings.ToLower(strings.TrimSpace(stringField(obj, "type")))
+	kind := strings.ToLower(firstNonEmptyStr(stringField(obj, "kind"), stringField(obj, "warning")))
+	code := firstNonEmptyStr(stringField(obj, "code"), kind)
+	message := firstNonEmptyStr(extractString(obj["message"]), extractString(obj["detail"]), extractString(obj["warning"]))
+	if eventType != "config.warning" && eventType != "config_warning" && eventType != "warning" && code == "" && message == "" {
+		return nil
+	}
+	if code == "" && message == "" {
+		return nil
+	}
+	if code == "" {
+		code = runtimeConfigWarningMissing
+	}
+	return []RunnerChatEvent{{
+		Type:    runtimeEventConfigWarning,
+		Seq:     raw.Seq,
+		Text:    message,
+		Payload: runtimePayload(runtimeEventConfigWarning, map[string]any{"code": code, "kind": kind, "message": message, "context": firstNonNil(obj["context"], obj["details"])}, raw.Payload),
+	}}
+}
+
+// modelRerouteEvent emits a runtimeEventModelReroute event when the
+// runtime swaps to a fallback model.
+func modelRerouteEvent(raw AgentRunEvent, obj map[string]any) []RunnerChatEvent {
+	from := firstNonEmptyStr(extractString(firstNonNil(obj["from_model"], obj["previous_model"], obj["from"])))
+	to := firstNonEmptyStr(extractString(firstNonNil(obj["to_model"], obj["next_model"], obj["to"], obj["model"])))
+	if to == "" {
+		return nil
+	}
+	reason := firstNonEmptyStr(extractString(obj["reason"]), extractString(obj["cause"]))
+	return []RunnerChatEvent{{
+		Type:    runtimeEventModelReroute,
+		Seq:     raw.Seq,
+		Text:    to,
+		Payload: runtimePayload(runtimeEventModelReroute, map[string]any{"from": from, "to": to, "reason": reason}, raw.Payload),
+	}}
+}
+
+// skillInvokedEvent emits a runtimeEventSkillInvoked event when the
+// runtime announces a skill launch.
+func skillInvokedEvent(raw AgentRunEvent, obj map[string]any) []RunnerChatEvent {
+	id := firstNonEmptyStr(extractString(firstNonNil(obj["skill_id"], obj["id"], obj["name"])))
+	if id == "" {
+		return nil
+	}
+	return []RunnerChatEvent{{
+		Type:    runtimeEventSkillInvoked,
+		Seq:     raw.Seq,
+		Text:    id,
+		Payload: runtimePayload(runtimeEventSkillInvoked, map[string]any{"skill_id": id, "name": firstNonEmptyStr(extractString(obj["name"]), id), "version": extractString(obj["version"]), "trust_state": extractString(firstNonNil(obj["trust_state"], obj["trustState"]))}, raw.Payload),
+	}}
+}
+
+// asStringMapObject extracts a map[string]any from a possibly-nil payload
+// for use in normalized event payloads.
+func asStringMapObject(v any) map[string]any {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		return x
+	default:
+		return nil
+	}
+}
+
 const maxRawDiagnosticString = 4096
 
 func sanitizedRawObject(raw json.RawMessage) any {
@@ -1310,8 +1473,24 @@ func sanitizeRawValue(value any) any {
 
 func isSensitiveRawKey(key string) bool {
 	lower := strings.ToLower(key)
-	for _, needle := range []string{"authorization", "password", "secret", "token", "api_key", "apikey"} {
+	// Match credential-shaped keys (api_key, access_token, auth_token,
+	// bearer_token, refresh_token, session_token, etc.) but NOT counters
+	// such as input_tokens / output_tokens / total_tokens.
+	for _, needle := range []string{"authorization", "password", "secret", "api_key", "apikey"} {
 		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	// "token" is only sensitive when paired with a credential prefix or
+	// appears in a credential context.
+	if strings.Contains(lower, "token") {
+		for _, prefix := range []string{"auth", "access", "refresh", "session", "bearer", "csrf", "id_", "client"} {
+			if strings.Contains(lower, prefix) {
+				return true
+			}
+		}
+		// Bare "token" alone (no underscore) is usually a credential.
+		if lower == "token" {
 			return true
 		}
 	}

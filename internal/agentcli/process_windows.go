@@ -7,6 +7,12 @@ import (
 )
 
 func (p *ProcessManager) setProcessGroup(cmd *exec.Cmd) {
+	applyProcessGroup(cmd)
+}
+
+// applyProcessGroup is a no-op on Windows. Future hardening can introduce
+// Job Objects; for now we rely on direct process kill.
+func applyProcessGroup(cmd *exec.Cmd) {
 	// TODO: Use Windows Job Objects for proper process-group management in a future version.
 	// For v1, direct process kill is the fallback.
 }

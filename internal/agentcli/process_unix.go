@@ -9,6 +9,15 @@ import (
 )
 
 func (p *ProcessManager) setProcessGroup(cmd *exec.Cmd) {
+	applyProcessGroup(cmd)
+}
+
+// applyProcessGroup enables process group tracking on the given command so
+// the parent can SIGTERM/SIGKILL the entire process group at shutdown.
+func applyProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 

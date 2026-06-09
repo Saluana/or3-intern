@@ -173,6 +173,37 @@ func (r *Registry) Complete(id string, status string, data map[string]any) bool 
 	return true
 }
 
+// PauseForApproval marks a job as waiting for operator approval while keeping
+// its event history available for replay. The job becomes terminal so callers
+// can finalize UI state, but Reopen can resume publishing after approval.
+func (r *Registry) PauseForApproval(id string, data map[string]any) bool {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["status"] = "approval_required"
+	if !r.Publish(id, "approval_required", data) {
+		return false
+	}
+	r.markTerminal(id, "approval_required")
+	return true
+}
+
+// Reopen transitions a terminal approval_required job back to running so a
+// resumed native turn can publish completion events to subscribers.
+func (r *Registry) Reopen(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry := r.jobs[id]
+	if entry == nil {
+		return false
+	}
+	entry.terminal = false
+	entry.status = "running"
+	entry.done = make(chan struct{})
+	entry.updatedAt = time.Now()
+	return true
+}
+
 func (r *Registry) Fail(id string, message string, data map[string]any) bool {
 	if data == nil {
 		data = map[string]any{}

@@ -19,8 +19,8 @@ Environment overrides are applied after loading `.env` from the current director
 | `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries                                                           |
 | `defaultSessionKey`, `session`, `consolidationModel`   | Session naming, cross-session identity/scope behavior, and optional memory-compaction model override |
 | `identityFile`, `memoryFile`                           | Prompt bootstrap files                                                                               |
-| `provider`                                             | Model API base, model names, embedding settings, keys, temperature, and timeouts                     |
-| `tools`                                                | Local tool behavior, proxying, timeouts, workspace restrictions, and MCP servers                     |
+| `provider`                                             | Compatibility model defaults plus embedding settings, provider keys, temperature, and timeouts       |
+| `tools`                                                | Local tool compatibility settings, proxying, workspace restrictions, PATH, and MCP servers           |
 | `hardening`                                            | Tool capability tiers, program allowlists, child environment controls, quotas, and sandboxing        |
 | `skills`                                               | Managed skill loading, per-skill config, policy, and registry settings                               |
 | `triggers`                                             | Webhook and file-watch automation                                                                    |
@@ -33,7 +33,7 @@ Environment overrides are applied after loading `.env` from the current director
 | `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
 | `subagents`                                            | Background job queueing and concurrency controls                                                     |
 | `agentCLI`                                             | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
-| `context`, `contextManager`                            | Token budgeting, prompt assembly budgets, and optional cheap maintenance-model settings              |
+| `context`, `contextManager`                            | Memory/retrieval knobs plus legacy prompt/context-manager compatibility settings                     |
 
 ## Minimal shape
 
@@ -62,7 +62,10 @@ Environment overrides are applied after loading `.env` from the current director
 
 ### `provider`
 
-Controls the LLM and embedding provider settings:
+Controls compatibility LLM defaults and embedding provider settings. In
+runner-first mode, external runners choose their own chat/agent models; these
+chat model fields remain for embeddings, memory consolidation, doctor flows, and
+older config compatibility.
 
 - `apiBase`
 - `apiKey`
@@ -70,16 +73,16 @@ Controls the LLM and embedding provider settings:
 - `embedModel`
 - `embedDimensions` — optional embedding-vector size override; `0` means use the provider/model default
 - `temperature`
-- `enableVision`
+- `enableVision` — legacy compatibility toggle; runner-first attachment handling is not gated by this field
 - `timeoutSeconds`
 
 ### `tools`
 
-Controls local tool execution and optional MCP registration:
+Controls local tool compatibility settings and optional MCP registration:
 
 - `braveApiKey`
 - `webProxy`
-- `execTimeoutSeconds`
+- `execTimeoutSeconds` — legacy built-in exec-tool timeout; runner-first CLI runners use runner-specific timeout settings
 - `restrictToWorkspace`
 - `allowFullFileRead`
 - `pathAppend`
@@ -333,7 +336,10 @@ Override `consolidationModel` with the `OR3_CONSOLIDATION_MODEL` environment var
 
 ### `context`
 
-Prompt assembly and token-budget controls:
+Memory/retrieval controls plus legacy prompt assembly budgets. In runner-first
+mode, runner bootstrap/context paths decide what is sent to the external CLI;
+the legacy token-budget fields are retained for compatibility until the old
+built-in prompt loop is fully removed.
 
 - `mode`
 - `maxInputTokens`
@@ -354,7 +360,9 @@ Backward-compatibility note:
 
 ### `contextManager`
 
-Optional low-cost maintenance-model controls:
+Legacy optional maintenance-model controls. Runner-first chat does not call the
+context-manager provider client. Background memory consolidation is still active
+when enabled, but it uses the summarization/consolidation path instead.
 
 - `enabled`
 - `provider`

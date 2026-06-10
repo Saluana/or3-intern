@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,8 +34,11 @@ func (fakeChatAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSp
 func (fakeChatAdapter) NormalizeChatEvent(AgentRunEvent) []RunnerChatEvent { return nil }
 
 type fakeRuntime struct {
-	id      RunnerID
-	aborted []string
+	id           RunnerID
+	out          ProcessOutput
+	err          error
+	executeCalls int
+	aborted      []string
 }
 
 func (r *fakeRuntime) ID() RunnerID { return r.id }
@@ -41,7 +46,8 @@ func (r *fakeRuntime) Info(context.Context, config.AgentCLIConfig, []string) Run
 	return RunnerRuntimeInfo{Kind: RuntimeNative, State: RuntimeStateReady}
 }
 func (r *fakeRuntime) Execute(context.Context, NativeRuntimeExecuteRequest) (ProcessOutput, error) {
-	return ProcessOutput{}, nil
+	r.executeCalls++
+	return r.out, r.err
 }
 func (r *fakeRuntime) Abort(_ context.Context, jobID string) error {
 	r.aborted = append(r.aborted, jobID)
@@ -69,6 +75,11 @@ func TestRunnerRuntimeModeDefaultsAndOverrides(t *testing.T) {
 	if got := runnerRuntimeMode(cfg, RunnerClaude); got != RuntimeModeAuto {
 		t.Fatalf("unknown mode = %q, want auto", got)
 	}
+}
+
+func TestCodexAppServerArgsDisableUserMCPServers(t *testing.T) {
+	want := []string{"app-server", "--listen", "stdio://", "-c", "mcp_servers={}"}
+	assertArgsEqual(t, want, codexAppServerArgs())
 }
 
 func TestCodexNativeReplayExecutionInputUsesReplayPrompt(t *testing.T) {
@@ -470,6 +481,174 @@ func TestOpenCodeExecuteDoesNotTreatErrorEnvelopeAsFinalText(t *testing.T) {
 	}
 	if output.StderrPreview != "Unexpected server error. Check server logs for details." {
 		t.Fatalf("stderr = %q", output.StderrPreview)
+	}
+}
+
+func TestCodexExecuteRetriesAfterAuthRefreshFailure(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "attempts")
+	serverPath := filepath.Join(dir, "fake_codex_server.py")
+	if err := os.WriteFile(serverPath, []byte(`import json
+import os
+import sys
+
+state_path = sys.argv[1]
+try:
+    with open(state_path) as f:
+        attempt = int(f.read().strip() or "0")
+except FileNotFoundError:
+    attempt = 0
+attempt += 1
+with open(state_path, "w") as f:
+    f.write(str(attempt))
+
+def send(msg):
+    print(json.dumps(msg), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        send({"id": mid, "result": {}})
+    elif method == "thread/start":
+        if attempt == 1:
+            send({"id": mid, "error": {"message": "Auth(TokenRefreshFailed(\"Server returned error response: invalid_grant: refresh token invalid\"))"}})
+            sys.exit(0)
+        send({"id": mid, "result": {"threadId": "thread-2"}})
+    elif method == "turn/start":
+        send({"id": mid, "result": {"turnId": "turn-2"}})
+        send({"method": "item/completed", "params": {"text": "OR3_SMOKE_OK"}})
+        send({"method": "turn/completed", "params": {}})
+    elif method == "model/list":
+        send({"id": mid, "result": {"models": []}})
+    else:
+        send({"id": mid, "result": {}})
+`), 0o600); err != nil {
+		t.Fatalf("write fake server: %v", err)
+	}
+	writeFakeBinary(t, dir, "codex", fmt.Sprintf(`if [ "$1" = "--version" ]; then
+  echo "codex fake"
+  exit 0
+fi
+exec python3 %q %q
+`, serverPath, statePath))
+
+	runtime := NewCodexNativeRuntime()
+	output, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
+		Run: db.AgentCLIRun{
+			ID:        "run_1",
+			JobID:     "job_1",
+			Task:      "hello",
+			Cwd:       dir,
+			Mode:      string(RunnerModeSafeEdit),
+			Isolation: string(IsolationHostWorkspaceWrite),
+			Status:    db.AgentCLIStatusRunning,
+		},
+		Chat:   RunnerChatCommandRequest{UserMessage: "hello"},
+		Config: config.AgentCLIConfig{},
+		Env:    []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if output.FinalTextPreview != "OR3_SMOKE_OK" {
+		t.Fatalf("final text = %q, want smoke output", output.FinalTextPreview)
+	}
+	attemptsRaw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read attempts: %v", err)
+	}
+	if strings.TrimSpace(string(attemptsRaw)) != "2" {
+		t.Fatalf("attempts = %q, want 2", attemptsRaw)
+	}
+}
+
+func TestCodexAuthRefreshFailureMessageIsActionable(t *testing.T) {
+	err := errors.New(`codex rpc error: map[message:Auth(TokenRefreshFailed("Server returned error response: invalid_grant: refresh token invalid"))]`)
+	if !isCodexAuthRefreshFailure(err, "") {
+		t.Fatal("expected token refresh failure to be classified")
+	}
+	msg := codexAuthRefreshFailureMessage(err, "")
+	if !strings.Contains(msg, "Run `codex login`") || !strings.Contains(msg, "invalid_grant") {
+		t.Fatalf("message is not actionable: %q", msg)
+	}
+}
+
+func TestManagerDoesNotFallbackToCLIForCodexAuthRefreshFailure(t *testing.T) {
+	database := openAgentCLITestDB(t)
+	t.Cleanup(func() { _ = database.Close() })
+	runtime := &fakeRuntime{
+		id:  RunnerCodex,
+		err: errors.New(`codex rpc error: map[message:Auth(TokenRefreshFailed("Server returned error response: invalid_grant: refresh token invalid"))]`),
+	}
+	registry := &RunnerRuntimeRegistry{}
+	registry.Register(runtime)
+	manager := &Manager{
+		DB:       database,
+		Jobs:     jobs.NewRegistry(time.Minute, 1024),
+		Runtimes: registry,
+		Cfg:      config.AgentCLIConfig{RuntimeMode: map[string]string{"codex": "auto"}},
+	}
+	meta, _ := json.Marshal(map[string]any{
+		"runner_chat_session_id":        "session_1",
+		"runner_chat_turn_id":           "turn_1",
+		"runner_chat_continuation_mode": string(ContinuationNative),
+		"runner_chat_user_message":      "hello",
+	})
+	out, handled := manager.tryExecuteNativeRun(context.Background(), db.AgentCLIRun{
+		ID:        "run_1",
+		JobID:     "job_1",
+		RunnerID:  string(RunnerCodex),
+		Task:      "hello",
+		Cwd:       t.TempDir(),
+		Mode:      string(RunnerModeSafeEdit),
+		Isolation: string(IsolationHostWorkspaceWrite),
+		MetaJSON:  string(meta),
+	})
+	if !handled {
+		t.Fatal("expected auth refresh failure to be handled without CLI fallback")
+	}
+	if runtime.executeCalls != 1 {
+		t.Fatalf("execute calls = %d, want 1", runtime.executeCalls)
+	}
+	if !strings.Contains(out.StderrPreview, "Run `codex login`") {
+		t.Fatalf("stderr = %q, want actionable codex login message", out.StderrPreview)
+	}
+}
+
+func TestManagerCLIPathNormalizesCodexAuthRefreshFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "codex", `echo 'Auth(TokenRefreshFailed("Server returned error response: invalid_grant: refresh token invalid"))' >&2
+exit 1`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	manager, database, _ := newTestManager(t)
+	manager.Cfg.RuntimeMode = map[string]string{"codex": "cli"}
+	manager.ctx = context.Background()
+	run := mustInsertAgentRun(t, database, db.AgentCLIRun{
+		ID:        "run_cli_auth",
+		JobID:     "job_cli_auth",
+		RunnerID:  string(RunnerCodex),
+		Task:      "hello",
+		Cwd:       dir,
+		Mode:      string(RunnerModeSafeEdit),
+		Isolation: string(IsolationHostWorkspaceWrite),
+		Status:    db.AgentCLIStatusRunning,
+	})
+	manager.executeRun(run)
+
+	stored := mustGetAgentRun(t, database, run.ID)
+	if stored.Status != db.AgentCLIStatusFailed {
+		t.Fatalf("status = %q, want failed", stored.Status)
+	}
+	if !strings.Contains(stored.ErrorMessage, "Run `codex login`") {
+		t.Fatalf("error message = %q, want actionable codex login message", stored.ErrorMessage)
+	}
+	if strings.Contains(stored.FinalTextPreview, "TokenRefreshFailed") {
+		t.Fatalf("final text leaked raw auth error: %q", stored.FinalTextPreview)
 	}
 }
 

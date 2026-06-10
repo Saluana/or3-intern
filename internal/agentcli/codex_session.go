@@ -45,8 +45,12 @@ type codexSessionConfig struct {
 
 func newCodexSessionConfig() codexSessionConfig {
 	return codexSessionConfig{
-		Args: []string{"app-server", "--listen", "stdio://"},
+		Args: codexAppServerArgs(),
 	}
+}
+
+func codexAppServerArgs() []string {
+	return []string{"app-server", "--listen", "stdio://", "-c", codexDisableMCPConfigOverride}
 }
 
 // startCodexSession launches a codex app-server child process and

@@ -13,7 +13,7 @@ func TestChatAdaptersBuildReplayCommands(t *testing.T) {
 		want    []string
 	}{
 		{"opencode", &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}, []string{"run", "--format", "json", "replay prompt"}},
-		{"codex", &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}, []string{"--ask-for-approval", "never", "exec", "--json", "--color", "never", "--skip-git-repo-check", "--sandbox", "workspace-write", "replay prompt"}},
+		{"codex", &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}, []string{"--ask-for-approval", "never", "-c", "mcp_servers={}", "exec", "--json", "--color", "never", "--skip-git-repo-check", "--sandbox", "workspace-write", "replay prompt"}},
 		{"claude", &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}, []string{"--bare", "-p", "replay prompt", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"}},
 		{"gemini", &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}, []string{"--prompt", "replay prompt", "--output-format", "stream-json", "--approval-mode", "auto_edit"}},
 	}
@@ -255,7 +255,7 @@ func TestNativeChatCommandsUseUserMessageNotReplayPrompt(t *testing.T) {
 			name:    "codex",
 			adapter: &CodexAdapter{spec: RunnerSpec{Binary: "codex"}},
 			ref:     "thread_123",
-			want:    []string{"--ask-for-approval", "never", "--cd", "/workspace", "--sandbox", "workspace-write", "exec", "resume", "--json", "--skip-git-repo-check", "thread_123", "continue from here"},
+			want:    []string{"--ask-for-approval", "never", "-c", "mcp_servers={}", "--cd", "/workspace", "--sandbox", "workspace-write", "exec", "resume", "--json", "--skip-git-repo-check", "thread_123", "continue from here"},
 		},
 		{
 			name:    "claude",
@@ -308,7 +308,7 @@ func TestCodexNativeResumeSandboxAutoUsesSupportedArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildChatCommand: %v", err)
 	}
-	want := []string{"--dangerously-bypass-approvals-and-sandbox", "exec", "resume", "--json", "--skip-git-repo-check", "thread_123", "continue from here"}
+	want := []string{"-c", "mcp_servers={}", "--dangerously-bypass-approvals-and-sandbox", "exec", "resume", "--json", "--skip-git-repo-check", "thread_123", "continue from here"}
 	assertArgsEqual(t, want, cmd.Args)
 	for _, forbidden := range []string{"--color", "never", "latest", "full replay prompt that must not be sent"} {
 		if contains(cmd.Args, forbidden) {

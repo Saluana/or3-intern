@@ -80,7 +80,7 @@ func TestCodexAdapter_SafeEdit(t *testing.T) {
 		t.Fatalf("BuildCommand: %v", err)
 	}
 	args := cmd.Args
-	wantPrefix := []string{"--ask-for-approval", "never", "exec", "--json", "--color", "never", "--skip-git-repo-check"}
+	wantPrefix := []string{"--ask-for-approval", "never", "-c", "mcp_servers={}", "exec", "--json", "--color", "never", "--skip-git-repo-check"}
 	if len(args) < len(wantPrefix) {
 		t.Fatalf("expected codex args prefix %v, got %v", wantPrefix, args)
 	}

@@ -498,6 +498,13 @@ func (m *Manager) executeRun(run db.AgentCLIRun) {
 			m.Jobs.Publish(run.JobID, e.Type, eventToMap(e))
 		}
 	})
+	if runnerID == RunnerCodex && out.ExitCode != 0 {
+		authText := firstNonEmpty(out.StderrPreview, out.StdoutPreview, out.FinalTextPreview)
+		if isCodexAuthRefreshFailure(nil, authText) {
+			out.StderrPreview = codexAuthRefreshFailureMessage(nil, authText)
+			out.FinalTextPreview = ""
+		}
+	}
 
 	// Determine final status
 	var finalStatus string
@@ -588,6 +595,11 @@ func (m *Manager) tryExecuteNativeRun(ctx context.Context, run db.AgentCLIRun) (
 		if out.StderrPreview == "" {
 			out.StderrPreview = err.Error()
 		}
+		return out, true
+	}
+	if RunnerID(run.RunnerID) == RunnerCodex && isCodexAuthRefreshFailure(err, out.StderrPreview) {
+		out.ExitCode = -1
+		out.StderrPreview = codexAuthRefreshFailureMessage(err, out.StderrPreview)
 		return out, true
 	}
 	if mode == RuntimeModeAuto {

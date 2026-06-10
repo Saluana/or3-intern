@@ -1066,7 +1066,7 @@ func (r *CodexNativeRuntime) models(ctx context.Context, cfg config.AgentCLIConf
 	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(discoveryCtx, binary, "app-server", "--listen", "stdio://")
+	cmd := exec.CommandContext(discoveryCtx, binary, codexAppServerArgs()...)
 	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -1108,6 +1108,22 @@ func (r *CodexNativeRuntime) models(ctx context.Context, cfg config.AgentCLIConf
 }
 
 func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error) {
+	out, err := r.executeOnce(ctx, req)
+	if !isCodexAuthRefreshFailure(err, out.StderrPreview) {
+		return out, err
+	}
+	_ = r.Stop(context.Background())
+	retryOut, retryErr := r.executeOnce(ctx, req)
+	if !isCodexAuthRefreshFailure(retryErr, retryOut.StderrPreview) {
+		return retryOut, retryErr
+	}
+	msg := codexAuthRefreshFailureMessage(retryErr, retryOut.StderrPreview)
+	retryOut.ExitCode = -1
+	retryOut.StderrPreview = msg
+	return retryOut, errors.New(msg)
+}
+
+func (r *CodexNativeRuntime) executeOnce(ctx context.Context, req NativeRuntimeExecuteRequest) (ProcessOutput, error) {
 	started := time.Now()
 	var seq int64
 	binary, err := ResolveExecutable("codex", req.Env)
@@ -1219,6 +1235,31 @@ func (r *CodexNativeRuntime) Execute(ctx context.Context, req NativeRuntimeExecu
 	default:
 	}
 	return ProcessOutput{ExitCode: 0, StdoutPreview: final, StderrPreview: stderrText, FinalTextPreview: final, DurationMS: time.Since(started).Milliseconds()}, nil
+}
+
+func isCodexAuthRefreshFailure(err error, stderr string) bool {
+	text := strings.ToLower(strings.TrimSpace(firstNonEmpty(stderr, errorString(err))))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "tokenrefreshfailed") ||
+		strings.Contains(text, "invalid_grant") ||
+		(strings.Contains(text, "refresh token") && strings.Contains(text, "invalid"))
+}
+
+func codexAuthRefreshFailureMessage(err error, stderr string) string {
+	detail := strings.TrimSpace(firstNonEmpty(stderr, errorString(err)))
+	if detail == "" {
+		detail = "Codex could not refresh its ChatGPT login token."
+	}
+	return "Codex authentication failed while refreshing its login token. Run `codex login` to reconnect Codex, then retry the runner turn. Detail: " + detail
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // acquireSession returns a live app-server session, reusing the previous

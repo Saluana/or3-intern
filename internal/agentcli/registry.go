@@ -409,6 +409,8 @@ func (a *OpenCodeAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error)
 // CodexAdapter builds argv for Codex CLI.
 type CodexAdapter struct{ spec RunnerSpec }
 
+const codexDisableMCPConfigOverride = "mcp_servers={}"
+
 func (a *CodexAdapter) ID() RunnerID        { return RunnerCodex }
 func (a *CodexAdapter) DisplayName() string { return "Codex" }
 func (a *CodexAdapter) Spec() RunnerSpec    { return a.spec }
@@ -422,6 +424,7 @@ func (a *CodexAdapter) BuildCommand(req AgentRunRequest) (CommandSpec, error) {
 	if mode != RunnerModeSandboxAuto {
 		args = append(args, "--ask-for-approval", "never")
 	}
+	args = append(args, "-c", codexDisableMCPConfigOverride)
 	args = append(args, "exec", "--json", "--color", "never", "--skip-git-repo-check")
 	if req.Cwd != "" {
 		args = append(args, "--cd", req.Cwd)

@@ -136,6 +136,7 @@ func (a *CodexAdapter) buildNativeResumeChatCommand(req RunnerChatCommandRequest
 	if mode != RunnerModeSandboxAuto {
 		args = append(args, "--ask-for-approval", "never")
 	}
+	args = append(args, "-c", codexDisableMCPConfigOverride)
 	if req.Cwd != "" {
 		args = append(args, "--cd", req.Cwd)
 	}

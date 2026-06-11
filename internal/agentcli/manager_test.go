@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/jobs"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 )
 
 type stubRunnerAdapter struct {
@@ -72,7 +72,7 @@ func mustInsertAgentRun(t *testing.T, database *db.DB, run db.AgentCLIRun) db.Ag
 		run.ParentSessionKey = "parent-session"
 	}
 	if run.RunnerID == "" {
-		run.RunnerID = string(RunnerOR3)
+		run.RunnerID = string(RunnerOpenCode)
 	}
 	if run.Task == "" {
 		run.Task = "test task"
@@ -118,12 +118,12 @@ func TestManagerStartStopAndReconcile(t *testing.T) {
 	run := mustInsertAgentRun(t, database, db.AgentCLIRun{
 		ID:             "acr-reconcile",
 		JobID:          "job-reconcile",
-		RunnerID:       string(RunnerOR3),
+		RunnerID:       string(RunnerOpenCode),
 		Status:         db.AgentCLIStatusRunning,
 		StartedAt:      db.NowMS(),
 		TimeoutSeconds: 30,
 	})
-	jobs.RegisterWithID(run.JobID, "agent_cli:or3")
+	jobs.RegisterWithID(run.JobID, "agent_cli:opencode")
 
 	manager := &Manager{
 		DB:   database,
@@ -237,17 +237,17 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 		{
 			name:        "disabled by config",
 			mutate:      func(m *Manager) { m.Cfg.Enabled = false },
-			req:         AgentRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOR3)},
+			req:         AgentRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode)},
 			wantErrText: "disabled",
 		},
 		{
 			name:        "missing parent session",
-			req:         AgentRunRequest{Task: "task", RunnerID: string(RunnerOR3)},
+			req:         AgentRunRequest{Task: "task", RunnerID: string(RunnerOpenCode)},
 			wantErrText: "missing parent session",
 		},
 		{
 			name:        "empty task",
-			req:         AgentRunRequest{ParentSessionKey: "sess", RunnerID: string(RunnerOR3)},
+			req:         AgentRunRequest{ParentSessionKey: "sess", RunnerID: string(RunnerOpenCode)},
 			wantErrText: "empty task",
 		},
 		{
@@ -261,9 +261,14 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 			wantErrText: "unknown runner",
 		},
 		{
-			name:        "runner disabled",
-			mutate:      func(m *Manager) { m.Cfg.DisabledRunners = []string{string(RunnerOR3)} },
+			name:        "legacy runner rejected",
 			req:         AgentRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOR3)},
+			wantErrText: "deprecated",
+		},
+		{
+			name:        "runner disabled",
+			mutate:      func(m *Manager) { m.Cfg.DisabledRunners = []string{string(RunnerOpenCode)} },
+			req:         AgentRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode)},
 			wantErrText: "disabled by config",
 		},
 		{
@@ -283,7 +288,7 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 		},
 		{
 			name:        "invalid cwd",
-			req:         AgentRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOR3), Cwd: "/outside"},
+			req:         AgentRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode), Cwd: "/outside"},
 			wantErrText: "invalid cwd",
 		},
 	}
@@ -306,11 +311,11 @@ func TestManagerEnqueueQueueFullAndAbortLifecycle(t *testing.T) {
 	manager, database, jobs := newTestManager(t)
 	manager.MaxQueued = 1
 	ctx := context.Background()
-	first, err := manager.Enqueue(ctx, AgentRunRequest{ParentSessionKey: "sess", Task: "first", RunnerID: string(RunnerOR3)})
+	first, err := manager.Enqueue(ctx, AgentRunRequest{ParentSessionKey: "sess", Task: "first", RunnerID: string(RunnerOpenCode)})
 	if err != nil {
 		t.Fatalf("Enqueue first: %v", err)
 	}
-	if _, err := manager.Enqueue(ctx, AgentRunRequest{ParentSessionKey: "sess", Task: "second", RunnerID: string(RunnerOR3)}); !errors.Is(err, db.ErrAgentCLIQueueFull) {
+	if _, err := manager.Enqueue(ctx, AgentRunRequest{ParentSessionKey: "sess", Task: "second", RunnerID: string(RunnerOpenCode)}); !errors.Is(err, db.ErrAgentCLIQueueFull) {
 		t.Fatalf("expected queue full, got %v", err)
 	}
 	if err := manager.Abort(ctx, first.JobID); err != nil {
@@ -340,7 +345,7 @@ func TestManagerEnqueueQueueFullAndAbortLifecycle(t *testing.T) {
 	running := mustInsertAgentRun(t, database, db.AgentCLIRun{
 		ID:        "acr-running-no-cancel",
 		JobID:     "job-running-no-cancel",
-		RunnerID:  string(RunnerOR3),
+		RunnerID:  string(RunnerOpenCode),
 		Status:    db.AgentCLIStatusRunning,
 		StartedAt: db.NowMS(),
 	})
@@ -358,11 +363,11 @@ func TestManagerExecuteRunBuildFailureFinalizesRun(t *testing.T) {
 	run := mustInsertAgentRun(t, database, db.AgentCLIRun{
 		ID:        "acr-build-failure",
 		JobID:     "job-build-failure",
-		RunnerID:  string(RunnerOR3),
+		RunnerID:  string(RunnerOpenCode),
 		Status:    db.AgentCLIStatusRunning,
 		StartedAt: db.NowMS(),
 	})
-	jobs.RegisterWithID(run.JobID, "agent_cli:or3")
+	jobs.RegisterWithID(run.JobID, "agent_cli:opencode")
 	manager := &Manager{
 		DB:          database,
 		Jobs:        jobs,

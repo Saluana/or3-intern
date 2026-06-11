@@ -1564,7 +1564,7 @@ func itemTitle(itemType string) string {
 	case runtimeItemWebSearch:
 		return "Web search"
 	case runtimeItemCollabAgentToolCall:
-		return "Subagent task"
+		return "Delegated task"
 	case runtimeItemDynamicToolCall:
 		return "Tool call"
 	default:

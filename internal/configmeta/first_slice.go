@@ -521,7 +521,7 @@ func RegisterFirstSliceFields() {
 		Key:              "task_card_enforce_plan",
 		Path:             "context.taskCard.enforcePlan",
 		Label:            "Require plan before writes",
-		Description:      "Block write, exec, web, MCP, skill, and subagent tools until create_plan establishes an active task plan",
+		Description:      "Block write, exec, web, MCP, and skill tools until create_plan establishes an active task plan",
 		Risk:             RiskNotice,
 		RestartRequired:  false,
 		RequiresApproval: false,

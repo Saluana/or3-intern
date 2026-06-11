@@ -1618,11 +1618,9 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "hardening_max_tool_calls", Label: "Max tool calls per message", Description: "Total tool-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxToolCalls), EmptyHint: "16"},
 			{Key: "hardening_max_exec_calls", Label: "Max exec calls per message", Description: "Exec-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxExecCalls), EmptyHint: "2"},
 			{Key: "hardening_max_web_calls", Label: "Max web calls per message", Description: "Web-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxWebCalls), EmptyHint: "4"},
-			{Key: "hardening_max_subagent_calls", Label: "Max subagent calls per message", Description: "Subagent-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSubagentCalls), EmptyHint: "2"},
 			{Key: "hardening_max_session_tool_calls", Label: "Max tool calls per session", Description: "Total tool-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionToolCalls), EmptyHint: "256"},
 			{Key: "hardening_max_session_exec_calls", Label: "Max exec calls per session", Description: "Exec-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionExecCalls), EmptyHint: "32"},
 			{Key: "hardening_max_session_web_calls", Label: "Max web calls per session", Description: "Web-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionWebCalls), EmptyHint: "64"},
-			{Key: "hardening_max_session_subagent_calls", Label: "Max subagent calls per session", Description: "Subagent-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionSubagentCalls), EmptyHint: "16"},
 		}
 	case "session":
 		return []configureField{
@@ -1823,7 +1821,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_section_workspace":             "Space reserved for workspace/document snippets. Increase if OR3 needs more project files in context; decrease if prompts feel crowded.",
 	"context_section_tool_schemas":          "Space reserved for tool descriptions shown to the AI. Warning: too low can hide tools; too high crowds out chat and memory.",
 	"context_task_card_enabled":             "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
-	"context_task_card_enforce_plan":        "When on, write, exec, web, MCP, skill, and subagent tools stay blocked until create_plan establishes an active plan. Turn off for simple local edits without a planning step.",
+	"context_task_card_enforce_plan":        "When on, write, exec, web, MCP, and skill tools stay blocked until create_plan establishes an active plan. Turn off for simple local edits without a planning step.",
 	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
 	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
 	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
@@ -1922,11 +1920,9 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"hardening_max_tool_calls":              "Maximum total tool calls for one message. Higher values allow bigger jobs but can run longer and cost more.",
 	"hardening_max_exec_calls":              "Maximum command-execution calls for one message. Keep low unless you regularly need multi-step command workflows.",
 	"hardening_max_web_calls":               "Maximum web calls for one message. Higher values allow broader research but can be slower and noisier.",
-	"hardening_max_subagent_calls":          "Maximum helper-agent starts for one message. Higher values can multiply cost and background work.",
 	"hardening_max_session_tool_calls":      "Maximum total tool calls across one session before approval or failure.",
 	"hardening_max_session_exec_calls":      "Maximum command-execution calls across one session before approval or failure.",
 	"hardening_max_session_web_calls":       "Maximum web calls across one session before approval or failure.",
-	"hardening_max_session_subagent_calls":  "Maximum helper-agent starts across one session before approval or failure.",
 	"session_direct_messages_share_default": "Makes direct messages share the default memory/session scope. Warning: turn off if different people or channels should not share context.",
 	"session_identity_links":                "Maps multiple channel identities to one person or workspace identity. Warning: wrong links can merge separate users' context.",
 	"automation_cron_enabled":               "Enables saved scheduled jobs. Warning: scheduled jobs can cause OR3 to act later without you actively typing a request.",

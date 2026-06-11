@@ -7,12 +7,30 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/memorysvc"
+	"or3-intern/internal/security"
 )
+
+func makeTestServer(t *testing.T, cfg config.Config, database *db.DB) *serviceServer {
+	t.Helper()
+	cfgPath := filepath.Join(t.TempDir(), "or3-intern.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	return &serviceServer{
+		config:     cfg,
+		configPath: cfgPath,
+		database:   database,
+		audit:      &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("a", 32))},
+		jobs:       jobs.NewRegistry(time.Minute, 32),
+	}
+}
 
 func TestRunnerMemoryPinnedRoundTrip(t *testing.T) {
 	database, err := db.Open(filepath.Join(t.TempDir(), "mem.db"))
@@ -22,7 +40,7 @@ func TestRunnerMemoryPinnedRoundTrip(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
-	server := newDoctorTestServer(t, database, cfg)
+	server := makeTestServer(t, cfg, database)
 	server.memorySvc = memorysvc.New(cfg, database, nil, "fp-test")
 
 	setBody := `{"session_key":"sess:runner","key":"locale","content":"en-NZ"}`
@@ -66,7 +84,8 @@ func TestRunnerMemoryRequiresOperatorRole(t *testing.T) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	server := newDoctorTestServer(t, database, config.Default())
+	cfg := config.Default()
+	server := makeTestServer(t, cfg, database)
 	server.memorySvc = memorysvc.New(config.Default(), database, nil, "fp")
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/runner-memory/search", strings.NewReader(`{"session_key":"s","query":"x"}`))

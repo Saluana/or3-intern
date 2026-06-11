@@ -92,37 +92,6 @@ func TestDecodeServiceAgentRunRequest_AcceptsCamelAliasesWithWarnings(t *testing
 	}
 }
 
-func TestDecodeServiceTurnRequest_AcceptsModelOverride(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"session_key": "svc:key",
-		"message": "hello",
-		"model": "anthropic/claude-sonnet-4-5"
-	}`))
-	if err != nil {
-		t.Fatalf("decodeServiceTurnRequest: %v", err)
-	}
-	if req.Model != "anthropic/claude-sonnet-4-5" {
-		t.Fatalf("expected model override, got %q", req.Model)
-	}
-}
-
-func TestDecodeServiceTurnRequest_ConflictWarningsKeepSnakeCaseCanonical(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"session_key": "snake-session",
-		"sessionKey": "camel-session",
-		"message": "hello"
-	}`))
-	if err != nil {
-		t.Fatalf("decodeServiceTurnRequest: %v", err)
-	}
-	if req.SessionKey != "snake-session" {
-		t.Fatalf("expected snake_case session_key to win, got %q", req.SessionKey)
-	}
-	if len(req.Warnings) != 1 || !strings.Contains(req.Warnings[0], "session_key") {
-		t.Fatalf("expected session_key conflict warning, got %#v", req.Warnings)
-	}
-}
-
 func TestServiceLifecyclePayloadIncludesTraceID(t *testing.T) {
 	payload := serviceLifecyclePayload("session-1", map[string]any{
 		"trace_id":           "turn_trace",

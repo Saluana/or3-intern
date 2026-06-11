@@ -50,7 +50,7 @@ OR3 caches safe fragments (bootstrap file content by mtime/size, runner detectio
 | Kind | Behavior |
 | --- | --- |
 | `agent_cli_run` | Direct runner background job via `agentcli.Manager` |
-| `agent_turn` / `system_event` | Published to the bus for runner chat when `agentCLI.enabled`; rejected with migration guidance when disabled |
+| Legacy scheduled chat payloads (`agent_turn` / `system_event`) | Published to the bus for runner chat when `agentCLI.enabled`; rejected with migration guidance when disabled |
 
 ## Related documentation
 

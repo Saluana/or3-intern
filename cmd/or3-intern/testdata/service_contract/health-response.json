@@ -4,6 +4,5 @@
     "processId": "__PROCESS_ID__",
     "runtimeAvailable": false,
     "startedAt": "__STARTED_AT__",
-    "status": "degraded",
-    "subagentManagerEnabled": false
+    "status": "degraded"
 }

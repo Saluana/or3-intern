@@ -423,9 +423,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Hardening.Quotas.MaxWebCalls <= 0 {
 		cfg.Hardening.Quotas.MaxWebCalls = Default().Hardening.Quotas.MaxWebCalls
 	}
-	if cfg.Hardening.Quotas.MaxSubagentCalls <= 0 {
-		cfg.Hardening.Quotas.MaxSubagentCalls = Default().Hardening.Quotas.MaxSubagentCalls
-	}
 	if cfg.Hardening.Quotas.MaxSessionToolCalls <= 0 {
 		cfg.Hardening.Quotas.MaxSessionToolCalls = Default().Hardening.Quotas.MaxSessionToolCalls
 	}
@@ -434,9 +431,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	}
 	if cfg.Hardening.Quotas.MaxSessionWebCalls <= 0 {
 		cfg.Hardening.Quotas.MaxSessionWebCalls = Default().Hardening.Quotas.MaxSessionWebCalls
-	}
-	if cfg.Hardening.Quotas.MaxSessionSubagentCalls <= 0 {
-		cfg.Hardening.Quotas.MaxSessionSubagentCalls = Default().Hardening.Quotas.MaxSessionSubagentCalls
 	}
 	for name, server := range cfg.Tools.MCPServers {
 		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
@@ -603,6 +597,9 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		return cfg, err
 	}
 	cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(string(cfg.RuntimeProfile))))
+	if cfg.RuntimeProfile == "" {
+		cfg.RuntimeProfile = ProfileSingleUserHardened
+	}
 	if err := validateRuntimeProfile(cfg.RuntimeProfile); err != nil {
 		return cfg, err
 	}

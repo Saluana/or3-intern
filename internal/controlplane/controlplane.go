@@ -60,12 +60,11 @@ type ApprovalFilter struct {
 }
 
 type CapabilitiesProfileSummary struct {
-	Name           string   `json:"name,omitempty"`
-	MaxCapability  string   `json:"maxCapability,omitempty"`
-	AllowedTools   []string `json:"allowedTools,omitempty"`
-	AllowedHosts   []string `json:"allowedHosts,omitempty"`
-	WritablePaths  []string `json:"writablePaths,omitempty"`
-	AllowSubagents bool     `json:"allowSubagents"`
+	Name          string   `json:"name,omitempty"`
+	MaxCapability string   `json:"maxCapability,omitempty"`
+	AllowedTools  []string `json:"allowedTools,omitempty"`
+	AllowedHosts  []string `json:"allowedHosts,omitempty"`
+	WritablePaths []string `json:"writablePaths,omitempty"`
 }
 
 type CapabilitiesIngressSummary struct {
@@ -88,7 +87,6 @@ type CapabilitiesReport struct {
 	HostID             string                       `json:"hostId"`
 	ApprovalBroker     map[string]any               `json:"approvalBroker"`
 	Approvals          map[string]string            `json:"approvals"`
-	SubagentsEnabled   bool                         `json:"subagentsEnabled"`
 	SkillExecEnabled   bool                         `json:"skillExecEnabled"`
 	ExecAvailable      bool                         `json:"execAvailable"`
 	ShellModeAvailable bool                         `json:"shellModeAvailable"`
@@ -107,7 +105,6 @@ type HealthReport struct {
 	Status                  string `json:"status"`
 	RuntimeAvailable        bool   `json:"runtimeAvailable"`
 	JobRegistryAvailable    bool   `json:"jobRegistryAvailable"`
-	SubagentManagerEnabled  bool   `json:"subagentManagerEnabled"`
 	ApprovalBrokerAvailable bool   `json:"approvalBrokerAvailable"`
 	ProcessID               int    `json:"processId"`
 	StartedAt               string `json:"startedAt"`
@@ -209,7 +206,6 @@ func (s *Service) GetHealth() HealthReport {
 		Status:                  "ok",
 		RuntimeAvailable:        s != nil && s.DB != nil,
 		JobRegistryAvailable:    s != nil && s.Jobs != nil,
-		SubagentManagerEnabled:  false,
 		ApprovalBrokerAvailable: s != nil && s.Broker != nil,
 		ProcessID:               os.Getpid(),
 		StartedAt:               processStartedAt.Format(time.RFC3339Nano),
@@ -772,7 +768,6 @@ func CollectCapabilitiesReportWithMCPStatus(cfg config.Config, broker *approval.
 		Hosted:             spec.Hosted,
 		HostID:             cfg.Security.Approvals.HostID,
 		Approvals:          ApprovalModes(cfg),
-		SubagentsEnabled:   false,
 		SkillExecEnabled:   false,
 		ExecAvailable:      false,
 		ShellModeAvailable: false,
@@ -901,12 +896,11 @@ func effectiveProfileSummary(cfg config.Config, name string) *CapabilitiesProfil
 	writablePaths := append([]string{}, profile.WritablePaths...)
 	sort.Strings(writablePaths)
 	return &CapabilitiesProfileSummary{
-		Name:           name,
-		MaxCapability:  strings.TrimSpace(profile.MaxCapability),
-		AllowedTools:   allowedTools,
-		AllowedHosts:   allowedHosts,
-		WritablePaths:  writablePaths,
-		AllowSubagents: profile.AllowSubagents,
+		Name:          name,
+		MaxCapability: strings.TrimSpace(profile.MaxCapability),
+		AllowedTools:  allowedTools,
+		AllowedHosts:  allowedHosts,
+		WritablePaths: writablePaths,
 	}
 }
 

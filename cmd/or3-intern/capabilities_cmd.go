@@ -42,7 +42,6 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 	_, _ = fmt.Fprintf(w, "exec_available: %t\n", report.ExecAvailable)
 	_, _ = fmt.Fprintf(w, "shell_mode_available: %t\n", report.ShellModeAvailable)
 	_, _ = fmt.Fprintf(w, "skill_exec_enabled: %t\n", report.SkillExecEnabled)
-	_, _ = fmt.Fprintf(w, "subagents_enabled: %t\n", report.SubagentsEnabled)
 	_, _ = fmt.Fprintf(w, "sandbox: enabled=%t required=%t\n", report.SandboxEnabled, report.SandboxRequired)
 	if len(report.EnabledMCPServers) == 0 {
 		_, _ = fmt.Fprintln(w, "mcp_servers: none")
@@ -57,7 +56,7 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 	for _, item := range report.Channels {
 		_, _ = fmt.Fprintf(w, "  - %s enabled=%t inbound=%s", item.Name, item.Enabled, item.InboundPolicy)
 		if item.Profile != nil {
-			_, _ = fmt.Fprintf(w, " profile=%s max=%s subagents=%t", item.Profile.Name, item.Profile.MaxCapability, item.Profile.AllowSubagents)
+			_, _ = fmt.Fprintf(w, " profile=%s max=%s", item.Profile.Name, item.Profile.MaxCapability)
 			if len(item.Profile.AllowedTools) > 0 {
 				_, _ = fmt.Fprintf(w, " tools=%s", strings.Join(item.Profile.AllowedTools, ","))
 			}
@@ -71,7 +70,7 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 	for _, item := range report.Triggers {
 		_, _ = fmt.Fprintf(w, "  - %s enabled=%t", item.Name, item.Enabled)
 		if item.Profile != nil {
-			_, _ = fmt.Fprintf(w, " profile=%s max=%s subagents=%t", item.Profile.Name, item.Profile.MaxCapability, item.Profile.AllowSubagents)
+			_, _ = fmt.Fprintf(w, " profile=%s max=%s", item.Profile.Name, item.Profile.MaxCapability)
 			if len(item.Profile.AllowedTools) > 0 {
 				_, _ = fmt.Fprintf(w, " tools=%s", strings.Join(item.Profile.AllowedTools, ","))
 			}

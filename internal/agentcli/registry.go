@@ -14,7 +14,7 @@ type runnerDetectCacheEntry struct {
 	refreshing bool
 }
 
-// AllRunners returns the standard runner specs for all supported external CLIs.
+// AllRunners returns the standard runner specs for supported external CLIs.
 func AllRunners() []RunnerSpec {
 	return []RunnerSpec{
 		{
@@ -111,37 +111,31 @@ func AllRunners() []RunnerSpec {
 				},
 			},
 		},
-		{
-			ID:          RunnerOR3,
-			DisplayName: "OR3 Intern",
-			Binary:      "",
-			VersionArgs: nil,
-			AuthCheck:   nil,
-			Supports: RunnerSupports{
-				StructuredOutput:    false,
-				StreamingJSON:       false,
-				ModelFlag:           true,
-				PermissionsMode:     false,
-				SafeSandboxFlag:     false,
-				DangerousBypassFlag: false,
-				StdinPrompt:         false,
-				Chat: RunnerChatCapabilities{
-					ChatSelectable: false,
-					ChatReplay:     true,
-				},
-			},
-		},
 	}
 }
 
-// LegacyRunnerSpec returns the built-in OR3 runner spec for read-only metadata.
+// LegacyRunnerSpec returns read-only metadata for historical built-in OR3 sessions.
 func LegacyRunnerSpec() RunnerSpec {
-	for _, spec := range AllRunners() {
-		if spec.ID == RunnerOR3 {
-			return spec
-		}
+	return RunnerSpec{
+		ID:          RunnerOR3,
+		DisplayName: "OR3 Intern",
+		Binary:      "",
+		VersionArgs: nil,
+		AuthCheck:   nil,
+		Supports: RunnerSupports{
+			StructuredOutput:    false,
+			StreamingJSON:       false,
+			ModelFlag:           true,
+			PermissionsMode:     false,
+			SafeSandboxFlag:     false,
+			DangerousBypassFlag: false,
+			StdinPrompt:         false,
+			Chat: RunnerChatCapabilities{
+				ChatSelectable: false,
+				ChatReplay:     true,
+			},
+		},
 	}
-	return RunnerSpec{ID: RunnerOR3, DisplayName: "OR3 Intern (legacy)"}
 }
 
 // RunnerRegistry maps runner IDs to their specs and adapters.

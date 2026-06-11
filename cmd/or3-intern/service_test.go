@@ -36,23 +36,13 @@ type serviceTestTool struct {
 	name string
 }
 
-// disableRunnerFirstForLegacyServiceTests isolates legacy subagent/skill-plan tests
+// disableRunnerFirstForLegacyServiceTests isolates legacy built-in task/skill-plan tests
 // from parallel package tests that toggle the process-wide runner-first gate.
 func disableRunnerFirstForLegacyServiceTests(t *testing.T) {
 	t.Helper()
 	previous := runnerfirst.Enabled()
 	runnerfirst.SetEnabled(false)
 	t.Cleanup(func() { runnerfirst.SetEnabled(previous) })
-}
-
-func assertHTTPLegacyTurnsGone(t *testing.T, statusCode int, body string) {
-	t.Helper()
-	if statusCode != http.StatusGone {
-		t.Fatalf("expected 410 for removed /internal/v1/turns, got %d (%s)", statusCode, body)
-	}
-	if !strings.Contains(body, "legacy_turn_endpoint_removed") {
-		t.Fatalf("expected legacy_turn_endpoint_removed, got %s", body)
-	}
 }
 
 type fakeServiceMCPTestManager struct {
@@ -261,7 +251,7 @@ func TestServiceAuthMiddleware_RejectsMissingBearer(t *testing.T) {
 	handler := serviceAuthMiddleware("super-secret-super-secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-auth", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -285,7 +275,7 @@ func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
 	}))
 
 	for i := 0; i < serviceAuthFailureThreshold+1; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-auth", nil)
 		req.RemoteAddr = "203.0.113.10:1234"
 		req.Header.Set("Authorization", "Bearer invalid-token")
 		rec := httptest.NewRecorder()
@@ -295,7 +285,7 @@ func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-auth", nil)
 	req.RemoteAddr = "203.0.113.10:1234"
 	req.Header.Set("Authorization", "Bearer invalid-token")
 	rec := httptest.NewRecorder()
@@ -441,7 +431,7 @@ func TestValidateServiceAuthorization(t *testing.T) {
 func TestValidateServiceAuthorizationBoundRejectsReplayAndBindingMismatch(t *testing.T) {
 	secret := strings.Repeat("s", 32)
 	now := time.Unix(1_700_000_000, 0)
-	binding := serviceTokenBinding{Method: http.MethodPost, Path: "/internal/v1/turns"}
+	binding := serviceTokenBinding{Method: http.MethodPost, Path: "/internal/v1/agent-runs"}
 	token, err := issueServiceBearerTokenBound(secret, now.Add(-time.Minute), binding)
 	if err != nil {
 		t.Fatalf("issue bound token: %v", err)
@@ -974,7 +964,7 @@ func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequ
 		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/agent-runs", nil)
 	req.RemoteAddr = "100.64.0.42:54321"
 	req.Header.Set("Origin", "http://100.64.0.42:3060")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -1000,7 +990,7 @@ func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback
 		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/agent-runs", nil)
 	req.RemoteAddr = "100.64.0.42:54321"
 	req.Header.Set("Origin", "http://100.64.0.42:3060")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -1017,7 +1007,7 @@ func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback
 }
 
 func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/agent-runs", nil)
 	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
 	rec := httptest.NewRecorder()
 
@@ -1092,31 +1082,6 @@ func TestServicePublicApprovalActionError_ExposesExpiredStatus(t *testing.T) {
 	}
 	if strings.Contains(message, "database") {
 		t.Fatalf("expected safe public approval message, got %q", message)
-	}
-}
-
-func TestDecodeServiceTurnRequest_AcceptsToolPolicyAliases(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"intern_session_key":"svc:alias",
-		"message":"hello",
-		"tool_policy":{"mode":"deny_all"},
-		"profileName":"ops",
-		"meta":{"trace_id":"trace-1"}
-	}`))
-	if err != nil {
-		t.Fatalf("decodeServiceTurnRequest: %v", err)
-	}
-	if req.SessionKey != "svc:alias" {
-		t.Fatalf("expected intern session alias to populate session key, got %#v", req)
-	}
-	if len(req.Warnings) == 0 || !strings.Contains(strings.Join(req.Warnings, " "), "direct turn tool policy is ignored") {
-		t.Fatalf("expected tool policy warning, got %#v", req.Warnings)
-	}
-	if req.ProfileName != "ops" {
-		t.Fatalf("expected profile alias to populate profile name, got %#v", req)
-	}
-	if req.Meta["trace_id"] != "trace-1" {
-		t.Fatalf("expected meta to be preserved, got %#v", req.Meta)
 	}
 }
 
@@ -1915,9 +1880,6 @@ checks:
 	if len(listBody.Items) != 1 || listBody.Items[0].Name != "demo" || listBody.Items[0].Source != string(skills.SourceGlobal) {
 		t.Fatalf("expected demo global skill, got %#v", listBody.Items)
 	}
-	if !listBody.Items[0].DiagnosticAvailable || listBody.Items[0].DiagnosticStatus != "available" {
-		t.Fatalf("expected diagnostic metadata in list response, got %#v", listBody.Items[0])
-	}
 
 	reqBody := strings.NewReader(`{"enabled":false,"apiKey":"secret-value","config":{"demo.enabled":true}}`)
 	req = httptest.NewRequest(http.MethodPost, "/internal/v1/skills/demo/settings", reqBody)
@@ -1935,163 +1897,6 @@ checks:
 	if entry.Enabled == nil || *entry.Enabled || entry.APIKey != "secret-value" || entry.Config["demo.enabled"] != true {
 		t.Fatalf("expected persisted skill settings, got %#v", entry)
 	}
-}
-
-func TestDecodeServiceTurnRequest_AcceptsApprovalTokenAliases(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"session_key":"svc:approval",
-		"message":"hello",
-		"approvalToken":"token-1"
-	}`))
-	if err != nil {
-		t.Fatalf("decodeServiceTurnRequest: %v", err)
-	}
-	if req.ApprovalToken != "token-1" {
-		t.Fatalf("expected approval token alias to populate approval token, got %#v", req)
-	}
-}
-
-func TestDecodeServiceTurnRequest_IgnoresLegacyToolPolicyFields(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"session_key":"svc:key",
-		"message":"hi",
-		"tool_policy":{"mode":"allow_all"}
-	}`))
-	if err != nil {
-		t.Fatalf("decode allow_all: %v", err)
-	}
-	if len(req.Warnings) == 0 || !strings.Contains(req.Warnings[0], "direct turn tool policy is ignored") {
-		t.Fatalf("expected tool policy warning, got %#v", req.Warnings)
-	}
-}
-
-func TestDecodeServiceTurnRequest_RejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
-	for _, body := range []string{
-		`{"session_key":"svc:test","message":"hi","unexpected":true}`,
-		`{"session_key":"svc:test","message":"hi"} {"extra":true}`,
-	} {
-		if _, err := decodeServiceTurnRequest(strings.NewReader(body)); err == nil {
-			t.Fatalf("expected decode failure for body %q", body)
-		}
-	}
-}
-
-func TestServiceTurns_SSEStreamsLifecycleEvents(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("s", 32), server)
-	defer httpServer.Close()
-
-	req := mustServiceRequest(t, httpServer, strings.Repeat("s", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:test","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_JSONResponse(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("j", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("j", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:json","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_PropagatesApprovalContext(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_ReplayToolCallContinuesConversation(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_ReplayToolCallFailureStillContinuesConversation(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_ReplayToolCallRequiresPriorAssistantCall(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_ReplayToolCallRejectsChangedArguments(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_JSONFailureStatus(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_JSONApprovalRequiredStatus(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 }
 
 func TestServiceJobsStream_ReplaysCompletedJob(t *testing.T) {
@@ -2141,13 +1946,6 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 		wantBody   string
 	}{
 		{
-			name:       "turns rejects non post",
-			method:     http.MethodGet,
-			path:       "/internal/v1/turns",
-			wantStatus: http.StatusMethodNotAllowed,
-			wantBody:   "method not allowed",
-		},
-		{
 			name:       "stream rejects non get",
 			method:     http.MethodPost,
 			path:       "/internal/v1/jobs/job_1/stream",
@@ -2188,12 +1986,7 @@ func TestServiceJobs_MethodGuardsAndNotFound(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(tc.method, tc.path, nil)
-			switch {
-			case tc.path == "/internal/v1/turns":
-				server.handleTurns(rec, req)
-			default:
-				server.handleJobs(rec, req)
-			}
+			server.handleJobs(rec, req)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("expected %d, got %d (%s)", tc.wantStatus, rec.Code, rec.Body.String())
 			}
@@ -2294,45 +2087,6 @@ func TestServiceAbortJob_Matrix(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestServiceTurns_RemovedEndpointReturnsGone(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_EmptyAssistantResponseReturnsFallbackText(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-}
-
-func TestServiceTurns_RemovedEndpointReturnsGoneWithBrokerAvailable(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("x", 32), server)
-	defer httpServer.Close()
-	req := mustServiceRequest(t, httpServer, strings.Repeat("x", 32), http.MethodPost, "/internal/v1/turns", `{"session_key":"svc:legacy","message":"hello"}`)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 }
 
 func mustUseServiceTestWorkingDir(t *testing.T, dir string) {
@@ -2708,21 +2462,6 @@ func TestServicePairing_TrustedMode_AnonymousRequestStaysPending(t *testing.T) {
 	if record.Status != approval.StatusPending {
 		t.Fatalf("expected anonymous trusted pairing to remain pending, got %#v", record)
 	}
-}
-
-func TestServiceTurns_RejectsOversizedBody(t *testing.T) {
-	server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("o", 32), server)
-	defer httpServer.Close()
-
-	oversized := `{"session_key":"svc:big","message":"` + strings.Repeat("x", int(serviceTurnsBodyLimit)) + `"}`
-	req := mustServiceRequest(t, httpServer, strings.Repeat("o", 32), http.MethodPost, "/internal/v1/turns", oversized)
-	resp, err := httpServer.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do oversized turn: %v", err)
-	}
-	defer resp.Body.Close()
-	assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
 }
 
 func TestServicePairing_UnauthenticatedRoutesStampAnonymousAuditKind(t *testing.T) {
@@ -3721,22 +3460,6 @@ func hostedNoExecBaseConfig() config.Config {
 	return cfg
 }
 
-func TestRunServiceCommand_HostedNoExec_RefusesExecShell(t *testing.T) {
-	cfg := hostedNoExecBaseConfig()
-	cfg.Hardening.EnableExecShell = true
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := runServiceCommand(ctx, cfg, nil, nil)
-	if err == nil {
-		t.Fatal("expected error for hosted-no-exec with enableExecShell=true, got nil")
-	}
-	if !strings.Contains(err.Error(), "startup refused") {
-		t.Fatalf("expected 'startup refused' in error, got: %v", err)
-	}
-}
-
 func TestRunServiceCommandWithBrokerOptions_AllowsUnsafeDevOverride(t *testing.T) {
 	cfg := config.Default()
 	cfg.AgentCLI.Enabled = false
@@ -3759,22 +3482,6 @@ func TestRunServiceCommandWithBrokerOptions_AllowsUnsafeDevOverride(t *testing.T
 	}
 }
 
-func TestRunServiceCommand_HostedNoExec_RefusesPrivilegedTools(t *testing.T) {
-	cfg := hostedNoExecBaseConfig()
-	cfg.Hardening.PrivilegedTools = true
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := runServiceCommand(ctx, cfg, nil, nil)
-	if err == nil {
-		t.Fatal("expected error for hosted-no-exec with privilegedTools=true, got nil")
-	}
-	if !strings.Contains(err.Error(), "startup refused") {
-		t.Fatalf("expected 'startup refused' in error, got: %v", err)
-	}
-}
-
 func TestRunServiceCommand_HostedNoExec_AllowsCleanConfig(t *testing.T) {
 	cfg := hostedNoExecBaseConfig()
 
@@ -3787,89 +3494,6 @@ func TestRunServiceCommand_HostedNoExec_AllowsCleanConfig(t *testing.T) {
 	err := runServiceCommand(ctx, cfg, nil, nil)
 	if err != nil && strings.Contains(err.Error(), "startup refused") {
 		t.Fatalf("clean hosted-no-exec config should not be refused, got: %v", err)
-	}
-}
-
-// TestV1TurnsContractAliases pins the accepted session key aliases and allowed_tools
-// alias for POST /internal/v1/turns so that regressions break CI.
-func TestV1TurnsContractAliases(t *testing.T) {
-	cases := []struct {
-		name    string
-		body    string
-		wantKey string
-	}{
-		{
-			name:    "intern_session_key",
-			body:    `{"intern_session_key":"svc:intern","message":"hi"}`,
-			wantKey: "svc:intern",
-		},
-		{
-			name:    "sessionKey camelCase",
-			body:    `{"sessionKey":"svc:camel","message":"hi"}`,
-			wantKey: "svc:camel",
-		},
-		{
-			name:    "internSessionKey camelCase",
-			body:    `{"internSessionKey":"svc:camel-intern","message":"hi"}`,
-			wantKey: "svc:camel-intern",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req, err := decodeServiceTurnRequest(strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("decodeServiceTurnRequest: %v", err)
-			}
-			if req.SessionKey != tc.wantKey {
-				t.Fatalf("expected session key %q, got %q", tc.wantKey, req.SessionKey)
-			}
-		})
-	}
-
-	t.Run("allowedTools camelCase is ignored", func(t *testing.T) {
-		req, err := decodeServiceTurnRequest(strings.NewReader(`{"session_key":"svc:key","message":"hi","toolPolicy":{"mode":"allow_list","allowedTools":["read_file"]}}`))
-		if err != nil {
-			t.Fatalf("decodeServiceTurnRequest: %v", err)
-		}
-		if len(req.Warnings) == 0 {
-			t.Fatalf("expected tool policy warning, got %#v", req.Warnings)
-		}
-	})
-}
-
-// TestV1ToolPolicyShape accepts legacy tool_policy fields but ignores enforcement.
-func TestV1ToolPolicyShape(t *testing.T) {
-	cases := []string{
-		`{
-			"session_key":"svc:k","message":"hi",
-			"tool_policy":{
-				"mode":"allow_list",
-				"allowed_tools":["read_file"],
-				"blocked_tools":["exec"]
-			}
-		}`,
-		`{
-			"session_key":"svc:k","message":"hi",
-			"toolPolicy":{
-				"mode":"allow_list",
-				"allowedTools":["read_file"],
-				"blockedTools":["exec"]
-			}
-		}`,
-	}
-	for i, body := range cases {
-		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
-			req, err := decodeServiceTurnRequest(strings.NewReader(body))
-			if err != nil {
-				t.Fatalf("decodeServiceTurnRequest: %v", err)
-			}
-			if len(req.Warnings) == 0 {
-				t.Fatalf("expected tool policy warning, got %#v", req.Warnings)
-			}
-			if req.ToolPolicyMode != "allow_list" {
-				t.Fatalf("expected tool policy mode in meta path, got %q", req.ToolPolicyMode)
-			}
-		})
 	}
 }
 
@@ -3927,17 +3551,4 @@ func TestV1JobsAbortCompletedJob(t *testing.T) {
 	if payload["ok"] != true {
 		t.Fatalf("expected ok:true in abort response for completed job, got %#v", payload)
 	}
-}
-
-// TestV1TurnsRequiresSessionKeyAndMessage verifies the legacy turns endpoint is removed.
-func TestV1TurnsRequiresSessionKeyAndMessage(t *testing.T) {
-	jobReg := jobs.NewRegistry(time.Minute, 32)
-	server := &serviceServer{jobs: jobReg}
-
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/turns", strings.NewReader(`{"message":"hello"}`))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	server.handleTurns(rec, req)
-
-	assertHTTPLegacyTurnsGone(t, rec.Code, rec.Body.String())
 }

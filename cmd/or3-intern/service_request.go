@@ -13,18 +13,6 @@ import (
 	"or3-intern/internal/turns"
 )
 
-type serviceTurnRequest struct {
-	SessionKey     string
-	Message        string
-	Model          string
-	Attachments    []turns.Attachment
-	ToolPolicyMode string
-	Meta           map[string]any
-	ProfileName    string
-	ApprovalToken  string
-	Warnings       []string
-}
-
 type serviceAgentRunRequest struct {
 	ParentSessionKey string
 	RunnerID         string
@@ -54,91 +42,6 @@ type serviceAgentRunRequestPayload struct {
 	MaxTurns              json.Number    `json:"max_turns"`
 	MaxTurnsCamel         json.Number    `json:"maxTurns"`
 	Meta                  map[string]any `json:"meta"`
-}
-
-type serviceToolPolicyPayload struct {
-	Mode              string   `json:"mode"`
-	AllowedTools      []string `json:"allowed_tools"`
-	AllowedToolsCamel []string `json:"allowedTools"`
-	BlockedTools      []string `json:"blocked_tools"`
-	BlockedToolsCamel []string `json:"blockedTools"`
-}
-
-type serviceTurnRequestPayload struct {
-	SessionKey            string                        `json:"session_key"`
-	InternSessionKey      string                        `json:"intern_session_key"`
-	SessionKeyCamel       string                        `json:"sessionKey"`
-	InternSessionKeyCamel string                        `json:"internSessionKey"`
-	PlatformSessionRef    map[string]any                `json:"platform_session_ref"`
-	Message               string                        `json:"message"`
-	Model                 string                        `json:"model"`
-	Attachments           []map[string]any              `json:"attachments"`
-	AllowedTools          []string                      `json:"allowed_tools"`
-	AllowedToolsCamel     []string                      `json:"allowedTools"`
-	ToolPolicy            *serviceToolPolicyPayload     `json:"tool_policy"`
-	ToolPolicyCamel       *serviceToolPolicyPayload     `json:"toolPolicy"`
-	Meta                  map[string]any                `json:"meta"`
-	ProfileName           string                        `json:"profile_name"`
-	ProfileNameCamel      string                        `json:"profileName"`
-	ApprovalToken         string                        `json:"approval_token"`
-	ApprovalTokenCamel    string                        `json:"approvalToken"`
-	ReplayToolCall        *serviceReplayToolCallPayload `json:"replay_tool_call"`
-	ReplayToolCallCamel   *serviceReplayToolCallPayload `json:"replayToolCall"`
-}
-
-func decodeServiceTurnRequest(body io.Reader) (serviceTurnRequest, error) {
-	var payload serviceTurnRequestPayload
-	fields, err := decodeServiceRequestPayload(body, &payload)
-	if err != nil {
-		return serviceTurnRequest{}, err
-	}
-	warnings := serviceRequestConflictWarnings(fields,
-		serviceRequestFieldPair{"session_key", "sessionKey"},
-		serviceRequestFieldPair{"intern_session_key", "internSessionKey"},
-		serviceRequestFieldPair{"allowed_tools", "allowedTools"},
-		serviceRequestFieldPair{"tool_policy", "toolPolicy"},
-		serviceRequestFieldPair{"profile_name", "profileName"},
-		serviceRequestFieldPair{"approval_token", "approvalToken"},
-		serviceRequestFieldPair{"replay_tool_call", "replayToolCall"},
-	)
-	toolPolicy := payload.ToolPolicy
-	if toolPolicy == nil {
-		toolPolicy = payload.ToolPolicyCamel
-	}
-	toolPolicyMode := ""
-	if toolPolicy != nil {
-		toolPolicyMode = strings.TrimSpace(toolPolicy.Mode)
-	}
-	if toolPolicy != nil || len(compat.FirstStringSlice(payload.AllowedTools, payload.AllowedToolsCamel)) > 0 {
-		warnings = append(warnings, "direct turn tool policy is ignored; use runner chat")
-	}
-	if payload.ReplayToolCall != nil || payload.ReplayToolCallCamel != nil {
-		warnings = append(warnings, "replay_tool_call is ignored; use runner permission retry")
-	}
-	attachments := decodeServiceAttachments(payload.Attachments)
-	if err := turns.ValidateAttachments(attachments); err != nil {
-		return serviceTurnRequest{}, err
-	}
-	meta := cloneMapOrEmpty(payload.Meta)
-	if toolPolicyMode != "" {
-		if meta == nil {
-			meta = map[string]any{}
-		}
-		if serviceMetaText(meta, "tool_policy_mode") == "" {
-			meta["tool_policy_mode"] = toolPolicyMode
-		}
-	}
-	return serviceTurnRequest{
-		SessionKey:     compat.FirstString(payload.SessionKey, payload.InternSessionKey, payload.SessionKeyCamel, payload.InternSessionKeyCamel),
-		Message:        strings.TrimSpace(payload.Message),
-		Model:          strings.TrimSpace(payload.Model),
-		Attachments:    attachments,
-		ToolPolicyMode: toolPolicyMode,
-		Meta:           meta,
-		ProfileName:    compat.FirstString(payload.ProfileName, payload.ProfileNameCamel),
-		ApprovalToken:  compat.FirstString(payload.ApprovalToken, payload.ApprovalTokenCamel),
-		Warnings:       warnings,
-	}, nil
 }
 
 func decodeServiceAgentRunRequest(body io.Reader) (serviceAgentRunRequest, error) {

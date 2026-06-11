@@ -19,14 +19,6 @@ import (
 	"or3-intern/internal/security"
 )
 
-type serviceTurnRequestFixture struct {
-	SessionKey    string         `json:"session_key"`
-	Message       string         `json:"message"`
-	Meta          map[string]any `json:"meta"`
-	ProfileName   string         `json:"profile_name"`
-	ApprovalToken string         `json:"approval_token"`
-}
-
 type serviceAppUsageRouteFixture struct {
 	Area   string `json:"area"`
 	Method string `json:"method"`
@@ -34,59 +26,9 @@ type serviceAppUsageRouteFixture struct {
 }
 
 func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
-	t.Run("turn request", func(t *testing.T) {
-		var expected serviceTurnRequestFixture
-		loadFixtureJSON(t, "service_contract/turn-request.decoded.json", &expected)
-		body := loadFixtureString(t, "service_contract/turn-request.json")
-		actual, err := decodeServiceTurnRequest(strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("decodeServiceTurnRequest: %v", err)
-		}
-		got := serviceTurnRequestFixture{
-			SessionKey:    actual.SessionKey,
-			Message:       actual.Message,
-			Meta:          actual.Meta,
-			ProfileName:   actual.ProfileName,
-			ApprovalToken: actual.ApprovalToken,
-		}
-		if !reflect.DeepEqual(got, expected) {
-			t.Fatalf("decoded turn request mismatch\nexpected: %#v\ngot: %#v", expected, got)
-		}
-	})
-
-	t.Run("intern turn request fixture stays frozen", func(t *testing.T) {
-		var actual map[string]any
-		loadFixtureJSON(t, "service_contract/intern-turn-request.json", &actual)
-		if actual["session_key"] != "svc:fixture" {
-			t.Fatalf("expected canonical session_key in frozen turn request fixture, got %#v", actual)
-		}
-		if _, ok := actual["platform_session_ref"].(map[string]any); !ok {
-			t.Fatalf("expected platform_session_ref object in frozen turn request fixture, got %#v", actual)
-		}
-		meta, _ := actual["meta"].(map[string]any)
-		if meta["network_session_id"] != "sess_fixture" {
-			t.Fatalf("expected network_session_id correlation metadata in frozen turn request fixture, got %#v", actual)
-		}
-	})
-
 }
 
 func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
-	t.Run("turn response", func(t *testing.T) {
-		server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
-		httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
-		defer httpServer.Close()
-
-		body := loadFixtureString(t, "service_contract/intern-turn-request.json")
-		req := mustServiceRequest(t, httpServer, strings.Repeat("t", 32), http.MethodPost, "/internal/v1/turns", body)
-		resp, err := httpServer.Client().Do(req)
-		if err != nil {
-			t.Fatalf("Do: %v", err)
-		}
-		defer resp.Body.Close()
-		assertHTTPLegacyTurnsGone(t, resp.StatusCode, mustReadBody(t, resp.Body))
-	})
-
 	t.Run("job stream attach", func(t *testing.T) {
 		jobs := jobs.NewRegistry(time.Minute, 32)
 		job := jobs.RegisterWithID("job_fixture", "turn")
@@ -272,7 +214,6 @@ func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t
 		body       string
 		wantStatus int
 	}{
-		{name: "turns removed", method: http.MethodPost, path: "/internal/v1/turns", body: `{}`, wantStatus: http.StatusGone},
 		{name: "jobs route missing", method: http.MethodGet, path: "/internal/v1/jobs", wantStatus: http.StatusNotFound},
 		{name: "cron method", method: http.MethodPost, path: "/internal/v1/cron", wantStatus: http.StatusMethodNotAllowed},
 		{name: "approvals unavailable", method: http.MethodGet, path: "/internal/v1/approvals", wantStatus: http.StatusServiceUnavailable},

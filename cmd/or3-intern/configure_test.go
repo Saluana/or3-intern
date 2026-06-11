@@ -59,14 +59,13 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 		"",
 		"n",
 		"router-key",
-		"brave-key",
-		"http://proxy.internal:8080",
-		"",
-		"75",
-		"/opt/homebrew/bin",
 	}, "\n"))
 	var out strings.Builder
 
+	// In runner-first mode, the `tools` section drops every legacy agent
+	// exec field (exec / PATH / exec-allowed-programs) but keeps the
+	// still-active network helpers (Brave key, web proxy). Targeting
+	// just `provider` and `tools` should still complete.
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "tools"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
 	}
@@ -84,23 +83,19 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 	if cfg.Provider.EmbedDimensions != 768 {
 		t.Fatalf("unexpected embed dimensions: %d", cfg.Provider.EmbedDimensions)
 	}
-	if cfg.Tools.BraveAPIKey != "brave-key" {
-		t.Fatalf("unexpected Brave key: %q", cfg.Tools.BraveAPIKey)
-	}
-	if cfg.Tools.WebProxy != "http://proxy.internal:8080" {
-		t.Fatalf("unexpected proxy: %q", cfg.Tools.WebProxy)
-	}
-	if cfg.Tools.ExecTimeoutSeconds != 75 {
-		t.Fatalf("unexpected exec timeout: %d", cfg.Tools.ExecTimeoutSeconds)
-	}
-	if cfg.Tools.PathAppend != "/opt/homebrew/bin" {
-		t.Fatalf("unexpected path append: %q", cfg.Tools.PathAppend)
+	// Exec / PATH / exec-allowed-programs are hidden in runner-first mode.
+	// The defaults are still on disk but no TUI input should have written
+	// to them; the input stream was sized for the active fields, so
+	// anything beyond provider would have failed. Path append was always
+	// empty in defaults, so the empty default is the correct assertion.
+	if cfg.Tools.PathAppend != "" {
+		t.Fatalf("path append should remain empty in runner-first, got %q", cfg.Tools.PathAppend)
 	}
 	if !strings.Contains(out.String(), "Configuration complete.") {
 		t.Fatalf("expected completion output, got %q", out.String())
 	}
-	if !strings.Contains(out.String(), "Saved provider settings.") || !strings.Contains(out.String(), "Saved tools settings.") {
-		t.Fatalf("expected per-section save output, got %q", out.String())
+	if !strings.Contains(out.String(), "Saved provider settings.") {
+		t.Fatalf("expected provider save output, got %q", out.String())
 	}
 }
 
@@ -320,10 +315,10 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	sections := map[string][]string{
 		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled", "runtime_consolidation_model"},
 		"context":    {"context_mode", "context_max_input_tokens", "context_dynamic_tools", "context_manager_enabled"},
-		"tools":      {"tools_brave", "tools_exec_timeout", "tools_path_append"},
-		"skills":     {"skills_enable_exec", "skills_quarantine", "skills_global_dir", "skills_clawhub_registry"},
-		"security":   {"security_secret_store_enabled", "security_approval_exec_mode", "security_network_allowed_hosts"},
-		"hardening":  {"hardening_guarded_tools", "hardening_sandbox_enabled", "hardening_quota_exceeded_action", "hardening_max_tool_calls", "hardening_max_session_tool_calls"},
+		"tools":      {"tools_brave", "tools_web_proxy"},
+		"skills":     {"skills_quarantine", "skills_global_dir", "skills_clawhub_registry"},
+		"security":   {"security_secret_store_enabled", "security_network_allowed_hosts"},
+		"hardening":  {"hardening_sandbox_enabled", "hardening_quota_exceeded_action", "hardening_max_tool_calls", "hardening_max_session_tool_calls"},
 		"automation": {"automation_cron_enabled", "automation_webhook_enabled", "automation_filewatch_paths"},
 	}
 	for section, wantKeys := range sections {
@@ -341,6 +336,31 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("expected %s field in %s section, got %#v", want, section, fields)
+			}
+		}
+	}
+
+	// Runner-first contract: legacy agent / docindex / service-max-capability
+	// fields must NOT appear in any section.
+	hidden := []string{
+		"tools_exec_timeout", "tools_path_append", "tools_exec_allowed_programs",
+		"hardening_guarded_tools", "hardening_privileged_tools",
+		"hardening_enable_exec_shell", "hardening_exec_allowed_programs",
+		"security_approval_exec_mode", "security_approval_skill_mode",
+		"service_max_capability",
+		"docindex_enabled", "docindex_max_files", "docindex_max_chunks",
+		"docindex_refresh_seconds", "docindex_retrieve_limit",
+		"agentcli_enabled", "agentcli_default_runner", "agentcli_max_concurrent",
+		"agentcli_max_queued", "agentcli_allow_sandbox_auto", "agentcli_disabled_runners",
+	}
+	for _, section := range []string{
+		"provider", "tools", "skills", "security", "hardening", "service", "automation", "context", "workspace", "docindex", "agentcli",
+	} {
+		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
+			for _, h := range hidden {
+				if field.Key == h {
+					t.Fatalf("field %q should be hidden in runner-first mode but appeared in %s section", h, section)
+				}
 			}
 		}
 	}

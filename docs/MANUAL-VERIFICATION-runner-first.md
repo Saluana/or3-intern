@@ -15,4 +15,4 @@ Run on a machine with OpenCode (or another configured runner) installed.
 1. Chat — runner picker shows external runners; no fake OR3 default.
 2. Agents — task handoff requires a selectable runner.
 3. Scheduled tasks — new tasks default to external runner when available.
-4. Settings — Runners section visible; legacy subagent toggles hidden when runners enabled.
+4. Settings — Runners section visible; legacy built-in task toggles hidden when runners enabled.

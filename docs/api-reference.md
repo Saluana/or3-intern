@@ -1,6 +1,6 @@
 # Internal service REST / HTTP API reference
 
-> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). The legacy built-in `POST /internal/v1/turns` endpoint returns **410 Gone** with migration guidance; the old subagent endpoint has been removed. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
+> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). The old `/internal/v1/turns` and `/internal/v1/subagents` endpoints are no longer registered. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
 
 This page documents the authenticated machine-facing REST / HTTP API exposed by:
 
@@ -114,7 +114,7 @@ Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`,
 | --- | --- | --- | --- |
 | `GET` | `/internal/v1/chat-runners` | Admin or Operator | List chat-selectable external runners and service default runner. |
 | `POST` | `/internal/v1/chat/turns` | Admin or Operator | Submit a foreground turn through an external runner (primary chat path). |
-| `POST` | `/internal/v1/turns` | Admin or Operator | **Removed:** returns `410 Gone`; use runner chat. |
+| `POST` | `/internal/v1/turns` | Admin or Operator | **Removed:** use runner chat. |
 | `POST` | `/internal/v1/runner-memory/search` | Operator | Search scoped memory for a session. |
 | `POST` | `/internal/v1/runner-memory/notes` | Operator | Add a durable memory note. |
 | `GET` | `/internal/v1/runner-memory/pinned` | Operator | Read pinned memory for a session. |
@@ -202,7 +202,7 @@ See [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md
 
 ### `POST /internal/v1/turns` (removed)
 
-Returns **410 Gone**. Use runner chat (`POST /internal/v1/runner-chat/sessions/{id}/turns` or `POST /internal/v1/chat/turns`).
+This route is no longer registered. Use runner chat (`POST /internal/v1/runner-chat/sessions/{id}/turns` or `POST /internal/v1/chat/turns`).
 
 ### Runner memory bridge
 
@@ -407,7 +407,7 @@ After cancellation the run status is `aborted` and the job registry emits a `com
 2. Persisted `agent_cli_runs` row.
 3. Persisted `agent_cli_runs` row.
 
-This means clients can look up external CLI runs through the same `/internal/v1/jobs/{job_id}` endpoint that serves subagent and turn jobs — no dedicated route required.
+This means clients can look up external CLI runs through the same `/internal/v1/jobs/{job_id}` endpoint that serves runner jobs — no dedicated route required.
 
 ### `GET /internal/v1/app/bootstrap`
 
@@ -458,9 +458,12 @@ Create/update job shape:
   "enabled": true,
   "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" },
   "payload": {
-    "kind": "agent_turn",
-    "message": "Summarize overnight changes.",
-    "session_key": "cron:default"
+    "kind": "agent_cli_run",
+    "session_key": "scheduled:morning-summary",
+    "agent_run": {
+      "runner_id": "opencode",
+      "task": "Summarize overnight changes."
+    }
   },
   "delete_after_run": false
 }
@@ -798,9 +801,9 @@ Current response fields:
 - `status`
 - `runtimeAvailable`
 - `jobRegistryAvailable`
-- `subagentManagerEnabled`
-- `agentCLIManagerEnabled`
 - `approvalBrokerAvailable`
+- `processId`
+- `startedAt`
 
 ### `GET /internal/v1/readiness`
 
@@ -962,10 +965,9 @@ Fixture-pinned request and response shapes live in `cmd/or3-intern/testdata/serv
 - `network_session_id` is owned by `or3-net`; when present, it is propagated as request metadata (`X-Network-Session-Id`, request `meta`, and service lifecycle payloads) so `or3-net` can correlate work without changing the `or3-intern` session model.
 - alias drift is intentionally contained to the service ingress boundary:
   - turn requests normalize `session_key`, `intern_session_key`, `sessionKey`, `internSessionKey` → `session_key`
-  - subagent requests normalize `parent_session_key`, `session_key`, `intern_session_key`, `parentSessionKey`, `sessionKey`, `internSessionKey` → `parent_session_key`
   - no internal package should introduce new aliases such as `session_id` for these service contracts without an explicit compatibility test update.
 
-**Removed routes:** `POST /internal/v1/turns` returns **410 Gone** (no alias normalization). The old `/internal/v1/subagents` route is no longer registered. Use runner chat and `POST /internal/v1/agent-runs` instead.
+**Removed routes:** The old `/internal/v1/turns` and `/internal/v1/subagents` routes are no longer registered. Use runner chat and `POST /internal/v1/agent-runs` instead.
 
 **Stable job routes:**
 - `GET /internal/v1/jobs/{jobId}/stream` — returns 404 for unknown jobs

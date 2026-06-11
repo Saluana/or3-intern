@@ -1,5 +1,5 @@
 [
-  { "area": "turns", "method": "POST", "path": "/internal/v1/turns" },
+  { "area": "agent_runs", "method": "POST", "path": "/internal/v1/agent-runs" },
   { "area": "jobs", "method": "GET", "path": "/internal/v1/jobs/job_fixture" },
   { "area": "jobs", "method": "GET", "path": "/internal/v1/jobs/job_fixture/stream" },
   { "area": "jobs", "method": "POST", "path": "/internal/v1/jobs/job_fixture/abort" },

@@ -4,15 +4,15 @@
 
 The built-in OR3 provider/tool-loop agent has been removed from the primary
 execution path. Chat, channels, service turns, and automation use external
-runners (OpenCode recommended). `POST /internal/v1/turns` returns **410 Gone**
-and `/internal/v1/subagents` is no longer registered. Install and authenticate a
+runners (OpenCode recommended). `/internal/v1/turns` and `/internal/v1/subagents`
+are no longer registered. Install and authenticate a
 runner before starting new work.
 
 ## Config changes
 
 | Before | After |
 | --- | --- |
-| `agentCLI.enabled=false` (default) | `agentCLI.enabled=true` for new installs |
+| `agentCLI.enabled=false` (older installs may still carry this) | `agentCLI.enabled=true` for new installs |
 | Implicit built-in agent | `agentCLI.defaultRunner=opencode` |
 | — | `OR3_AGENT_CLI_DEFAULT_RUNNER` env override |
 
@@ -27,7 +27,7 @@ to `agentCLI.defaultRunner` when agent CLI is enabled.
 ## Cron jobs
 
 - Keep using `agent_cli_run` for scheduled runner tasks.
-- Legacy `agent_turn` jobs publish bus events that become runner chat turns when agent CLI is enabled.
+- Legacy scheduled chat payloads (`agent_turn`) publish bus events that become runner chat turns when agent CLI is enabled.
 - When agent CLI is disabled, legacy cron agent turns fail with guidance to enable runners or recreate jobs as `agent_cli_run`.
 
 ## Commands
@@ -46,7 +46,7 @@ doctor settings to use runner chat instead.
 
 ## OR3 App
 
-OR3 App sends through runner chat only. Subagent creation and direct
+OR3 App sends through runner chat only. Legacy built-in task creation and direct
 `/internal/v1/turns` recovery are removed. Choose an external runner before
 sending.
 

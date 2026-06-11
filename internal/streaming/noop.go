@@ -6,7 +6,7 @@ import (
 	"or3-intern/internal/channels"
 )
 
-// NullStreamer discards streaming channel output (service jobs, subagents).
+// NullStreamer discards streaming channel output for service jobs.
 type NullStreamer struct{}
 
 type nullStreamWriter struct{}

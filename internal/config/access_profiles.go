@@ -26,9 +26,8 @@ func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 				"memory_recent",
 				"memory_get_pinned",
 			},
-			AllowedHosts:   []string{},
-			WritablePaths:  []string{},
-			AllowSubagents: false,
+			AllowedHosts:  []string{},
+			WritablePaths: []string{},
 		},
 		AccessLevelOperator: {
 			MaxCapability: "guarded",
@@ -48,9 +47,8 @@ func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 				"web_fetch_markdown",
 				"exec",
 			},
-			AllowedHosts:   []string{},
-			WritablePaths:  []string{AccessProfileWorkspaceDir},
-			AllowSubagents: false,
+			AllowedHosts:  []string{},
+			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},
 		AccessLevelAdmin: {
 			MaxCapability: "privileged",
@@ -74,9 +72,8 @@ func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 				"send_message",
 				"cron",
 			},
-			AllowedHosts:   []string{},
-			WritablePaths:  []string{AccessProfileWorkspaceDir},
-			AllowSubagents: true,
+			AllowedHosts:  []string{},
+			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},
 	}
 }

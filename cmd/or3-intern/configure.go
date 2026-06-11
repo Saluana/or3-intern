@@ -204,7 +204,11 @@ func runConfigureInteractive(reader *bufio.Reader, out io.Writer, cfgPath, cwd s
 	for {
 		options := make([]string, 0, len(configureSections)+1)
 		for index, section := range configureSections {
-			options = append(options, fmt.Sprintf("%d) %s — %s", index+1, section.Label, section.Description))
+			label := fmt.Sprintf("%d) %s — %s", index+1, section.Label, section.Description)
+			if !sectionHasEditableFields(cfg, section.Key, cwd) {
+				label = fmt.Sprintf("%d) %s — (hidden in runner-first mode)", index+1, section.Label)
+			}
+			options = append(options, label)
 		}
 		options = append(options, fmt.Sprintf("%d) Save and finish", len(configureSections)+1))
 		choice, err := promptMenuChoice(reader, out, "Choose a section to configure", options, defaultChoice)
@@ -221,6 +225,11 @@ func runConfigureInteractive(reader *bufio.Reader, out io.Writer, cfgPath, cwd s
 		}
 		selectedIndex--
 		section := configureSections[selectedIndex].Key
+		if !sectionHasEditableFields(cfg, section, cwd) {
+			fmt.Fprintf(out, "%s is hidden in runner-first mode; skipping.\n", section)
+			defaultChoice = fmt.Sprintf("%d", minInt(selectedIndex+2, len(configureSections)+1))
+			continue
+		}
 		if err := runConfigureSection(reader, out, &cfg, section, cwd); err != nil {
 			return err
 		}
@@ -278,6 +287,21 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
 	}
+}
+
+// sectionHasEditableFields reports whether the given configure section
+// has at least one field that is not hidden in runner-first mode. Hidden
+// sections are still listed in the menu (so section numbers stay stable)
+// but are skipped when reached via the auto-advance default.
+func sectionHasEditableFields(cfg config.Config, section, cwd string) bool {
+	switch section {
+	case "channels":
+		return true
+	case "mcp":
+		return true
+	}
+	fields := buildSectionFields(cfg, section, cwd)
+	return len(fields) > 0
 }
 
 func configureMCPSection(out io.Writer, cfg *config.Config) error {

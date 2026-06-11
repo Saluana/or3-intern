@@ -192,11 +192,7 @@ esac`)
 }
 
 func TestDetect_OR3AlwaysAvailable(t *testing.T) {
-	spec := RunnerSpec{
-		ID:          RunnerOR3,
-		DisplayName: "OR3 Intern",
-		Binary:      "",
-	}
+	spec := LegacyRunnerSpec()
 	info := Detect(context.Background(), spec, DetectOptions{})
 	if info.Status != RunnerStatusAvailable {
 		t.Errorf("expected available, got %q", info.Status)

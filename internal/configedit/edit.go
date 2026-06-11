@@ -998,16 +998,12 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Hardening.Quotas.MaxExecCalls, value, fieldKey)
 	case "hardening_max_web_calls":
 		return setIntValue(&cfg.Hardening.Quotas.MaxWebCalls, value, fieldKey)
-	case "hardening_max_subagent_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxSubagentCalls, value, fieldKey)
 	case "hardening_max_session_tool_calls":
 		return setIntValue(&cfg.Hardening.Quotas.MaxSessionToolCalls, value, fieldKey)
 	case "hardening_max_session_exec_calls":
 		return setIntValue(&cfg.Hardening.Quotas.MaxSessionExecCalls, value, fieldKey)
 	case "hardening_max_session_web_calls":
 		return setIntValue(&cfg.Hardening.Quotas.MaxSessionWebCalls, value, fieldKey)
-	case "hardening_max_session_subagent_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxSessionSubagentCalls, value, fieldKey)
 	case "session_identity_links":
 		links, err := parseIdentityLinks(value)
 		if err != nil {

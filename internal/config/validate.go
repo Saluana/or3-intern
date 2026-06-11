@@ -481,21 +481,6 @@ func ValidateProfile(cfg Config) error {
 			return errors.New("profile requires security.secretStore.required")
 		}
 	}
-	if spec.ForbidExecShell {
-		if cfg.Hardening.EnableExecShell {
-			return errors.New("hosted-no-exec profile does not allow enableExecShell")
-		}
-	}
-	if spec.ForbidPrivilegedTools {
-		if cfg.Hardening.PrivilegedTools {
-			return errors.New("hosted-no-exec profile does not allow privilegedTools")
-		}
-	}
-	if spec.RequireSandboxForExec {
-		if cfg.Hardening.EnableExecShell && !cfg.Hardening.Sandbox.Enabled {
-			return errors.New("hosted-remote-sandbox-only profile requires sandbox for exec")
-		}
-	}
 	return nil
 }
 

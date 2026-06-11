@@ -778,10 +778,6 @@ func configErrorHint(err error) string {
 	return ""
 }
 
-func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
-	return false
-}
-
 func buildIdentityScopeMap(cfg config.Config) map[string]string {
 	out := map[string]string{}
 	for _, link := range cfg.Session.IdentityLinks {

@@ -30,7 +30,6 @@ func Evaluate(cfg config.Config, opts Options) Report {
 	findings = append(findings, channelExposureFindings(cfg, opts)...)
 	findings = append(findings, channelIngressFindings(cfg, opts)...)
 	findings = append(findings, runtimeProfileFindings(cfg, opts)...)
-	findings = append(findings, agentCLIFindings(cfg, opts)...)
 	if opts.Probe {
 		findings = append(findings, probeFindings(cfg, opts)...)
 	}

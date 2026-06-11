@@ -260,18 +260,14 @@ const (
 
 // HardeningQuotaConfig limits how many sensitive tool calls a message and session may issue.
 type HardeningQuotaConfig struct {
-	Enabled        bool                `json:"enabled"`
-	ExceededAction QuotaExceededAction `json:"exceededAction"`
-	MaxToolCalls   int                 `json:"maxToolCalls"`
-	MaxExecCalls   int                 `json:"maxExecCalls"`
-	MaxWebCalls    int                 `json:"maxWebCalls"`
-	// Deprecated: subagents were removed in the runner-first runtime.
-	MaxSubagentCalls    int `json:"maxSubagentCalls"`
-	MaxSessionToolCalls int `json:"maxSessionToolCalls"`
-	MaxSessionExecCalls int `json:"maxSessionExecCalls"`
-	MaxSessionWebCalls  int `json:"maxSessionWebCalls"`
-	// Deprecated: subagents were removed in the runner-first runtime.
-	MaxSessionSubagentCalls int `json:"maxSessionSubagentCalls"`
+	Enabled             bool                `json:"enabled"`
+	ExceededAction      QuotaExceededAction `json:"exceededAction"`
+	MaxToolCalls        int                 `json:"maxToolCalls"`
+	MaxExecCalls        int                 `json:"maxExecCalls"`
+	MaxWebCalls         int                 `json:"maxWebCalls"`
+	MaxSessionToolCalls int                 `json:"maxSessionToolCalls"`
+	MaxSessionExecCalls int                 `json:"maxSessionExecCalls"`
+	MaxSessionWebCalls  int                 `json:"maxSessionWebCalls"`
 }
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
@@ -728,8 +724,6 @@ type AccessProfileConfig struct {
 	AllowedTools  []string `json:"allowedTools"`
 	AllowedHosts  []string `json:"allowedHosts"`
 	WritablePaths []string `json:"writablePaths"`
-	// Deprecated: subagents were removed in the runner-first runtime.
-	AllowSubagents bool `json:"allowSubagents"`
 }
 
 // NetworkPolicyConfig defines outbound network restrictions.

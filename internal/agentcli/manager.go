@@ -201,27 +201,28 @@ func (m *Manager) Enqueue(ctx context.Context, req AgentRunRequest) (db.AgentCLI
 	// Check runner readiness
 	if m.Registry != nil {
 		if _, ok := m.Registry.Spec(RunnerID(runnerID)); !ok {
+			if IsLegacyRunnerID(runnerID) {
+				return db.AgentCLIRun{}, LegacyRunnerMigrationError(runnerID)
+			}
 			return db.AgentCLIRun{}, fmt.Errorf("unknown runner %q", runnerID)
 		}
 		if isRunnerDisabled(RunnerID(runnerID), cfg.DisabledRunners) {
 			return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
 		}
-		if RunnerID(runnerID) != RunnerOR3 {
-			detectOpts := m.detectOptions(cfg)
-			if info, ok := m.Registry.DetectCached(RunnerID(runnerID), agentCLIDetectCacheTTL); ok {
-				switch info.Status {
-				case RunnerStatusDisabledByConfig:
-					return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
-				case RunnerStatusMissing:
-					return db.AgentCLIRun{}, fmt.Errorf("runner %q is not installed", runnerID)
-				case RunnerStatusAuthMissing:
-					return db.AgentCLIRun{}, fmt.Errorf("runner %q is not authenticated", runnerID)
-				case RunnerStatusError:
-					return db.AgentCLIRun{}, fmt.Errorf("runner %q is not functional", runnerID)
-				}
-			} else {
-				m.Registry.RefreshDetectAsync(RunnerID(runnerID), detectOpts)
+		detectOpts := m.detectOptions(cfg)
+		if info, ok := m.Registry.DetectCached(RunnerID(runnerID), agentCLIDetectCacheTTL); ok {
+			switch info.Status {
+			case RunnerStatusDisabledByConfig:
+				return db.AgentCLIRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
+			case RunnerStatusMissing:
+				return db.AgentCLIRun{}, fmt.Errorf("runner %q is not installed", runnerID)
+			case RunnerStatusAuthMissing:
+				return db.AgentCLIRun{}, fmt.Errorf("runner %q is not authenticated", runnerID)
+			case RunnerStatusError:
+				return db.AgentCLIRun{}, fmt.Errorf("runner %q is not functional", runnerID)
 			}
+		} else {
+			m.Registry.RefreshDetectAsync(RunnerID(runnerID), detectOpts)
 		}
 	}
 

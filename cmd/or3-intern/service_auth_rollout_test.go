@@ -102,8 +102,8 @@ func TestServiceAuthMiddleware_RolloutModesForLegacyPairedTokens(t *testing.T) {
 		{name: "enforce sensitive keeps doctor status paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/status", method: http.MethodGet, wantStatus: http.StatusOK},
 		{name: "enforce sensitive blocks doctor skill diagnostics paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/skills/demo/diagnostics", method: http.MethodGet, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
 		{name: "enforce sensitive blocks doctor apply paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/plans/plan-1/apply", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive keeps low risk paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/turns", method: http.MethodPost, wantStatus: http.StatusOK},
-		{name: "enforce session blocks low risk paired token without session", mode: config.AuthEnforcementSession, path: "/internal/v1/turns", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
+		{name: "enforce sensitive keeps low risk paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/jobs/job-rollout", method: http.MethodGet, wantStatus: http.StatusOK},
+		{name: "enforce session blocks low risk paired token without session", mode: config.AuthEnforcementSession, path: "/internal/v1/jobs/job-rollout", method: http.MethodGet, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
 		{name: "enforce session allows paired token for passkey login begin", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/begin", method: http.MethodPost, wantStatus: http.StatusOK},
 		{name: "enforce session allows paired token for passkey login finish", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/finish", method: http.MethodPost, wantStatus: http.StatusOK},
 	}
@@ -176,7 +176,7 @@ func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 				identity := serviceAuthIdentityFromContext(r.Context())
 				writeServiceJSON(w, http.StatusOK, map[string]any{"kind": identity.Kind})
 			}))
-			req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+			req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-rollout", nil)
 			req.Header.Set("Authorization", "Bearer "+tc.token)
 			if tc.method != "" {
 				req.Header.Set("X-Or3-Auth-Method", tc.method)
@@ -262,7 +262,7 @@ func TestServiceAuthMiddleware_EnforcementReturnsUpgradeGuidanceErrors(t *testin
 	handler := serviceAuthMiddlewareWithBroker(cfg, nil, authSvc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-rollout", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)

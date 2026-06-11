@@ -31,7 +31,7 @@ Environment overrides are applied after loading `.env` from the current director
 | `security`                                             | Secret store, audit, access profiles, and outbound network policy                                    |
 | `runtimeProfile`                                       | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.)                      |
 | `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
-| `subagents`                                            | Background job queueing and concurrency controls                                                     |
+| `subagents`                                            | Legacy compatibility bucket retained for older configs; runner-first builds do not create subagent work |
 | `agentCLI`                                             | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
 | `context`, `contextManager`                            | Memory/retrieval knobs plus legacy prompt/context-manager compatibility settings                     |
 
@@ -118,14 +118,12 @@ Legacy per-message settings use these keys:
 - `maxToolCalls`
 - `maxExecCalls`
 - `maxWebCalls`
-- `maxSubagentCalls`
 
 Per-session settings use:
 
 - `maxSessionToolCalls`
 - `maxSessionExecCalls`
 - `maxSessionWebCalls`
-- `maxSessionSubagentCalls`
 
 `exceededAction` is also retained for compatibility, but current runner-first execution does not create `tool_quota` approval requests from these fields.
 

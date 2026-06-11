@@ -441,16 +441,14 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	cfg.Hardening.ExecAllowedPrograms = []string{"go", "git"}
 	cfg.Hardening.ChildEnvAllowlist = []string{"PATH"}
 	cfg.Hardening.Quotas = HardeningQuotaConfig{
-		Enabled:                 true,
-		ExceededAction:          QuotaExceededActionFail,
-		MaxToolCalls:            3,
-		MaxExecCalls:            1,
-		MaxWebCalls:             2,
-		MaxSubagentCalls:        1,
-		MaxSessionToolCalls:     30,
-		MaxSessionExecCalls:     10,
-		MaxSessionWebCalls:      20,
-		MaxSessionSubagentCalls: 5,
+		Enabled:             true,
+		ExceededAction:      QuotaExceededActionFail,
+		MaxToolCalls:        3,
+		MaxExecCalls:        1,
+		MaxWebCalls:         2,
+		MaxSessionToolCalls: 30,
+		MaxSessionExecCalls: 10,
+		MaxSessionWebCalls:  20,
 	}
 
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -472,8 +470,8 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 		t.Fatalf("unexpected child env allowlist: %#v", got)
 	}
 	if loaded.Hardening.Quotas.ExceededAction != QuotaExceededActionFail ||
-		loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 ||
-		loaded.Hardening.Quotas.MaxSessionToolCalls != 30 || loaded.Hardening.Quotas.MaxSessionExecCalls != 10 || loaded.Hardening.Quotas.MaxSessionWebCalls != 20 || loaded.Hardening.Quotas.MaxSessionSubagentCalls != 5 {
+		loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 ||
+		loaded.Hardening.Quotas.MaxSessionToolCalls != 30 || loaded.Hardening.Quotas.MaxSessionExecCalls != 10 || loaded.Hardening.Quotas.MaxSessionWebCalls != 20 {
 		t.Fatalf("unexpected quota overrides: %+v", loaded.Hardening.Quotas)
 	}
 }
@@ -1566,14 +1564,14 @@ func TestRuntimeProfileEnvOverride(t *testing.T) {
 		}
 	})
 
-	t.Run("empty env leaves profile empty", func(t *testing.T) {
+	t.Run("empty env defaults to single-user-hardened", func(t *testing.T) {
 		t.Setenv("OR3_RUNTIME_PROFILE", "")
 		cfg, err := Load("")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.RuntimeProfile != "" {
-			t.Errorf("expected empty profile, got %q", cfg.RuntimeProfile)
+		if cfg.RuntimeProfile != ProfileSingleUserHardened {
+			t.Errorf("expected ProfileSingleUserHardened, got %q", cfg.RuntimeProfile)
 		}
 	})
 
@@ -1745,26 +1743,6 @@ func TestValidateProfile(t *testing.T) {
 		}
 	})
 
-	t.Run("hosted-no-exec rejects enableExecShell", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedNoExec
-		cfg.Hardening.EnableExecShell = true
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted-no-exec profile does not allow enableExecShell" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("hosted-no-exec rejects privilegedTools", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedNoExec
-		cfg.Hardening.PrivilegedTools = true
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted-no-exec profile does not allow privilegedTools" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
 	t.Run("hosted-no-exec passes with safe config", func(t *testing.T) {
 		cfg := hostedConfig()
 		cfg.RuntimeProfile = ProfileHostedNoExec
@@ -1773,26 +1751,6 @@ func TestValidateProfile(t *testing.T) {
 		}
 	})
 
-	t.Run("hosted-remote-sandbox-only rejects exec without sandbox", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedRemoteSandbox
-		cfg.Hardening.EnableExecShell = true
-		cfg.Hardening.Sandbox.Enabled = false
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted-remote-sandbox-only profile requires sandbox for exec" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("hosted-remote-sandbox-only allows exec with sandbox", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedRemoteSandbox
-		cfg.Hardening.EnableExecShell = true
-		cfg.Hardening.Sandbox.Enabled = true
-		if err := ValidateProfile(cfg); err != nil {
-			t.Errorf("expected nil, got %v", err)
-		}
-	})
 }
 
 func TestLoad_ContextDefaultsAndValidation(t *testing.T) {

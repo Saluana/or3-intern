@@ -16,12 +16,6 @@ func runtimeProfileFindings(cfg config.Config, opts Options) []Finding {
 	findings := []Finding{}
 	p := cfg.RuntimeProfile
 	if p == "" {
-		findings = append(findings, Finding{
-			ID:       "runtime-profile.unset",
-			Area:     "runtime-profile",
-			Severity: SeverityWarn,
-			Summary:  "runtimeProfile is not set; consider setting it to one of: local-dev, single-user-hardened, hosted-service, hosted-no-exec, hosted-remote-sandbox-only",
-		})
 		return findings
 	}
 	if config.IsHostedProfile(p) {
@@ -71,34 +65,6 @@ func runtimeProfileFindings(cfg config.Config, opts Options) []Finding {
 				Area:     "runtime-profile",
 				Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
 				Summary:  "hosted profile should configure security.network outbound policy",
-			})
-		}
-	}
-	if p == config.ProfileHostedNoExec {
-		if cfg.Hardening.EnableExecShell {
-			findings = append(findings, Finding{
-				ID:       "runtime-profile.hosted_no_exec_shell",
-				Area:     "runtime-profile",
-				Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
-				Summary:  "hosted-no-exec profile: enableExecShell should be false",
-			})
-		}
-		if cfg.Hardening.PrivilegedTools {
-			findings = append(findings, Finding{
-				ID:       "runtime-profile.hosted_no_exec_privileged",
-				Area:     "runtime-profile",
-				Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
-				Summary:  "hosted-no-exec profile: privilegedTools should be false",
-			})
-		}
-	}
-	if p == config.ProfileHostedRemoteSandbox {
-		if cfg.Hardening.EnableExecShell && !cfg.Hardening.Sandbox.Enabled {
-			findings = append(findings, Finding{
-				ID:       "runtime-profile.remote_sandbox_missing",
-				Area:     "runtime-profile",
-				Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
-				Summary:  "hosted-remote-sandbox-only profile: exec requires sandbox to be enabled",
 			})
 		}
 	}

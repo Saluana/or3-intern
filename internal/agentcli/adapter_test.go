@@ -434,7 +434,7 @@ func TestAllRunners_IncludesAllAdapterIDs(t *testing.T) {
 	for _, s := range all {
 		ids[s.ID] = true
 	}
-	expected := []RunnerID{RunnerOpenCode, RunnerCodex, RunnerClaude, RunnerGemini, RunnerOR3}
+	expected := []RunnerID{RunnerOpenCode, RunnerCodex, RunnerClaude, RunnerGemini}
 	for _, id := range expected {
 		if !ids[id] {
 			t.Errorf("AllRunners missing %q", id)

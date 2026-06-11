@@ -10,7 +10,7 @@ func SetEnabled(active bool) {
 	enabled.Store(active)
 }
 
-// Enabled reports whether new legacy subagent jobs and skill run plans should be rejected.
+// Enabled reports whether legacy built-in task paths should be rejected.
 func Enabled() bool {
 	return enabled.Load()
 }

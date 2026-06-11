@@ -34,9 +34,6 @@ type serviceSkillItem struct {
 	RequiredEnv         []string `json:"required_env,omitempty"`
 	ConfigFields        []string `json:"config_fields,omitempty"`
 	APIKeyConfigured    bool     `json:"api_key_configured"`
-	DiagnosticAvailable bool     `json:"diagnostic_available"`
-	DiagnosticStatus    string   `json:"diagnostic_status,omitempty"`
-	DiagnosticManifest  string   `json:"diagnostic_manifest,omitempty"`
 }
 
 type serviceSkillRoot struct {
@@ -208,20 +205,6 @@ func serviceSkillItemFromMeta(skill skills.SkillMeta, cfg config.SkillsConfig) s
 		RequiredEnv:         append([]string{}, skill.Metadata.Requires.Env...),
 		ConfigFields:        append([]string{}, skill.Metadata.Requires.Config...),
 		APIKeyConfigured:    strings.TrimSpace(entry.APIKey) != "",
-		DiagnosticAvailable: skill.DiagnosticAvailable,
-		DiagnosticStatus:    serviceSkillDiagnosticStatus(skill),
-		DiagnosticManifest:  skill.DiagnosticManifestPath,
-	}
-}
-
-func serviceSkillDiagnosticStatus(skill skills.SkillMeta) string {
-	switch {
-	case strings.TrimSpace(skill.DiagnosticError) != "":
-		return "invalid"
-	case skill.DiagnosticAvailable:
-		return "available"
-	default:
-		return "unavailable"
 	}
 }
 

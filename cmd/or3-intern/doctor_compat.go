@@ -26,18 +26,3 @@ func approvalBrokerRequired(cfg config.Config) bool {
 	}
 	return false
 }
-
-func runtimeProfileFindings(cfg config.Config) []doctorFinding {
-	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeAdvisory})
-	items := make([]doctorFinding, 0, len(report.Findings))
-	for _, finding := range report.Findings {
-		if finding.Area == "runtime-profile" {
-			items = append(items, doctorFinding{
-				Level:   string(finding.Severity),
-				Area:    finding.Area,
-				Message: finding.Summary,
-			})
-		}
-	}
-	return items
-}

@@ -15,7 +15,6 @@ type serviceRouteSpec struct {
 
 func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 	return []serviceRouteSpec{
-		{Path: "/internal/v1/turns", Handler: server.handleTurns},
 		{Path: "/internal/v1/jobs", Subtree: true, Handler: server.handleJobs},
 		{Path: "/internal/v1/artifacts", Subtree: true, Handler: server.handleArtifacts},
 		{Path: "/internal/v1/pairing/requests", Subtree: true, Handler: server.handlePairing},

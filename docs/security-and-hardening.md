@@ -107,7 +107,6 @@ Each named profile can control:
 - `allowedTools`
 - `allowedHosts`
 - `writablePaths`
-- `allowSubagents` (legacy persisted config; subagents were removed in runner-first builds)
 
 ### `security.network`
 
@@ -261,7 +260,7 @@ The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude
 
 ### Safe defaults
 
-- The subsystem is **disabled by default** (`agentCLI.enabled: false`).
+- The subsystem is **enabled by default** for new installs (`agentCLI.enabled: true`).
 - The default mode is `safe_edit` — non-interactive edits with each CLI's built-in safety flags. No full-autonomy/yolo behaviour.
 - `sandbox_auto` mode is rejected unless `agentCLI.allowSandboxAuto: true` **and** the isolation is `sandbox_dangerous` (a true sandbox runtime, not the host filesystem).
 - Host-machine runs are strictly limited to `review` (read-only) and `safe_edit` (workspace write only).

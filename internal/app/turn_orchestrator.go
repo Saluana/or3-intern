@@ -295,9 +295,6 @@ var ErrRunnerTurnsDisabled = errors.New("runner turns require agentCLI.enabled a
 // ErrLegacyToolReplayDisabled is returned when built-in tool replay is requested in runner-first mode.
 var ErrLegacyToolReplayDisabled = errors.New("built-in tool replay is disabled in runner-first mode; approve runner permissions or retry the turn")
 
-// ErrLegacyTurnEndpointRemoved is returned when clients call removed direct-turn APIs.
-var ErrLegacyTurnEndpointRemoved = errors.New("POST /internal/v1/turns was removed; use runner-chat endpoints (/internal/v1/runner-chat/turns)")
-
 func runnerTurnMeta(in map[string]any, migrated bool, legacyRunner, triggerKind string) map[string]any {
 	meta := cloneServiceMeta(in)
 	if meta == nil {

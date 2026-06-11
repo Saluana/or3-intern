@@ -53,19 +53,35 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 		"2",
 		"",
 		"",
-		"",
 		"768",
-		"12345",
 		"",
-		"n",
+		"",
 		"router-key",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
 	}, "\n"))
 	var out strings.Builder
 
-	// In runner-first mode, the `tools` section drops every legacy agent
-	// exec field (exec / PATH / exec-allowed-programs) but keeps the
-	// still-active network helpers (Brave key, web proxy). Targeting
-	// just `provider` and `tools` should still complete.
+	// In runner-first mode, the `tools` section drops legacy agent
+	// exec/web-tool fields but keeps still-active workspace/network helpers.
+	// Targeting just `provider` and `tools` should still complete.
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "tools"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
 	}
@@ -245,8 +261,7 @@ func TestRunConfigureWithIO_SecretPromptKeepsExistingValueWithoutLeakingIt(t *te
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	input := strings.NewReader(strings.Join([]string{"", "", "", "", ""}, "\n"))
-	input = strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "n", ""}, "\n"))
+	input := strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""}, "\n"))
 	var out strings.Builder
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
@@ -276,7 +291,7 @@ func TestRunConfigureWithIO_SecretPromptCanClearExistingValue(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	input := strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "", "n", "clear"}, "\n"))
+	input := strings.NewReader(strings.Join([]string{"", "", "", "", "", "", "clear", "", "", "", "", "", "", "", "", "", "", "", "", ""}, "\n"))
 	var out strings.Builder
 	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
@@ -314,8 +329,8 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	cfg := config.Default()
 	sections := map[string][]string{
 		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled", "runtime_consolidation_model"},
-		"context":    {"context_mode", "context_max_input_tokens", "context_dynamic_tools", "context_manager_enabled"},
-		"tools":      {"tools_brave", "tools_web_proxy"},
+		"context":    {"context_mode", "context_retrieval_multiplier", "context_task_card_enabled"},
+		"tools":      {"tools_web_proxy"},
 		"skills":     {"skills_quarantine", "skills_global_dir", "skills_clawhub_registry"},
 		"security":   {"security_secret_store_enabled", "security_network_allowed_hosts"},
 		"hardening":  {"hardening_sandbox_enabled", "hardening_quota_exceeded_action", "hardening_max_tool_calls", "hardening_max_session_tool_calls"},
@@ -344,6 +359,12 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	// fields must NOT appear in any section.
 	hidden := []string{
 		"tools_exec_timeout", "tools_path_append", "tools_exec_allowed_programs",
+		"tools_brave",
+		"provider_model", "provider_vision",
+		"routing_chat_provider", "routing_chat_model", "routing_chat_fallbacks",
+		"routing_agents_provider", "routing_agents_model", "routing_agents_fallbacks",
+		"routing_context_provider", "routing_context_model", "routing_context_fallbacks",
+		"context_max_input_tokens", "context_dynamic_tools", "context_manager_enabled",
 		"hardening_guarded_tools", "hardening_privileged_tools",
 		"hardening_enable_exec_shell", "hardening_exec_allowed_programs",
 		"security_approval_exec_mode", "security_approval_skill_mode",

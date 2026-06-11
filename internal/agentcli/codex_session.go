@@ -24,6 +24,7 @@ type codexSession struct {
 	stdin       io.WriteCloser
 	scanBuf     *bufio.Scanner
 	rpc         *codexRPC
+	stderr      *syncRingBuffer
 	processExit chan struct{}
 	processErr  error
 	startupErr  error
@@ -89,6 +90,7 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 	sess := &codexSession{
 		cmd:         cmd,
 		stdin:       stdin,
+		stderr:      newSyncRingBuffer(DefaultPreviewMaxBytes),
 		processExit: make(chan struct{}),
 		startedAt:   time.Now().UTC(),
 		requestRefs: map[string]NativeRequestRef{},
@@ -97,7 +99,7 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 	// Drain stderr so the process can't block.
 	if stderr != nil {
 		go func() {
-			_, _ = io.Copy(io.Discard, io.LimitReader(stderr, 65536))
+			_, _ = io.Copy(sess.stderr, stderr)
 		}()
 	}
 	// Initialize the RPC bridge before any calls.
@@ -124,6 +126,20 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 		return nil, fmt.Errorf("codex initialized: %w", err)
 	}
 	return sess, nil
+}
+
+func (s *codexSession) ResetStderr() {
+	if s == nil || s.stderr == nil {
+		return
+	}
+	s.stderr.Reset()
+}
+
+func (s *codexSession) StderrPreview() string {
+	if s == nil || s.stderr == nil {
+		return ""
+	}
+	return s.stderr.String()
 }
 
 // Close terminates the underlying process and waits for it to exit.
@@ -204,7 +220,7 @@ func (s *codexSession) StartThread(ctx context.Context, resumeRef string, params
 	if err != nil {
 		return "", err
 	}
-	threadID := firstNonEmpty(asString(resp["threadId"]), asString(resp["thread_id"]))
+	threadID := firstNonEmpty(asString(resp["threadId"]), asString(resp["thread_id"]), asString(mapField(resp, "thread")["id"]))
 	s.mu.Lock()
 	s.threadID = threadID
 	s.mu.Unlock()
@@ -232,7 +248,7 @@ func (s *codexSession) StartTurn(ctx context.Context, threadID string, params ma
 		s.mu.Unlock()
 		return "", err
 	}
-	turnID := firstNonEmpty(asString(resp["turnId"]), asString(resp["turn_id"]))
+	turnID := firstNonEmpty(asString(resp["turnId"]), asString(resp["turn_id"]), asString(mapField(resp, "turn")["id"]))
 	s.mu.Lock()
 	s.turnID = turnID
 	s.mu.Unlock()

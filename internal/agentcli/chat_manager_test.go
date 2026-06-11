@@ -160,6 +160,53 @@ func TestRunnerErrorEnvelopeIsNotFinalText(t *testing.T) {
 	}
 }
 
+func TestRunnerChatWrapperErrorMessageBeatsNestedCodexJSONL(t *testing.T) {
+	raw := `{"assistant_message_id":2636,"error_message":"Reading additional input from stdin...\nfailed to load skill /Users/brendon/.agents/skills/waveapps-accounting/SKILL.md: invalid YAML: mapping values are not allowed in this context at line 2 column 81","final_text":"{\"type\":\"thread.started\",\"thread_id\":\"019eb6e7\"}\n{\"type\":\"turn.completed\",\"status\":\"failed\"}","status":"failed"}`
+	snap := jobs.Snapshot{
+		Status: "failed",
+		Events: []jobs.Event{{
+			Type: "completion",
+			Data: map[string]any{"final_text": raw, "final_text_preview": raw},
+		}},
+	}
+	if got := extractFinalTextFromSnapshot(snap); got != "" {
+		t.Fatalf("final text = %q, want empty", got)
+	}
+	errText := extractErrorFromSnapshot(snap)
+	if !strings.Contains(errText, "failed to load skill") || !strings.Contains(errText, "waveapps-accounting") {
+		t.Fatalf("error = %q, want skill load failure", errText)
+	}
+}
+
+func TestRunnerStructuredNoiseIsNotFinalText(t *testing.T) {
+	raw := `{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.completed","status":"failed"}`
+	snap := jobs.Snapshot{
+		Status: "failed",
+		Events: []jobs.Event{{
+			Type: "completion",
+			Data: map[string]any{"final_text": raw, "final_text_preview": raw},
+		}},
+	}
+	if got := extractFinalTextFromSnapshot(snap); got != "" {
+		t.Fatalf("final text = %q, want empty", got)
+	}
+}
+
+func TestRunnerChatWrapperPlainFinalTextStillDisplays(t *testing.T) {
+	raw := `{"assistant_message_id":2637,"error_message":"","final_text":"Done from Codex.","status":"succeeded"}`
+	snap := jobs.Snapshot{
+		Status: "completed",
+		Events: []jobs.Event{{
+			Type: "completion",
+			Data: map[string]any{"final_text": raw, "final_text_preview": raw},
+		}},
+	}
+	if got := extractFinalTextFromSnapshot(snap); got != "Done from Codex." {
+		t.Fatalf("final text = %q, want wrapped text", got)
+	}
+}
+
 func TestChatManagerUsesFinalPromptWithoutReplayWrapping(t *testing.T) {
 	d := openChatManagerTestDB(t)
 	cm := testChatManager(d)

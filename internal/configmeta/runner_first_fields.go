@@ -16,83 +16,78 @@ type ConfigureFieldRunnerFirst struct {
 // exist on disk for backwards compatibility with users upgrading from
 // the legacy agent, but no settings UI writes to them anymore.
 //
-// `FieldStatusDeprecated` fields are surfaced with a "(legacy)" label
-// and a banner telling the user the setting no longer affects chat
-// behavior — useful for the few users who still want to see what's
-// being phased out.
-//
 // `FieldStatusCompatibility` fields still drive the legacy compat
 // paths (summarization, embeddings, doctor repair) but no longer
 // select the chat model.
 var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 	"provider_model": {
-		Status:      FieldStatusCompatibility,
-		Label:       "Legacy provider default",
-		Description: "Compatibility default for embeddings, summarization, and doctor flows. Active chat and channels use external runners, not this model ID.",
+		Status:      FieldStatusHidden,
+		Label:       "Provider model",
+		Description: "Hidden in runner-first mode. External runners own chat models; summarization and embeddings use role-specific settings.",
 	},
 	"provider_preset": {Status: FieldStatusCompatibility},
 	"provider_temperature": {
 		Status:      FieldStatusCompatibility,
-		Description: "Sampling temperature for legacy provider calls (summarization, embeddings helpers). External runners use their own model settings for chat.",
+		Description: "Sampling temperature for OR3 provider calls such as summarization helpers. External runners use their own model settings.",
 	},
 	"provider_timeout": {
 		Status:      FieldStatusCompatibility,
-		Description: "Timeout for legacy provider calls. External runners use runner-specific timeouts.",
+		Description: "Timeout for OR3 provider calls such as summarization helpers. External runners use runner-specific timeouts.",
 	},
 	"provider_vision": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Image understanding (legacy)",
-		Description: "Deprecated in runner-first mode. External runner attachment handling is not gated by this toggle.",
+		Description: "Hidden in runner-first mode. External runner attachment handling is not gated by this toggle.",
 	},
 	"routing_chat_provider": {
-		Status:      FieldStatusCompatibility,
+		Status:      FieldStatusHidden,
 		Label:       "Chat routing provider (legacy)",
-		Description: "Compatibility routing for legacy built-in chat turns. Runner-first chat uses external runners discovered via agent CLI.",
+		Description: "Hidden in runner-first mode. Runner chat uses external runner configuration.",
 	},
 	"routing_chat_model": {
-		Status:      FieldStatusCompatibility,
+		Status:      FieldStatusHidden,
 		Label:       "Chat routing model (legacy)",
-		Description: "Compatibility routing for legacy built-in chat turns. Does not select the model used by OpenCode or other external runners.",
+		Description: "Hidden in runner-first mode. Runner chat uses external runner configuration.",
 	},
 	"routing_chat_fallbacks": {
-		Status:      FieldStatusCompatibility,
+		Status:      FieldStatusHidden,
 		Label:       "Chat routing fallbacks (legacy)",
-		Description: "Fallback list for legacy built-in chat turns only.",
+		Description: "Hidden in runner-first mode. Runner chat uses external runner configuration.",
 	},
 	"routing_agents_provider": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Agents routing provider (legacy)",
-		Description: "Deprecated in runner-first mode. External runner selection replaces the built-in agent model role.",
+		Description: "Hidden in runner-first mode. External runner selection replaces the built-in agent model role.",
 	},
 	"routing_agents_model": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Agents routing model (legacy)",
-		Description: "Deprecated in runner-first mode. External runners choose their own model.",
+		Description: "Hidden in runner-first mode. External runners choose their own model.",
 	},
 	"routing_agents_fallbacks": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Agents routing fallbacks (legacy)",
-		Description: "Deprecated with the legacy built-in agent model role.",
+		Description: "Hidden in runner-first mode. External runners choose their own model.",
 	},
 	"routing_context_provider": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Context manager provider (legacy)",
-		Description: "Deprecated in runner-first mode. Runner-first chat does not call the context-manager provider client.",
+		Description: "Hidden in runner-first mode. Runner-first chat does not call the context-manager provider client.",
 	},
 	"routing_context_model": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Context manager model (legacy)",
-		Description: "Deprecated in runner-first mode. Memory consolidation uses the summarization role instead.",
+		Description: "Hidden in runner-first mode. Memory consolidation uses the summarization role instead.",
 	},
 	"routing_context_fallbacks": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Context manager fallbacks (legacy)",
-		Description: "Deprecated with the legacy context-manager provider role.",
+		Description: "Hidden in runner-first mode. Memory consolidation uses the summarization role instead.",
 	},
 	"tools_brave": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Brave search API key (legacy)",
-		Description: "Deprecated for model-callable tools in runner-first mode.",
+		Description: "Hidden in runner-first mode. Model-callable web-search tools are gone.",
 	},
 	"tools_enable_exec": {
 		Status:      FieldStatusHidden,
@@ -121,14 +116,14 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Description: "Hidden in runner-first mode. Skill execution moved to runner-owned scripts.",
 	},
 	"context_dynamic_tools": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Dynamic tool exposure (legacy)",
-		Description: "Deprecated: dynamic tool schemas applied only to the legacy built-in loop.",
+		Description: "Hidden in runner-first mode. Dynamic tool schemas applied only to the legacy built-in loop.",
 	},
 	"context_max_input_tokens": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Max input tokens (legacy)",
-		Description: "Deprecated in runner-first mode. External runner context is assembled by runner-specific bootstrap paths.",
+		Description: "Hidden in runner-first mode. External runner context is assembled by runner-specific bootstrap paths.",
 	},
 	"context_task_card_enforce_plan": {
 		Status:      FieldStatusHidden,
@@ -136,27 +131,27 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Description: "Hidden in runner-first mode. Runners plan their own work; the or3-intern task card is gone.",
 	},
 	"context_section_tool_schemas": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Tool schemas in context (legacy)",
-		Description: "Deprecated for runner-first chat; external runners bring their own tool surfaces.",
+		Description: "Hidden in runner-first mode. External runners bring their own tool surfaces.",
 	},
 	"context_manager_enabled": {
-		Status:      FieldStatusDeprecated,
+		Status:      FieldStatusHidden,
 		Label:       "Context manager (legacy)",
-		Description: "Deprecated in runner-first mode. Background memory consolidation uses the summarization path.",
+		Description: "Hidden in runner-first mode. Background memory consolidation uses the summarization path.",
 	},
-	"context_manager_provider":   {Status: FieldStatusDeprecated, Label: "Context manager provider (legacy)"},
-	"context_manager_model":      {Status: FieldStatusDeprecated, Label: "Context manager model (legacy)"},
-	"context_manager_timeout":    {Status: FieldStatusDeprecated, Label: "Context manager timeout (legacy)"},
-	"context_manager_idle_prune": {Status: FieldStatusDeprecated, Label: "Idle prune seconds (legacy)"},
-	"context_manager_max_input":  {Status: FieldStatusDeprecated, Label: "Context manager max input (legacy)"},
-	"context_manager_max_output": {Status: FieldStatusDeprecated, Label: "Context manager max output (legacy)"},
+	"context_manager_provider":   {Status: FieldStatusHidden, Label: "Context manager provider (legacy)"},
+	"context_manager_model":      {Status: FieldStatusHidden, Label: "Context manager model (legacy)"},
+	"context_manager_timeout":    {Status: FieldStatusHidden, Label: "Context manager timeout (legacy)"},
+	"context_manager_idle_prune": {Status: FieldStatusHidden, Label: "Idle prune seconds (legacy)"},
+	"context_manager_max_input":  {Status: FieldStatusHidden, Label: "Context manager max input (legacy)"},
+	"context_manager_max_output": {Status: FieldStatusHidden, Label: "Context manager max output (legacy)"},
 	"context_manager_allow_task_updates": {
-		Status: FieldStatusDeprecated,
+		Status: FieldStatusHidden,
 		Label:  "Allow task updates (legacy)",
 	},
 	"context_manager_allow_stale_propose": {
-		Status: FieldStatusDeprecated,
+		Status: FieldStatusHidden,
 		Label:  "Allow stale proposals (legacy)",
 	},
 	"security_approval_skill_mode": {
@@ -194,10 +189,10 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Label:       "Service tool power (legacy)",
 		Description: "Hidden in runner-first mode. Tool capability is set per-runner.",
 	},
-	"docindex_enabled":   {Status: FieldStatusHidden, Label: "Search workspace files (legacy)", Description: "Hidden in runner-first mode. Runners bring their own file search."},
-	"docindex_roots":     {Status: FieldStatusHidden, Label: "Doc index roots (legacy)"},
-	"docindex_max_files": {Status: FieldStatusHidden, Label: "Doc index max files (legacy)"},
-	"docindex_max_file_bytes": {Status: FieldStatusHidden, Label: "Doc index max file bytes (legacy)"},
+	"docindex_enabled":         {Status: FieldStatusHidden, Label: "Search workspace files (legacy)", Description: "Hidden in runner-first mode. Runners bring their own file search."},
+	"docindex_roots":           {Status: FieldStatusHidden, Label: "Doc index roots (legacy)"},
+	"docindex_max_files":       {Status: FieldStatusHidden, Label: "Doc index max files (legacy)"},
+	"docindex_max_file_bytes":  {Status: FieldStatusHidden, Label: "Doc index max file bytes (legacy)"},
 	"docindex_max_chunks":      {Status: FieldStatusHidden, Label: "Doc index max chunks (legacy)"},
 	"docindex_embed_max_bytes": {Status: FieldStatusHidden, Label: "Doc index embed max bytes (legacy)"},
 	"docindex_refresh_seconds": {Status: FieldStatusHidden, Label: "Doc index refresh seconds (legacy)"},
@@ -234,13 +229,6 @@ func ApplyConfigureFieldCopy(cfg config.Config, key, label, description string) 
 	}
 	status := StatusForConfigureKey(cfg, key)
 	switch status {
-	case FieldStatusDeprecated:
-		if label != "" {
-			label += " (legacy)"
-		}
-		if description != "" {
-			description += " Deprecated in runner-first mode."
-		}
 	case FieldStatusCompatibility:
 		if description != "" {
 			description = "Compatibility only in runner-first mode. " + description

@@ -1277,10 +1277,22 @@ func extractFinalTextFromSnapshot(snap jobs.Snapshot) string {
 			if runnerErrorEnvelopeMessage(v) != "" {
 				continue
 			}
+			if text := runnerReadableFinalText(v); text != "" {
+				return text
+			}
+			if looksStructuredRunnerPayload(v) {
+				continue
+			}
 			return v
 		}
 		if v, ok := ev.Data["final_text_preview"].(string); ok && strings.TrimSpace(v) != "" {
 			if runnerErrorEnvelopeMessage(v) != "" {
+				continue
+			}
+			if text := runnerReadableFinalText(v); text != "" {
+				return text
+			}
+			if looksStructuredRunnerPayload(v) {
 				continue
 			}
 			return v
@@ -1329,11 +1341,88 @@ func runnerErrorEnvelopeMessage(text string) string {
 	if text == "" || (text[0] != '{' && text[0] != '[') {
 		return ""
 	}
-	var value any
-	if err := json.Unmarshal([]byte(text), &value); err != nil {
-		return ""
+	for _, payload := range structuredPayloadCandidates(text) {
+		if msg := runnerErrorEnvelopeMessageValue(payload); msg != "" {
+			return msg
+		}
 	}
-	return extractOpenCodeErrorMessage(value)
+	return ""
+}
+
+func runnerErrorEnvelopeMessageValue(value any) string {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return extractOpenCodeErrorMessage(value)
+	}
+	if msg := extractString(obj["error_message"]); msg != "" {
+		return msg
+	}
+	if msg := extractOpenCodeErrorMessage(obj); msg != "" {
+		return msg
+	}
+	if errText := extractString(obj["error"]); errText != "" && !looksMachineOriented(errText) {
+		return errText
+	}
+	if nested := extractString(obj["final_text"]); nested != "" {
+		if msg := runnerErrorEnvelopeMessage(nested); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+func runnerReadableFinalText(text string) string {
+	for _, payload := range structuredPayloadCandidates(text) {
+		if msg := runnerErrorEnvelopeMessageValue(payload); msg != "" {
+			continue
+		}
+		if obj, ok := payload.(map[string]any); ok {
+			if nested := extractString(obj["final_text"]); nested != "" {
+				if msg := runnerErrorEnvelopeMessage(nested); msg != "" {
+					continue
+				}
+				if text := runnerReadableFinalText(nested); text != "" {
+					return text
+				}
+				if !looksStructuredRunnerPayload(nested) {
+					return nested
+				}
+			}
+		}
+		bestScore := 0
+		bestText := ""
+		for _, runnerID := range []RunnerID{RunnerCodex, RunnerOpenCode, RunnerClaude, RunnerGemini} {
+			score, candidate := extractFinalTextCandidate(runnerID, payload)
+			if strings.TrimSpace(candidate) != "" && score > bestScore {
+				bestScore = score
+				bestText = candidate
+			}
+		}
+		if strings.TrimSpace(bestText) != "" {
+			return strings.TrimSpace(bestText)
+		}
+	}
+	return ""
+}
+
+func looksStructuredRunnerPayload(text string) bool {
+	return len(structuredPayloadCandidates(text)) > 0
+}
+
+func structuredPayloadCandidates(text string) []any {
+	text = strings.TrimSpace(text)
+	if text == "" || (text[0] != '{' && text[0] != '[') {
+		return nil
+	}
+	payloads, _ := decodeStructuredPayloads(text)
+	out := make([]any, 0, len(payloads))
+	for _, raw := range payloads {
+		var value any
+		if err := json.Unmarshal(raw, &value); err == nil {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func previewSnippetClamped(s string, max int) string {

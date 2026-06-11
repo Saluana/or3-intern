@@ -603,6 +603,13 @@ func (m *Manager) tryExecuteNativeRun(ctx context.Context, run db.AgentCLIRun) (
 		out.StderrPreview = codexAuthRefreshFailureMessage(err, out.StderrPreview)
 		return out, true
 	}
+	if RunnerID(run.RunnerID) == RunnerCodex {
+		out.ExitCode = -1
+		if out.StderrPreview == "" {
+			out.StderrPreview = err.Error()
+		}
+		return out, true
+	}
 	if mode == RuntimeModeAuto {
 		payload, _ := json.Marshal(map[string]any{"runtime": "native", "fallback": "cli", "reason": err.Error()})
 		m.persistEvent(run, AgentRunEvent{Type: "warning", TS: time.Now().UTC().Format(time.RFC3339Nano), JobID: run.JobID, RunnerID: run.RunnerID, Payload: payload, Message: err.Error()})

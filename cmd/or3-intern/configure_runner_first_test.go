@@ -23,19 +23,13 @@ func TestFilterConfigureFields_RunnerFirstHidesRunnerToggle(t *testing.T) {
 	}
 }
 
-func TestFilterConfigureFields_RunnerFirstRelabelsChatModel(t *testing.T) {
+func TestFilterConfigureFields_RunnerFirstHidesChatModel(t *testing.T) {
 	cfg := config.Default()
 	cfg.AgentCLI.Enabled = true
 	fields := filterConfigureFields(cfg, []configureField{
 		{Key: "provider_model", Label: "Chat model", Description: "Default chat model for turns."},
 	})
-	if len(fields) != 1 {
-		t.Fatalf("expected 1 field, got %d", len(fields))
-	}
-	if fields[0].Label != "Legacy provider default" {
-		t.Fatalf("label = %q", fields[0].Label)
-	}
-	if fields[0].Status != "compatibility" {
-		t.Fatalf("status = %q", fields[0].Status)
+	if len(fields) != 0 {
+		t.Fatalf("expected runner-first to hide provider_model, got %d", len(fields))
 	}
 }

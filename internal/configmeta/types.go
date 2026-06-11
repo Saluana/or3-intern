@@ -85,7 +85,7 @@ type ConfigFieldMetadata struct {
 	UserIntents      []string         `json:"user_intents,omitempty"`
 	Docs             string           `json:"docs,omitempty"`
 	AdvancedOnly     bool             `json:"advanced_only,omitempty"`
-	// Status is active, deprecated, hidden, or compatibility (runner-first UI hint).
+	// Status is active, hidden, or compatibility (runner-first UI hint).
 	Status string `json:"status,omitempty"`
 }
 

@@ -25,14 +25,14 @@ func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
 		t.Fatalf("expected field cursor 2, got %d", finalModel.fieldCursor)
 	}
 	view := finalModel.View()
-	if !strings.Contains(view, "Field 3/9") {
+	if !strings.Contains(view, "Field 3/20") {
 		t.Fatalf("expected field position hint in view, got %q", view)
 	}
-	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Legacy provider default") {
-		t.Fatalf("expected selected field summary for legacy provider default, got %q", view)
+	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Embedding model") {
+		t.Fatalf("expected selected field summary for embedding model, got %q", view)
 	}
-	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "not this model ID") {
-		t.Fatalf("expected selected field panel to show current value and runner-first help, got %q", view)
+	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "searchable memory") {
+		t.Fatalf("expected selected field panel to show current value and field help, got %q", view)
 	}
 	if !strings.Contains(view, "▶ ") {
 		t.Fatalf("expected visible selection indicator, got %q", view)

@@ -1405,7 +1405,6 @@ func TestServiceConfigureApply_SetsToggleFieldsFromBooleanValues(t *testing.T) {
 	server := &serviceServer{config: cfg, configPath: cfgPath}
 	reqBody := strings.NewReader(`{
 		"changes":[
-			{"section":"provider","field":"provider_vision","op":"set","value":true},
 			{"section":"channels","channel":"telegram","field":"enabled","op":"set","value":true},
 			{"section":"channels","channel":"slack","field":"require_mention","op":"set","value":true}
 		]
@@ -1422,9 +1421,6 @@ func TestServiceConfigureApply_SetsToggleFieldsFromBooleanValues(t *testing.T) {
 	loaded, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
-	}
-	if !loaded.Provider.EnableVision {
-		t.Fatal("expected provider vision toggle to persist true")
 	}
 	if !loaded.Channels.Telegram.Enabled {
 		t.Fatal("expected telegram enabled toggle to persist true")

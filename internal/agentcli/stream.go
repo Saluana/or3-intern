@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -57,6 +58,44 @@ func (r *ringBuffer) String() string {
 		return string(r.buf[:r.pos])
 	}
 	return string(r.buf[r.pos:]) + string(r.buf[:r.pos])
+}
+
+type syncRingBuffer struct {
+	mu sync.Mutex
+	r  *ringBuffer
+}
+
+func newSyncRingBuffer(size int) *syncRingBuffer {
+	return &syncRingBuffer{r: newRingBuffer(size)}
+}
+
+func (r *syncRingBuffer) Write(p []byte) (int, error) {
+	if r == nil || r.r == nil {
+		return len(p), nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.r.Write(p)
+}
+
+func (r *syncRingBuffer) String() string {
+	if r == nil || r.r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.r.String()
+}
+
+func (r *syncRingBuffer) Reset() {
+	if r == nil || r.r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.r.pos = 0
+	r.r.full = false
+	clear(r.r.buf)
 }
 
 func readStream(r io.Reader, stream string, chunkMaxBytes int, seq *int64, collector *outputCollector, onEvent func(AgentRunEvent), outputMode OutputMode) {

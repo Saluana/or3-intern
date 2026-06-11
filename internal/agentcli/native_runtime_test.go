@@ -141,8 +141,39 @@ func TestAddCodexPolicies(t *testing.T) {
 		t.Fatalf("approvalPolicy = %v, want on-request", got)
 	}
 	sandbox, ok := params["sandboxPolicy"].(map[string]any)
-	if !ok || sandbox["mode"] != "workspace-write" {
-		t.Fatalf("sandboxPolicy = %#v, want workspace-write", params["sandboxPolicy"])
+	if !ok || sandbox["type"] != "workspaceWrite" {
+		t.Fatalf("sandboxPolicy = %#v, want workspaceWrite", params["sandboxPolicy"])
+	}
+}
+
+func TestAddCodexPoliciesUsesAppServerSandboxVariants(t *testing.T) {
+	cases := []struct {
+		name      string
+		isolation string
+		wantType  string
+	}{
+		{name: "read only", isolation: string(IsolationHostReadOnly), wantType: "readOnly"},
+		{name: "workspace write", isolation: string(IsolationHostWorkspaceWrite), wantType: "workspaceWrite"},
+		{name: "sandbox write", isolation: string(IsolationSandboxWrite), wantType: "workspaceWrite"},
+		{name: "danger", isolation: string(IsolationSandboxDangerous), wantType: "dangerFullAccess"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]any{}
+			if err := addCodexPolicies(params, db.AgentCLIRun{Mode: string(RunnerModeSafeEdit), Isolation: tc.isolation}); err != nil {
+				t.Fatalf("addCodexPolicies: %v", err)
+			}
+			sandbox, ok := params["sandboxPolicy"].(map[string]any)
+			if !ok {
+				t.Fatalf("sandboxPolicy = %#v, want object", params["sandboxPolicy"])
+			}
+			if got := sandbox["type"]; got != tc.wantType {
+				t.Fatalf("sandbox type = %v, want %s", got, tc.wantType)
+			}
+			if _, ok := sandbox["mode"]; ok {
+				t.Fatalf("sandboxPolicy still uses legacy mode field: %#v", sandbox)
+			}
+		})
 	}
 }
 
@@ -235,6 +266,18 @@ func TestCodexModelListToRunnerModelsMapsReasoning(t *testing.T) {
 	}
 	if !reflect.DeepEqual(model.Reasoning, []string{"low", "high"}) {
 		t.Fatalf("reasoning = %+v", model.Reasoning)
+	}
+}
+
+func TestCodexRPCFinalTextDoesNotDuplicateCompletedAgentMessage(t *testing.T) {
+	rpc := &codexRPC{}
+	rpc.captureNotificationText("item/agentMessage/delta", map[string]any{"delta": "OR3"})
+	rpc.captureNotificationText("item/agentMessage/delta", map[string]any{"delta": "_OK"})
+	rpc.captureNotificationText("item/completed", map[string]any{
+		"item": map[string]any{"type": "agentMessage", "text": "OR3_OK"},
+	})
+	if got := rpc.finalText(); got != "OR3_OK" {
+		t.Fatalf("final text = %q, want OR3_OK", got)
 	}
 }
 
@@ -517,10 +560,28 @@ for line in sys.stdin:
         if attempt == 1:
             send({"id": mid, "error": {"message": "Auth(TokenRefreshFailed(\"Server returned error response: invalid_grant: refresh token invalid\"))"}})
             sys.exit(0)
-        send({"id": mid, "result": {"threadId": "thread-2"}})
+        send({"id": mid, "result": {"thread": {"id": "thread-2"}}})
     elif method == "turn/start":
-        send({"id": mid, "result": {"turnId": "turn-2"}})
-        send({"method": "item/completed", "params": {"text": "OR3_SMOKE_OK"}})
+        params = msg.get("params") or {}
+        if params.get("threadId") != "thread-2":
+            send({"id": mid, "error": {"code": -32600, "message": "invalid thread id: invalid length: expected length 32 for simple format, found 0"}})
+            continue
+        turn_input = params.get("input")
+        if not isinstance(turn_input, list):
+            send({"id": mid, "error": {"code": -32600, "message": "Invalid request: invalid type: string, expected a sequence"}})
+            continue
+        if not turn_input or turn_input[0].get("type") != "text" or turn_input[0].get("text") != "hello":
+            send({"id": mid, "error": {"code": -32600, "message": "Invalid request: invalid text input item"}})
+            continue
+        sandbox_policy = params.get("sandboxPolicy") or {}
+        if sandbox_policy.get("type") != "workspaceWrite":
+            send({"id": mid, "error": {"code": -32600, "message": "Invalid request: missing field type"}})
+            continue
+        if "mode" in sandbox_policy:
+            send({"id": mid, "error": {"code": -32600, "message": "Invalid request: legacy sandbox mode field"}})
+            continue
+        send({"id": mid, "result": {"turn": {"id": "turn-2"}}})
+        send({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "OR3_SMOKE_OK"}}})
         send({"method": "turn/completed", "params": {}})
     elif method == "model/list":
         send({"id": mid, "result": {"models": []}})
@@ -616,6 +677,52 @@ func TestManagerDoesNotFallbackToCLIForCodexAuthRefreshFailure(t *testing.T) {
 	}
 	if !strings.Contains(out.StderrPreview, "Run `codex login`") {
 		t.Fatalf("stderr = %q, want actionable codex login message", out.StderrPreview)
+	}
+}
+
+func TestManagerDoesNotFallbackToCLIForCodexNativeAppServerFailure(t *testing.T) {
+	database := openAgentCLITestDB(t)
+	t.Cleanup(func() { _ = database.Close() })
+	runtime := &fakeRuntime{
+		id:  RunnerCodex,
+		out: ProcessOutput{StderrPreview: "failed to load skill waveapps-accounting: invalid YAML"},
+		err: errors.New("codex app-server turn failed"),
+	}
+	registry := &RunnerRuntimeRegistry{}
+	registry.Register(runtime)
+	manager := &Manager{
+		DB:       database,
+		Jobs:     jobs.NewRegistry(time.Minute, 1024),
+		Runtimes: registry,
+		Cfg:      config.AgentCLIConfig{RuntimeMode: map[string]string{"codex": "auto"}},
+	}
+	meta, _ := json.Marshal(map[string]any{
+		"runner_chat_session_id":        "session_1",
+		"runner_chat_turn_id":           "turn_1",
+		"runner_chat_continuation_mode": string(ContinuationNative),
+		"runner_chat_user_message":      "hello",
+	})
+	out, handled := manager.tryExecuteNativeRun(context.Background(), db.AgentCLIRun{
+		ID:        "run_1",
+		JobID:     "job_1",
+		RunnerID:  string(RunnerCodex),
+		Task:      "hello",
+		Cwd:       t.TempDir(),
+		Mode:      string(RunnerModeSafeEdit),
+		Isolation: string(IsolationHostWorkspaceWrite),
+		MetaJSON:  string(meta),
+	})
+	if !handled {
+		t.Fatal("expected codex app-server failure to be handled without CLI fallback")
+	}
+	if runtime.executeCalls != 1 {
+		t.Fatalf("execute calls = %d, want 1", runtime.executeCalls)
+	}
+	if out.ExitCode != -1 {
+		t.Fatalf("exit code = %d, want -1", out.ExitCode)
+	}
+	if !strings.Contains(out.StderrPreview, "failed to load skill") {
+		t.Fatalf("stderr = %q, want native stderr diagnostic", out.StderrPreview)
 	}
 }
 

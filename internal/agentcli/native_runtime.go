@@ -1135,12 +1135,7 @@ func (r *CodexNativeRuntime) executeOnce(ctx context.Context, req NativeRuntimeE
 		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	approvalRequired := atomic.Bool{}
-	stderrDone := make(chan string, 1)
-	go func() {
-		// Stderr was already drained by startCodexSession; nothing more to
-		// read here. Emit an empty buffer to keep the wait path simple.
-		stderrDone <- ""
-	}()
+	sess.ResetStderr()
 	// Capture notifications and server-issued requests so the chat manager
 	// can render approvals and runtime warnings. Each request is also
 	// stored as a NativeRequestRef for later response.
@@ -1185,7 +1180,7 @@ func (r *CodexNativeRuntime) executeOnce(ctx context.Context, req NativeRuntimeE
 	}
 	threadID, err := sess.StartThread(ctx, "", threadParams)
 	if err != nil {
-		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+		return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(sess.StderrPreview(), err.Error()), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	if req.Chat.NativeSessionRef != "" && req.Chat.ContinuationMode == ContinuationNative {
 		// Try resuming a known thread id; fall back to a fresh start.
@@ -1195,7 +1190,7 @@ func (r *CodexNativeRuntime) executeOnce(ctx context.Context, req NativeRuntimeE
 		}
 	}
 	emitNativeStructured(&seq, req.OnEvent, map[string]any{"type": "thread.started", "thread_id": threadID})
-	turnParams := map[string]any{"threadId": threadID, "input": ChatExecutionInput(req.Chat, req.Run.Task), "cwd": req.Run.Cwd}
+	turnParams := map[string]any{"threadId": threadID, "input": codexTextInput(ChatExecutionInput(req.Chat, req.Run.Task)), "cwd": req.Run.Cwd}
 	selectedModel := firstNonEmpty(req.Run.Model, req.Config.DefaultModels[string(RunnerCodex)])
 	if model := selectedModel; model != "" {
 		turnParams["model"] = model
@@ -1206,34 +1201,27 @@ func (r *CodexNativeRuntime) executeOnce(ctx context.Context, req NativeRuntimeE
 		}
 	}
 	if err := addCodexPolicies(turnParams, req.Run); err != nil {
-		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+		return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(sess.StderrPreview(), err.Error()), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	if permission, ok := runnerPermissionFromMeta(req.Chat.Meta); ok && permission.Access == runnerPermissionAccessWrite {
-		turnParams["writableRoots"] = []string{permission.TargetPath}
+		if sandbox, ok := turnParams["sandboxPolicy"].(map[string]any); ok && sandbox["type"] == "workspaceWrite" {
+			sandbox["writableRoots"] = []string{permission.TargetPath}
+		}
 	}
 	if _, err := sess.StartTurn(ctx, threadID, turnParams); err != nil {
 		if approvalRequired.Load() {
-			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+			return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(sess.StderrPreview(), errNativeApprovalRequired.Error()), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 		}
-		return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
+		return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(sess.StderrPreview(), err.Error()), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	if err := sess.rpc.waitForTurn(ctx); err != nil {
 		if approvalRequired.Load() {
-			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
+			return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(sess.StderrPreview(), errNativeApprovalRequired.Error()), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
 		}
-		stderrText := ""
-		select {
-		case stderrText = <-stderrDone:
-		default:
-		}
-		return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(stderrText, err.Error()), DurationMS: time.Since(started).Milliseconds()}, err
+		return ProcessOutput{ExitCode: -1, StderrPreview: firstNonEmpty(sess.StderrPreview(), err.Error()), DurationMS: time.Since(started).Milliseconds()}, err
 	}
 	final := sess.rpc.finalText()
-	stderrText := ""
-	select {
-	case stderrText = <-stderrDone:
-	default:
-	}
+	stderrText := sess.StderrPreview()
 	return ProcessOutput{ExitCode: 0, StdoutPreview: final, StderrPreview: stderrText, FinalTextPreview: final, DurationMS: time.Since(started).Milliseconds()}, nil
 }
 
@@ -1253,6 +1241,10 @@ func codexAuthRefreshFailureMessage(err error, stderr string) string {
 		detail = "Codex could not refresh its ChatGPT login token."
 	}
 	return "Codex authentication failed while refreshing its login token. Run `codex login` to reconnect Codex, then retry the runner turn. Detail: " + detail
+}
+
+func codexTextInput(text string) []map[string]any {
+	return []map[string]any{{"type": "text", "text": text}}
 }
 
 func errorString(err error) string {
@@ -1402,11 +1394,11 @@ func addCodexPolicies(params map[string]any, run db.AgentCLIRun) error {
 	}
 	switch RunIsolation(run.Isolation) {
 	case IsolationHostReadOnly:
-		params["sandboxPolicy"] = map[string]any{"mode": "read-only"}
+		params["sandboxPolicy"] = map[string]any{"type": "readOnly"}
 	case IsolationHostWorkspaceWrite, IsolationSandboxWrite:
-		params["sandboxPolicy"] = map[string]any{"mode": "workspace-write"}
+		params["sandboxPolicy"] = map[string]any{"type": "workspaceWrite"}
 	case IsolationSandboxDangerous:
-		params["sandboxPolicy"] = map[string]any{"mode": "danger-full-access"}
+		params["sandboxPolicy"] = map[string]any{"type": "dangerFullAccess"}
 	default:
 		return fmt.Errorf("unsupported isolation %q", run.Isolation)
 	}
@@ -1475,11 +1467,7 @@ func (c *codexRPC) start(onNotification func(string, map[string]any), onRequest 
 			if notificationHandler != nil && method != "" {
 				notificationHandler(method, params)
 			}
-			if delta := extractText(params); delta != "" {
-				c.textMu.Lock()
-				c.text.WriteString(delta)
-				c.textMu.Unlock()
-			}
+			c.captureNotificationText(method, params)
 			if method == "turn/completed" || method == "turn/completed/notification" {
 				c.turnComplete.Store(true)
 				select {
@@ -1593,6 +1581,36 @@ func (c *codexRPC) finalText() string {
 	return c.text.String()
 }
 
+func (c *codexRPC) captureNotificationText(method string, params map[string]any) {
+	if c == nil {
+		return
+	}
+	if delta := codexAssistantMessageDelta(method, params); delta != "" {
+		c.textMu.Lock()
+		c.text.WriteString(delta)
+		c.textMu.Unlock()
+		return
+	}
+	completed := codexCompletedAgentMessageText(method, params)
+	if completed == "" {
+		return
+	}
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+	current := c.text.String()
+	switch {
+	case current == "":
+		c.text.WriteString(completed)
+	case current == completed:
+		return
+	case strings.HasPrefix(completed, current):
+		c.text.Reset()
+		c.text.WriteString(completed)
+	case !strings.Contains(current, completed):
+		c.text.WriteString(completed)
+	}
+}
+
 func (c *codexRPC) close() {
 	_ = c.stdin.Close()
 	<-c.done
@@ -1644,6 +1662,24 @@ func extractText(value any) string {
 		return out.String()
 	}
 	return ""
+}
+
+func codexAssistantMessageDelta(method string, params map[string]any) string {
+	if strings.EqualFold(strings.TrimSpace(method), "item/agentMessage/delta") {
+		return extractDeltaString(firstNonNil(params["delta"], params["text"], params["content"]))
+	}
+	return ""
+}
+
+func codexCompletedAgentMessageText(method string, params map[string]any) string {
+	if !strings.EqualFold(strings.TrimSpace(method), "item/completed") {
+		return ""
+	}
+	item := mapField(params, "item")
+	if codexItemType(item) != runtimeItemAssistantMessage {
+		return ""
+	}
+	return extractDeltaString(firstNonNil(item["text"], item["content"], item["message"]))
 }
 
 func extractOpenCodeVisibleText(value any) string {

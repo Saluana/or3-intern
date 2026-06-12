@@ -166,7 +166,6 @@ type ContextConfig struct {
 	Retrieval ContextRetrievalConfig `json:"retrieval"`
 	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
 	Pressure ContextPressureConfig `json:"pressure"`
-	Tools    ContextToolConfig     `json:"tools"`
 	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
 	Artifacts ContextArtifactConfig `json:"artifacts"`
 	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
@@ -197,10 +196,6 @@ type ContextPressureConfig struct {
 
 type ContextArtifactConfig struct {
 	SummaryMaxChars int `json:"summaryMaxChars"`
-}
-
-type ContextToolConfig struct {
-	DynamicExpose bool `json:"dynamicExpose"`
 }
 
 type ContextTaskCardConfig struct {

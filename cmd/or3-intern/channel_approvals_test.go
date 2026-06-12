@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,7 +12,6 @@ import (
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/tools"
 )
 
 type captureChannel struct {
@@ -134,118 +132,6 @@ func TestChannelApprovalHandler_AllowsLinkedScopeSessionMismatchWhenRequesterMat
 	}
 	if !channelApprovalRequestMatchesEvent(req, ev) {
 		t.Fatal("expected requester/channel target match to allow linked scope session mismatch")
-	}
-}
-
-func TestServiceServer_DeliverApprovedResumeCompletionPreservesThread(t *testing.T) {
-	manager := rootchannels.NewManager()
-	channel := &captureChannel{name: "slack"}
-	if err := manager.Register(channel); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	server := &serviceServer{channelDeliverer: manager}
-	server.deliverApprovedResumeCompletion(context.Background(), db.ApprovalRequestRecord{
-		ID: 7,
-		RequesterContextJSON: approval.MarshalRequesterContext(approval.RequesterContext{
-			Channel:     "slack",
-			SessionKey:  "slack:C1:U1",
-			From:        "U1",
-			ReplyTarget: "C1",
-			ReplyMeta:   map[string]any{"thread_ts": "123.45"},
-		}),
-	}, "done")
-	if channel.lastText() != "done" {
-		t.Fatalf("expected delivered completion, got %q", channel.lastText())
-	}
-	channel.mu.Lock()
-	defer channel.mu.Unlock()
-	if len(channel.targets) != 1 || channel.targets[0] != "C1" {
-		t.Fatalf("expected Slack channel target C1, got %#v", channel.targets)
-	}
-	if len(channel.metas) != 1 || channel.metas[0]["thread_ts"] != "123.45" {
-		t.Fatalf("expected thread metadata, got %#v", channel.metas)
-	}
-}
-
-func TestChannelApprovalHandler_DeliversChainedApprovalAfterResume(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Exec.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	ctx := approval.ContextWithRequesterContext(context.Background(), approval.RequesterContext{
-		Channel:     "telegram",
-		SessionKey:  "telegram:123",
-		From:        "456",
-		ReplyTarget: "123",
-		ReplyMeta:   map[string]any{"reply_to_message_id": int64(23)},
-	})
-	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{ExecutablePath: "/bin/echo", Argv: []string{"next"}, WorkingDir: "/tmp", ToolName: "exec", SessionID: "telegram:123"})
-	if err != nil {
-		t.Fatalf("EvaluateExec: %v", err)
-	}
-	manager := rootchannels.NewManager()
-	channel := &captureChannel{name: "telegram"}
-	if err := manager.Register(channel); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	handler := &channelApprovalHandler{Broker: broker, Channels: manager}
-	delivered := handler.deliverResumeApprovalRequired(context.Background(), db.ApprovalRequestRecord{}, &tools.ApprovalRequiredError{ToolName: "exec", RequestID: decision.RequestID})
-	if !delivered {
-		t.Fatal("expected chained approval prompt to be delivered")
-	}
-	text := channel.lastText()
-	if !strings.Contains(text, "One more approval is needed") || !strings.Contains(text, "/approve "+strconvFormatInt(decision.RequestID)) {
-		t.Fatalf("expected chained approval instructions, got %q", text)
-	}
-	channel.mu.Lock()
-	defer channel.mu.Unlock()
-	if len(channel.targets) != 1 || channel.targets[0] != "123" {
-		t.Fatalf("expected Telegram chat target 123, got %#v", channel.targets)
-	}
-	if len(channel.metas) != 1 || fmt.Sprint(channel.metas[0]["reply_to_message_id"]) != "23" {
-		t.Fatalf("expected Telegram reply metadata, got %#v", channel.metas)
-	}
-}
-
-func TestServiceServer_DeliverApprovedResumeApprovalRequiredPreservesThread(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Exec.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	ctx := approval.ContextWithRequesterContext(context.Background(), approval.RequesterContext{
-		Channel:     "slack",
-		SessionKey:  "slack:C1:U1",
-		From:        "U1",
-		ReplyTarget: "C1",
-		ReplyMeta:   map[string]any{"thread_ts": "123.45"},
-	})
-	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{ExecutablePath: "/bin/echo", Argv: []string{"next"}, WorkingDir: "/tmp", ToolName: "exec", SessionID: "slack:C1:U1"})
-	if err != nil {
-		t.Fatalf("EvaluateExec: %v", err)
-	}
-	manager := rootchannels.NewManager()
-	channel := &captureChannel{name: "slack"}
-	if err := manager.Register(channel); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	server := &serviceServer{broker: broker, channelDeliverer: manager}
-	delivered := server.deliverApprovedResumeApprovalRequired(context.Background(), db.ApprovalRequestRecord{}, &tools.ApprovalRequiredError{ToolName: "exec", RequestID: decision.RequestID})
-	if !delivered {
-		t.Fatal("expected chained approval prompt to be delivered")
-	}
-	text := channel.lastText()
-	if !strings.Contains(text, "One more approval is needed") || !strings.Contains(text, "/approve "+strconvFormatInt(decision.RequestID)) {
-		t.Fatalf("expected chained approval instructions, got %q", text)
-	}
-	channel.mu.Lock()
-	defer channel.mu.Unlock()
-	if len(channel.targets) != 1 || channel.targets[0] != "C1" {
-		t.Fatalf("expected Slack channel target C1, got %#v", channel.targets)
-	}
-	if len(channel.metas) != 1 || channel.metas[0]["thread_ts"] != "123.45" {
-		t.Fatalf("expected thread metadata, got %#v", channel.metas)
 	}
 }
 

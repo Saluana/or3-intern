@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	MilestoneSetupComplete   = "setup_complete"
-	MilestonePairingComplete = "pairing_complete"
+	MilestoneSetupComplete     = "setup_complete"
+	MilestonePairingComplete   = "pairing_complete"
 	MilestoneFirstChatComplete = "first_chat_complete"
 )
 

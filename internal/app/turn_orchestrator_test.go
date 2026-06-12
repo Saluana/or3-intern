@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
+	"or3-intern/internal/runners"
 )
 
 func TestRunnerTurnRequestFromBusEvent(t *testing.T) {
@@ -37,7 +37,7 @@ func TestRunnerTurnRequestFromBusEvent(t *testing.T) {
 func TestRunnerTurnRequestFromBusEventDefaultRunner(t *testing.T) {
 	cfg := config.Default()
 	req := RunnerTurnRequestFromBusEvent(cfg, bus.Event{Type: bus.EventUserMessage, SessionKey: "cli:default", Message: "hi"})
-	if req.RunnerID != string(agentcli.RunnerOpenCode) {
+	if req.RunnerID != string(runners.RunnerOpenCode) {
 		t.Fatalf("expected default runner opencode, got %q", req.RunnerID)
 	}
 }

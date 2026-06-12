@@ -4,13 +4,12 @@ import (
 	"encoding/json"
 	"strings"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 // BuildChatRunner formats one runner's chat-discovery response item.
-// `info` is detection metadata for the runner (or zero-value for or3-intern).
-func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, defaultModel, defaultMode, defaultIsolation, defaultCwd string) map[string]any {
+func BuildChatRunner(spec runners.RunnerSpec, info runners.RunnerInfo, defaultModel, defaultMode, defaultIsolation, defaultCwd string) map[string]any {
 	id := info.ID
 	if id == "" {
 		id = string(spec.ID)
@@ -164,11 +163,11 @@ func BuildRunnerChatTurnResponse(t db.RunnerChatTurn) map[string]any {
 	if v := strings.TrimSpace(t.ErrorMessage); v != "" {
 		out["error"] = v
 	}
-	if v := strings.TrimSpace(t.AgentCLIRunID); v != "" {
-		out["agent_cli_run_id"] = v
+	if v := strings.TrimSpace(t.RunnerRunID); v != "" {
+		out["runner_run_id"] = v
 	}
-	if v := strings.TrimSpace(t.AgentCLIJobID); v != "" {
-		out["agent_cli_job_id"] = v
+	if v := strings.TrimSpace(t.RunnerJobID); v != "" {
+		out["runner_job_id"] = v
 	}
 	if t.UserMessageID > 0 {
 		out["user_message_id"] = t.UserMessageID
@@ -226,21 +225,12 @@ func BuildRunnerChatEventListResponse(events []db.RunnerChatEvent) map[string]an
 
 // BuildChatSessionMetaResponse converts a chat_session_meta row.
 func BuildChatSessionMetaResponse(m db.ChatSessionMeta) map[string]any {
-	runnerID := m.RunnerID
-	runnerLabel := m.RunnerLabel
-	var legacyRunnerID string
-	if agentcli.IsLegacyRunnerID(runnerID) {
-		legacyRunnerID = runnerID
-		if strings.TrimSpace(runnerLabel) == "" {
-			runnerLabel = agentcli.LegacyRunnerLabel
-		}
-	}
 	out := map[string]any{
 		"session_key":              m.SessionKey,
 		"host_id":                  m.HostID,
 		"title":                    m.Title,
-		"runner_id":                runnerID,
-		"runner_label":             runnerLabel,
+		"runner_id":                m.RunnerID,
+		"runner_label":             m.RunnerLabel,
 		"runner_chat_session_id":   m.RunnerChatSessionID,
 		"runner_continuation_mode": m.RunnerContinuationMode,
 		"runner_model":             m.RunnerModel,
@@ -257,10 +247,6 @@ func BuildChatSessionMetaResponse(m db.ChatSessionMeta) map[string]any {
 		"archived":                 m.Archived,
 		"created_at":               m.CreatedAt,
 		"updated_at":               m.UpdatedAt,
-	}
-	if legacyRunnerID != "" {
-		out["legacy_runner_id"] = legacyRunnerID
-		out["runner_selectable"] = false
 	}
 	return out
 }

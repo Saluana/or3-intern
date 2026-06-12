@@ -260,9 +260,9 @@ The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude
 
 ### Safe defaults
 
-- The subsystem is **enabled by default** for new installs (`agentCLI.enabled: true`).
+- The subsystem is **always active**. Runner orchestration is the only supported execution path — there is no `runners.enabled` config switch.
 - The default mode is `safe_edit` — non-interactive edits with each CLI's built-in safety flags. No full-autonomy/yolo behaviour.
-- `sandbox_auto` mode is rejected unless `agentCLI.allowSandboxAuto: true` **and** the isolation is `sandbox_dangerous` (a true sandbox runtime, not the host filesystem).
+- `sandbox_auto` mode is rejected unless `runners.allowSandboxAuto: true` **and** the isolation is `sandbox_dangerous` (a true sandbox runtime, not the host filesystem).
 - Host-machine runs are strictly limited to `review` (read-only) and `safe_edit` (workspace write only).
 
 ### Environment sanitization
@@ -293,7 +293,7 @@ The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude
 
 - Event chunks are capped at 16 KiB before publication or storage.
 - Stdout and stderr previews retain at most 64 KiB each (ring buffer).
-- Persisted full output is bounded by `agentCLI.maxPersistedOutputBytes` (default 10 MiB).
+- Persisted full output is bounded by `runners.maxPersistedOutputBytes` (default 10 MiB).
 - Truncation is explicit: `output_truncated` events record dropped byte counts.
 
 ## Doctor command

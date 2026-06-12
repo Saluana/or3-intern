@@ -11,12 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/runnerfirst"
+	"or3-intern/internal/runners"
 )
 
 type serviceConfigureChange struct {
@@ -99,8 +98,6 @@ func serviceConfigureFieldDefinition(cfg config.Config, section, channel, fieldK
 	switch section {
 	case "channels":
 		fields = buildChannelFields(cfg, channel)
-	case "mcp":
-		fields = buildMCPFields(cfg, channel)
 	default:
 		fields = buildSectionFields(cfg, section, "")
 	}
@@ -329,7 +326,6 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 		return
 	}
 	s.config = next
-	runnerfirst.SetEnabled(next.RunnerFirst())
 	s.applyLiveRunnerConfig(next)
 	if s.controlSvc != nil {
 		s.controlSvc.Config = next
@@ -347,44 +343,28 @@ func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
 	if s == nil {
 		return
 	}
-	if !next.AgentCLI.Enabled {
-		s.turnOrchestrator = nil
-		s.chatManager = nil
-		if s.agentCLIManager != nil {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := s.agentCLIManager.Stop(stopCtx); err != nil {
-				log.Printf("agent CLI manager: stop after live disable failed: %v", err)
-			}
-			cancel()
-		}
-		s.agentCLIManager = nil
-		if s.appSvc != nil {
-			s.appSvc.SetRunnerRuntime(nil, nil)
-		}
-		return
-	}
-	if s.agentCLIManager == nil {
+	if s.runnerManager == nil {
 		database := s.runtimeDB()
-		s.agentCLIManager = buildRuntimeAgentCLIManager(next, database, s.jobs)
-		if err := startRuntimeAgentCLIManager(context.Background(), s.agentCLIManager); err != nil {
+		s.runnerManager = buildRuntimeAgentCLIManager(next, database, s.jobs)
+		if err := startRuntimeAgentCLIManager(context.Background(), s.runnerManager); err != nil {
 			log.Printf("agent CLI manager: live start failed: %v", err)
-			s.agentCLIManager = nil
+			s.runnerManager = nil
 		}
 	} else {
-		s.agentCLIManager.ApplyConfig(
-			next.AgentCLI,
-			next.AgentCLI.MaxConcurrent,
-			next.AgentCLI.MaxQueued,
-			time.Duration(next.AgentCLI.DefaultTimeoutSeconds)*time.Second,
-			agentcli.OpenCodeExternalDirectoriesFromConfig(next),
+		s.runnerManager.ApplyConfig(
+			next.Runners,
+			next.Runners.MaxConcurrent,
+			next.Runners.MaxQueued,
+			time.Duration(next.Runners.DefaultTimeoutSeconds)*time.Second,
+			runners.OpenCodeExternalDirectoriesFromConfig(next),
 			allowedRoot(next),
 		)
 	}
 	database := s.runtimeDB()
-	s.chatManager = buildRuntimeChatManager(next, database, s.agentCLIManager, s.jobs, s.broker)
+	s.chatManager = buildRuntimeChatManager(next, database, s.runnerManager, s.jobs, s.broker)
 	s.turnOrchestrator = s.rebuildRunnerTurnOrchestrator(next, database)
 	if s.appSvc != nil {
-		s.appSvc.SetRunnerRuntime(s.agentCLIManager, s.turnOrchestrator)
+		s.appSvc.SetRunnerRuntime(s.runnerManager, s.turnOrchestrator)
 	}
 }
 

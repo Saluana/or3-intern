@@ -17,17 +17,17 @@ artifacts, and persistence.
 1. Ingress (CLI, service, channel, cron bus event, heartbeat, webhook, file-watch)
 2. `RunnerTurnOrchestrator` resolves runner, session, and trigger metadata
 3. Bounded prompt built with trusted bootstrap blocks, memory/doc snippets, and delimited user task text
-4. `ChatManager.StartTurn` persists messages and enqueues `agent_cli_runs`
-5. Runner events stream to `agent_cli_events` / `runner_chat_events` and mirror into `messages`
+4. `ChatManager.StartTurn` persists messages and enqueues `runner_runs`
+5. Runner events stream to `runner_events` / `runner_chat_events` and mirror into `messages`
 6. Memory consolidation continues from `messages` (including `transport=runner_chat`)
 
 ## Default runner
 
-New configs enable `agentCLI.enabled=true` and `agentCLI.defaultRunner=opencode`.
+New configs set `runners.default=opencode`. Runner orchestration is always active — there is no `runners.enabled` toggle.
 
-- Override with `OR3_AGENT_CLI_DEFAULT_RUNNER`
+- Override with `OR3_RUNNERS_DEFAULT`
 - `or3-intern health` / `doctor` report install/auth readiness for the default runner
-- Legacy `or3-intern` runner IDs in session metadata remain readable but are not selectable; new turns migrate to the configured default when agent CLI is enabled
+- Legacy `or3-intern` runner IDs in session metadata remain readable but are not selectable; new turns migrate to the configured default runner
 
 ## Trusted prompt shape
 
@@ -49,8 +49,8 @@ OR3 caches safe fragments (bootstrap file content by mtime/size, runner detectio
 
 | Kind | Behavior |
 | --- | --- |
-| `agent_cli_run` | Direct runner background job via `agentcli.Manager` |
-| Legacy scheduled chat payloads (`agent_turn` / `system_event`) | Published to the bus for runner chat when `agentCLI.enabled`; rejected with migration guidance when disabled |
+| `runner_run` | Direct runner background job via `agentcli.Manager` |
+| Legacy scheduled chat payloads (`agent_turn` / `system_event`) | Published to the bus for runner chat; if not yet migrated, rejected with guidance to recreate as `runner_run` |
 
 ## Related documentation
 

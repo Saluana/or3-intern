@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/json"
 	"strings"
 )
 
@@ -118,7 +119,7 @@ type Config struct {
 	ConsolidationMaxMessages         int            `json:"consolidationMaxMessages"`
 	ConsolidationMaxInputChars       int            `json:"consolidationMaxInputChars"`
 	ConsolidationAsyncTimeoutSeconds int            `json:"consolidationAsyncTimeoutSeconds"`
-	AgentCLI                         AgentCLIConfig `json:"agentCLI"`
+	Runners                          RunnersConfig  `json:"runners"`
 	RuntimeProfile                   RuntimeProfile `json:"runtimeProfile"`
 	// CompatEnvWarnings collects non-fatal migration hints from env overrides (not persisted).
 	CompatEnvWarnings []string `json:"-"`
@@ -136,7 +137,6 @@ type Config struct {
 	Providers           ProviderProfiles        `json:"providers,omitempty"`
 	ModelRouting        ModelRoutingConfig      `json:"modelRouting,omitempty"`
 	FavoriteModels      FavoriteModelsConfig    `json:"favoriteModels,omitempty"`
-	Tools               ToolsConfig             `json:"tools"`
 	Hardening           HardeningConfig         `json:"hardening"`
 	Cron                CronConfig              `json:"cron"`
 	Service             ServiceConfig           `json:"service"`
@@ -176,14 +176,12 @@ type ContextConfig struct {
 type ContextSectionBudgets struct {
 	SystemCore       int `json:"systemCore"`
 	SoulIdentity     int `json:"soulIdentity"`
-	ToolPolicy       int `json:"toolPolicy"`
 	ActiveTaskCard   int `json:"activeTaskCard"`
 	PinnedMemory     int `json:"pinnedMemory"`
 	MemoryDigest     int `json:"memoryDigest"`
 	RecentHistory    int `json:"recentHistory"`
 	RetrievedMemory  int `json:"retrievedMemory"`
 	WorkspaceContext int `json:"workspaceContext"`
-	ToolSchemas      int `json:"toolSchemas"`
 }
 
 type ContextRetrievalConfig struct {
@@ -197,17 +195,16 @@ type ContextPressureConfig struct {
 	EmergencyPercent int `json:"emergencyPercent"`
 }
 
-type ContextToolConfig struct {
-	DynamicExpose bool `json:"dynamicExpose"`
-}
-
 type ContextArtifactConfig struct {
 	SummaryMaxChars int `json:"summaryMaxChars"`
 }
 
+type ContextToolConfig struct {
+	DynamicExpose bool `json:"dynamicExpose"`
+}
+
 type ContextTaskCardConfig struct {
 	Enabled      bool `json:"enabled"`
-	EnforcePlan  bool `json:"enforcePlan"`
 	MaxRefs      int  `json:"maxRefs"`
 	MaxPlanItems int  `json:"maxPlanItems"`
 }
@@ -235,7 +232,6 @@ type HardeningConfig struct {
 	// Deprecated: retained for config compatibility; runner-first runtime does not consume it.
 	MetadataScanner MetadataScannerConfig `json:"metadataScanner"`
 	Sandbox         SandboxConfig         `json:"sandbox"`
-	Quotas          HardeningQuotaConfig  `json:"quotas"`
 }
 
 type MetadataScannerConfig struct {
@@ -249,25 +245,6 @@ type SandboxConfig struct {
 	BubblewrapPath string   `json:"bubblewrapPath"`
 	AllowNetwork   bool     `json:"allowNetwork"`
 	WritablePaths  []string `json:"writablePaths"`
-}
-
-type QuotaExceededAction string
-
-const (
-	QuotaExceededActionAsk  QuotaExceededAction = "ask"
-	QuotaExceededActionFail QuotaExceededAction = "fail"
-)
-
-// HardeningQuotaConfig limits how many sensitive tool calls a message and session may issue.
-type HardeningQuotaConfig struct {
-	Enabled             bool                `json:"enabled"`
-	ExceededAction      QuotaExceededAction `json:"exceededAction"`
-	MaxToolCalls        int                 `json:"maxToolCalls"`
-	MaxExecCalls        int                 `json:"maxExecCalls"`
-	MaxWebCalls         int                 `json:"maxWebCalls"`
-	MaxSessionToolCalls int                 `json:"maxSessionToolCalls"`
-	MaxSessionExecCalls int                 `json:"maxSessionExecCalls"`
-	MaxSessionWebCalls  int                 `json:"maxSessionWebCalls"`
 }
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
@@ -350,18 +327,6 @@ func (cfg Config) ProviderProfile(provider string) (ProviderProfileConfig, bool)
 	return profile, ok
 }
 
-// ToolsConfig configures built-in tools and external MCP server integrations.
-type ToolsConfig struct {
-	BraveAPIKey         string                     `json:"braveApiKey" secret:"true"`
-	WebProxy            string                     `json:"webProxy"`
-	EnableExec          bool                       `json:"enableExec"`
-	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
-	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
-	AllowFullFileRead   bool                       `json:"allowFullFileRead"`
-	PathAppend          string                     `json:"pathAppend"`
-	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
-}
-
 // CronConfig enables persistence for scheduled background jobs.
 type CronConfig struct {
 	Enabled   bool   `json:"enabled"`
@@ -370,30 +335,6 @@ type CronConfig struct {
 
 // DefaultHeartbeatSessionKey is the fallback session key used by heartbeat turns.
 const DefaultHeartbeatSessionKey = "heartbeat:default"
-
-const (
-	// DefaultMCPTransport is the default transport for MCP servers.
-	DefaultMCPTransport = "stdio"
-	// DefaultMCPConnectTimeoutSeconds is the default MCP dial timeout.
-	DefaultMCPConnectTimeoutSeconds = 10
-	// DefaultMCPToolTimeoutSeconds is the default timeout for a single MCP tool call.
-	DefaultMCPToolTimeoutSeconds = 30
-)
-
-// MCPServerConfig describes one configured MCP server entry.
-type MCPServerConfig struct {
-	Enabled               bool              `json:"enabled"`
-	Transport             string            `json:"transport"`
-	Command               string            `json:"command"`
-	Args                  []string          `json:"args"`
-	Env                   map[string]string `json:"env" secret:"true"`
-	ChildEnvAllowlist     []string          `json:"childEnvAllowlist"`
-	URL                   string            `json:"url"`
-	Headers               map[string]string `json:"headers" secret:"true"`
-	ToolTimeoutSeconds    int               `json:"toolTimeoutSeconds"`
-	ConnectTimeoutSeconds int               `json:"connectTimeoutSeconds"`
-	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
-}
 
 // HeartbeatConfig controls recurring heartbeat turns sourced from a tasks file.
 type HeartbeatConfig struct {
@@ -420,11 +361,10 @@ type ServiceConfig struct {
 	MutationRateLimitPerMinute        int      `json:"mutationRateLimitPerMinute"`
 }
 
-// AgentCLIConfig controls the external agent CLI delegation subsystem.
-type AgentCLIConfig struct {
-	Enabled                    bool              `json:"enabled"`
-	DefaultRunner              string            `json:"defaultRunner,omitempty"`
-	DisabledRunners            []string          `json:"disabledRunners"`
+// RunnersConfig controls the external runner delegation subsystem.
+type RunnersConfig struct {
+	Default                    string            `json:"default,omitempty"`
+	Disabled                   []string          `json:"disabledRunners"`
 	RuntimeMode                map[string]string `json:"runtimeMode,omitempty"`
 	DefaultModels              map[string]string `json:"defaultModels,omitempty"`
 	NativeServerURLs           map[string]string `json:"nativeServerUrls,omitempty"`
@@ -718,12 +658,43 @@ type AccessProfilesConfig struct {
 	Profiles map[string]AccessProfileConfig `json:"profiles"`
 }
 
-// AccessProfileConfig limits tools, hosts, and write paths for a profile.
+// AccessProfileConfig declares the documented capability, host, and write-path
+// surface area for a profile. None of these fields are enforced by
+// or3-intern itself: the runner enforces its own tool and execution policy,
+// and these fields are surfaced as metadata for visibility into the profile
+// the operator has declared.
 type AccessProfileConfig struct {
 	MaxCapability string   `json:"maxCapability"`
-	AllowedTools  []string `json:"allowedTools"`
+	DeclaredTools []string `json:"declaredTools"`
 	AllowedHosts  []string `json:"allowedHosts"`
 	WritablePaths []string `json:"writablePaths"`
+}
+
+// UnmarshalJSON accepts both the new `declaredTools` JSON key and the legacy
+// `allowedTools` key (used before the runner-only cleanup). If both are
+// present, `declaredTools` wins; if only `allowedTools` is present, the value
+// is migrated into `DeclaredTools` so old configs continue to load cleanly.
+func (p *AccessProfileConfig) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		MaxCapability string   `json:"maxCapability"`
+		DeclaredTools []string `json:"declaredTools"`
+		LegacyAllowed []string `json:"allowedTools"`
+		AllowedHosts  []string `json:"allowedHosts"`
+		WritablePaths []string `json:"writablePaths"`
+	}
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	tools := a.DeclaredTools
+	if len(tools) == 0 {
+		tools = a.LegacyAllowed
+	}
+	p.MaxCapability = a.MaxCapability
+	p.DeclaredTools = tools
+	p.AllowedHosts = a.AllowedHosts
+	p.WritablePaths = a.WritablePaths
+	return nil
 }
 
 // NetworkPolicyConfig defines outbound network restrictions.

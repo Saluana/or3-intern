@@ -5,32 +5,32 @@ import "fmt"
 // Bounds for memory and document-index settings. Values outside these ranges are
 // clamped on load and rejected by config edit APIs.
 const (
-	MinMemoryRetrieveLimit            = 1
-	MaxMemoryRetrieveLimit            = 64
-	MinVectorSearchK                  = 1
-	MaxVectorSearchK                  = 64
-	MinFTSSearchK                     = 1
-	MaxFTSSearchK                     = 64
-	MinVectorScanLimit                = 100
-	MaxVectorScanLimit                = 10000
-	MinHistoryMaxMessages             = 1
-	MaxHistoryMaxMessages             = 500
-	MinConsolidationWindowSize        = 1
-	MaxConsolidationWindowSize        = 200
-	MinConsolidationMaxMessages       = 1
-	MaxConsolidationMaxMessages       = 500
-	MinConsolidationMaxInputChars     = 1000
-	MaxConsolidationMaxInputChars     = 200000
-	MinDocIndexMaxFiles               = 1
-	MaxDocIndexMaxFiles               = 5000
-	MinDocIndexMaxFileBytes           = 1024
-	MaxDocIndexMaxFileBytes           = 4 * 1024 * 1024
-	MinDocIndexMaxChunks              = 1
-	MaxDocIndexMaxChunks              = 20000
-	MinDocIndexEmbedMaxBytes          = 0
-	MaxDocIndexEmbedMaxBytes          = 64 * 1024
-	MinDocIndexRetrieveLimit          = 1
-	MaxDocIndexRetrieveLimit          = 50
+	MinMemoryRetrieveLimit        = 1
+	MaxMemoryRetrieveLimit        = 64
+	MinVectorSearchK              = 1
+	MaxVectorSearchK              = 64
+	MinFTSSearchK                 = 1
+	MaxFTSSearchK                 = 64
+	MinVectorScanLimit            = 100
+	MaxVectorScanLimit            = 10000
+	MinHistoryMaxMessages         = 1
+	MaxHistoryMaxMessages         = 500
+	MinConsolidationWindowSize    = 1
+	MaxConsolidationWindowSize    = 200
+	MinConsolidationMaxMessages   = 1
+	MaxConsolidationMaxMessages   = 500
+	MinConsolidationMaxInputChars = 1000
+	MaxConsolidationMaxInputChars = 200000
+	MinDocIndexMaxFiles           = 1
+	MaxDocIndexMaxFiles           = 5000
+	MinDocIndexMaxFileBytes       = 1024
+	MaxDocIndexMaxFileBytes       = 4 * 1024 * 1024
+	MinDocIndexMaxChunks          = 1
+	MaxDocIndexMaxChunks          = 20000
+	MinDocIndexEmbedMaxBytes      = 0
+	MaxDocIndexEmbedMaxBytes      = 64 * 1024
+	MinDocIndexRetrieveLimit      = 1
+	MaxDocIndexRetrieveLimit      = 50
 )
 
 func clampMemoryAndDocConfig(cfg *Config) {
@@ -69,19 +69,19 @@ func ValidateMemoryIntField(field string, value int) error {
 		min, max int
 	}
 	limits := map[string]bounds{
-		"runtime_memory_retrieve":            {MinMemoryRetrieveLimit, MaxMemoryRetrieveLimit},
-		"runtime_vector_k":                   {MinVectorSearchK, MaxVectorSearchK},
-		"runtime_fts_k":                      {MinFTSSearchK, MaxFTSSearchK},
-		"runtime_vector_scan_limit":          {MinVectorScanLimit, MaxVectorScanLimit},
-		"runtime_history_max":                {MinHistoryMaxMessages, MaxHistoryMaxMessages},
-		"runtime_consolidation_window":       {MinConsolidationWindowSize, MaxConsolidationWindowSize},
-		"runtime_consolidation_max_messages": {MinConsolidationMaxMessages, MaxConsolidationMaxMessages},
+		"runtime_memory_retrieve":               {MinMemoryRetrieveLimit, MaxMemoryRetrieveLimit},
+		"runtime_vector_k":                      {MinVectorSearchK, MaxVectorSearchK},
+		"runtime_fts_k":                         {MinFTSSearchK, MaxFTSSearchK},
+		"runtime_vector_scan_limit":             {MinVectorScanLimit, MaxVectorScanLimit},
+		"runtime_history_max":                   {MinHistoryMaxMessages, MaxHistoryMaxMessages},
+		"runtime_consolidation_window":          {MinConsolidationWindowSize, MaxConsolidationWindowSize},
+		"runtime_consolidation_max_messages":    {MinConsolidationMaxMessages, MaxConsolidationMaxMessages},
 		"runtime_consolidation_max_input_chars": {MinConsolidationMaxInputChars, MaxConsolidationMaxInputChars},
-		"docindex_max_files":                 {MinDocIndexMaxFiles, MaxDocIndexMaxFiles},
-		"docindex_max_file_bytes":            {MinDocIndexMaxFileBytes, MaxDocIndexMaxFileBytes},
-		"docindex_max_chunks":                {MinDocIndexMaxChunks, MaxDocIndexMaxChunks},
-		"docindex_embed_max_bytes":           {MinDocIndexEmbedMaxBytes, MaxDocIndexEmbedMaxBytes},
-		"docindex_retrieve_limit":            {MinDocIndexRetrieveLimit, MaxDocIndexRetrieveLimit},
+		"docindex_max_files":                    {MinDocIndexMaxFiles, MaxDocIndexMaxFiles},
+		"docindex_max_file_bytes":               {MinDocIndexMaxFileBytes, MaxDocIndexMaxFileBytes},
+		"docindex_max_chunks":                   {MinDocIndexMaxChunks, MaxDocIndexMaxChunks},
+		"docindex_embed_max_bytes":              {MinDocIndexEmbedMaxBytes, MaxDocIndexEmbedMaxBytes},
+		"docindex_retrieve_limit":               {MinDocIndexRetrieveLimit, MaxDocIndexRetrieveLimit},
 	}
 	limit, ok := limits[field]
 	if !ok {

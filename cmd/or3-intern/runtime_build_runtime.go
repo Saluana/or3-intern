@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
@@ -15,6 +14,7 @@ import (
 	"or3-intern/internal/jobs"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/runners"
 )
 
 func buildServiceJobRegistry(cmd string) *jobs.Registry {
@@ -24,46 +24,43 @@ func buildServiceJobRegistry(cmd string) *jobs.Registry {
 	return jobs.NewRegistry(0, 0)
 }
 
-func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *jobs.Registry) *agentcli.Manager {
-	if !cfg.AgentCLI.Enabled {
-		return nil
-	}
-	return &agentcli.Manager{
+func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *jobs.Registry) *runners.Manager {
+	return &runners.Manager{
 		DB:                          database,
 		Jobs:                        jobs,
-		Cfg:                         cfg.AgentCLI,
-		OpenCodeExternalDirectories: agentcli.OpenCodeExternalDirectoriesFromConfig(cfg),
-		MaxConcurrent:               cfg.AgentCLI.MaxConcurrent,
-		MaxQueued:                   cfg.AgentCLI.MaxQueued,
-		TaskTimeout:                 time.Duration(cfg.AgentCLI.DefaultTimeoutSeconds) * time.Second,
-		Registry:                    agentcli.NewDefaultRegistry(),
-		Runtimes:                    agentcli.NewDefaultRuntimeRegistry(),
+		Cfg:                         cfg.Runners,
+		OpenCodeExternalDirectories: runners.OpenCodeExternalDirectoriesFromConfig(cfg),
+		MaxConcurrent:               cfg.Runners.MaxConcurrent,
+		MaxQueued:                   cfg.Runners.MaxQueued,
+		TaskTimeout:                 time.Duration(cfg.Runners.DefaultTimeoutSeconds) * time.Second,
+		Registry:                    runners.NewDefaultRegistry(),
+		Runtimes:                    runners.NewDefaultRuntimeRegistry(),
 		RestrictDir:                 allowedRoot(cfg),
 	}
 }
 
-func startRuntimeAgentCLIManager(ctx context.Context, manager *agentcli.Manager) error {
+func startRuntimeAgentCLIManager(ctx context.Context, manager *runners.Manager) error {
 	if manager == nil {
 		return nil
 	}
 	return manager.Start(ctx)
 }
 
-func buildRuntimeCronService(cfg config.Config, events *bus.Bus, agentCLIManager *agentcli.Manager, turnOrchestrator *app.RunnerTurnOrchestrator) *cron.Service {
+func buildRuntimeCronService(cfg config.Config, events *bus.Bus, runnerManager *runners.Manager, turnOrchestrator *app.RunnerTurnOrchestrator) *cron.Service {
 	if !cfg.Cron.Enabled {
 		return nil
 	}
-	return cron.New(cfg.Cron.StorePath, cronrunner.NewWithPreparer(events, cfg.DefaultSessionKey, agentCLIManager, turnOrchestrator, cfg.AgentCLI.Enabled))
+	return cron.New(cfg.Cron.StorePath, cronrunner.NewWithPreparer(events, cfg.DefaultSessionKey, runnerManager, turnOrchestrator))
 }
 
-func buildRuntimeChatManager(cfg config.Config, database *db.DB, manager *agentcli.Manager, jobs *jobs.Registry, broker *approval.Broker) *agentcli.ChatManager {
+func buildRuntimeChatManager(cfg config.Config, database *db.DB, manager *runners.Manager, jobs *jobs.Registry, broker *approval.Broker) *runners.ChatManager {
 	if manager == nil || database == nil {
 		return nil
 	}
-	return &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs, Broker: broker}
+	return &runners.ChatManager{DB: database, Manager: manager, Jobs: jobs, Broker: broker}
 }
 
-func buildRunnerTurnOrchestrator(cfg config.Config, chatManager *agentcli.ChatManager, database *db.DB, mem *memory.Retriever, docs *memory.DocRetriever, embed *providers.Client) *app.RunnerTurnOrchestrator {
+func buildRunnerTurnOrchestrator(cfg config.Config, chatManager *runners.ChatManager, database *db.DB, mem *memory.Retriever, docs *memory.DocRetriever, embed *providers.Client) *app.RunnerTurnOrchestrator {
 	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)
 	deps := app.RunnerContextDeps{
 		DB:               database,
@@ -76,7 +73,7 @@ func buildRunnerTurnOrchestrator(cfg config.Config, chatManager *agentcli.ChatMa
 		FTSK:             cfg.FTSK,
 		TopK:             cfg.MemoryRetrieve,
 		DocLimit:         cfg.DocIndex.RetrieveLimit,
-		Cache:            agentcli.NewRunnerContextCache(0),
+		Cache:            runners.NewRunnerContextCache(0),
 	}
 	return app.NewRunnerTurnOrchestrator(cfg, chatManager, app.LoadRunnerBootstrapContext(cfg), deps)
 }

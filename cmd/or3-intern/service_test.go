@@ -23,9 +23,7 @@ import (
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/runnerfirst"
 	"or3-intern/internal/security"
 	"or3-intern/internal/skills"
 	"or3-intern/internal/streaming"
@@ -34,25 +32,6 @@ import (
 
 type serviceTestTool struct {
 	name string
-}
-
-// disableRunnerFirstForLegacyServiceTests isolates legacy built-in task/skill-plan tests
-// from parallel package tests that toggle the process-wide runner-first gate.
-func disableRunnerFirstForLegacyServiceTests(t *testing.T) {
-	t.Helper()
-	previous := runnerfirst.Enabled()
-	runnerfirst.SetEnabled(false)
-	t.Cleanup(func() { runnerfirst.SetEnabled(previous) })
-}
-
-type fakeServiceMCPTestManager struct {
-	connectErr error
-	closeErr   error
-	status     map[string]mcp.ServerStatus
-}
-
-func (m *fakeServiceMCPTestManager) Connect(context.Context) error {
-	return m.connectErr
 }
 
 func TestServiceServerEffectiveServiceProfileNameUsesServiceChannel(t *testing.T) {
@@ -67,14 +46,6 @@ func TestServiceServerEffectiveServiceProfileNameUsesServiceChannel(t *testing.T
 	if got := server.effectiveServiceProfileName("operator"); got != "operator" {
 		t.Fatalf("expected explicit profile to win, got %q", got)
 	}
-}
-
-func (m *fakeServiceMCPTestManager) Close() error {
-	return m.closeErr
-}
-
-func (m *fakeServiceMCPTestManager) ServerStatus() map[string]mcp.ServerStatus {
-	return m.status
 }
 
 func (t serviceTestTool) Name() string               { return t.name }
@@ -431,7 +402,7 @@ func TestValidateServiceAuthorization(t *testing.T) {
 func TestValidateServiceAuthorizationBoundRejectsReplayAndBindingMismatch(t *testing.T) {
 	secret := strings.Repeat("s", 32)
 	now := time.Unix(1_700_000_000, 0)
-	binding := serviceTokenBinding{Method: http.MethodPost, Path: "/internal/v1/agent-runs"}
+	binding := serviceTokenBinding{Method: http.MethodPost, Path: "/internal/v1/runner-runs"}
 	token, err := issueServiceBearerTokenBound(secret, now.Add(-time.Minute), binding)
 	if err != nil {
 		t.Fatalf("issue bound token: %v", err)
@@ -964,7 +935,7 @@ func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequ
 		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/agent-runs", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/runner-runs", nil)
 	req.RemoteAddr = "100.64.0.42:54321"
 	req.Header.Set("Origin", "http://100.64.0.42:3060")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -990,7 +961,7 @@ func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback
 		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/agent-runs", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/runner-runs", nil)
 	req.RemoteAddr = "100.64.0.42:54321"
 	req.Header.Set("Origin", "http://100.64.0.42:3060")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -1007,7 +978,7 @@ func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback
 }
 
 func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/agent-runs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/runner-runs", nil)
 	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
 	rec := httptest.NewRecorder()
 
@@ -1315,8 +1286,6 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	reqBody := strings.NewReader(`{
 		"changes":[
 			{"section":"provider","field":"provider_model","op":"set","value":"gpt-4.1"},
-			{"section":"tools","field":"tools_enable_exec","op":"set","value":true},
-			{"section":"tools","field":"tools_exec_timeout","op":"set","value":45},
 			{"section":"service","field":"service_max_capability","op":"set","value":"guarded"},
 			{"section":"service","field":"service_enabled","op":"toggle"},
 			{"section":"channels","channel":"slack","field":"access","op":"choose","value":"allowlist"}
@@ -1343,12 +1312,6 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	}
 	if !loaded.Service.Enabled {
 		t.Fatal("expected service_enabled toggle to set true")
-	}
-	if !loaded.Tools.EnableExec {
-		t.Fatal("expected tools_enable_exec boolean set to enable exec")
-	}
-	if loaded.Tools.ExecTimeoutSeconds != 45 {
-		t.Fatalf("expected numeric exec timeout update, got %d", loaded.Tools.ExecTimeoutSeconds)
 	}
 	if loaded.Service.MaxCapability != "guarded" {
 		t.Fatalf("expected service max capability guarded, got %q", loaded.Service.MaxCapability)
@@ -1430,167 +1393,6 @@ func TestServiceConfigureApply_SetsToggleFieldsFromBooleanValues(t *testing.T) {
 	}
 }
 
-func TestServiceMCPServers_CRUDAndAuth(t *testing.T) {
-	clearConfigEnvForTest(t)
-	cfg := config.Default()
-	cfg.Service.SharedSecretRole = approval.RoleOperator
-	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Save(cfgPath, cfg); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
-	secret := strings.Repeat("m", 32)
-	server := &serviceServer{config: cfg, configPath: cfgPath}
-	httpServer := newServiceTestHTTPServer(t, secret, server)
-	defer httpServer.Close()
-
-	unauthResp, err := httpServer.Client().Get(httpServer.URL + "/internal/v1/mcp/servers")
-	if err != nil {
-		t.Fatalf("unauth GET: %v", err)
-	}
-	unauthResp.Body.Close()
-	if unauthResp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected unauthenticated MCP list to be rejected, got %d", unauthResp.StatusCode)
-	}
-
-	create := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
-		"name":"local",
-		"config":{"enabled":true,"transport":"stdio","command":"mcp-local","args":["--demo"],"env":{"API_KEY":"secret-env"},"headers":{"Authorization":"Bearer secret-header"},"connectTimeoutSeconds":5,"toolTimeoutSeconds":7}
-	}`)
-	createResp, err := httpServer.Client().Do(create)
-	if err != nil {
-		t.Fatalf("create MCP server: %v", err)
-	}
-	defer createResp.Body.Close()
-	if createResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected create 200, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
-	}
-	created := mustDecodeJSONBody(t, createResp.Body)
-	if created["restartRequired"] != true {
-		t.Fatalf("expected restartRequired response, got %#v", created)
-	}
-
-	list := mustServiceRequest(t, httpServer, secret, http.MethodGet, "/internal/v1/mcp/servers", "")
-	listResp, err := httpServer.Client().Do(list)
-	if err != nil {
-		t.Fatalf("list MCP servers: %v", err)
-	}
-	defer listResp.Body.Close()
-	if listResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected list 200, got %d (%s)", listResp.StatusCode, mustReadBody(t, listResp.Body))
-	}
-	listed := mustDecodeJSONBody(t, listResp.Body)
-	items, _ := listed["servers"].([]any)
-	if len(items) != 1 {
-		t.Fatalf("expected one server, got %#v", listed)
-	}
-	listedServer, _ := items[0].(map[string]any)
-	listedConfig, _ := listedServer["config"].(map[string]any)
-	listedEnv, _ := listedConfig["env"].(map[string]any)
-	listedHeaders, _ := listedConfig["headers"].(map[string]any)
-	if listedEnv["API_KEY"] != serviceMCPRedactedValue || listedHeaders["Authorization"] != serviceMCPRedactedValue {
-		t.Fatalf("expected MCP secrets to be redacted, got env=%#v headers=%#v", listedEnv, listedHeaders)
-	}
-
-	loaded, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("Load config after create: %v", err)
-	}
-	if loaded.Tools.MCPServers["local"].Command != "mcp-local" {
-		t.Fatalf("expected persisted MCP config, got %#v", loaded.Tools.MCPServers)
-	}
-	if loaded.Tools.MCPServers["local"].Env["API_KEY"] != "secret-env" || loaded.Tools.MCPServers["local"].Headers["Authorization"] != "Bearer secret-header" {
-		t.Fatalf("expected persisted MCP secrets to remain unredacted, got %#v", loaded.Tools.MCPServers["local"])
-	}
-
-	update := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
-		"name":"local",
-		"config":{"enabled":true,"transport":"stdio","command":"mcp-local","args":["--demo","--updated"],"env":{"API_KEY":"configured"},"headers":{"Authorization":"configured"},"connectTimeoutSeconds":5,"toolTimeoutSeconds":7}
-	}`)
-	updateResp, err := httpServer.Client().Do(update)
-	if err != nil {
-		t.Fatalf("update MCP server: %v", err)
-	}
-	defer updateResp.Body.Close()
-	if updateResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected update 200, got %d (%s)", updateResp.StatusCode, mustReadBody(t, updateResp.Body))
-	}
-	loaded, err = config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("Load config after update: %v", err)
-	}
-	if loaded.Tools.MCPServers["local"].Env["API_KEY"] != "secret-env" || loaded.Tools.MCPServers["local"].Headers["Authorization"] != "Bearer secret-header" {
-		t.Fatalf("expected redacted MCP secrets to preserve previous values, got %#v", loaded.Tools.MCPServers["local"])
-	}
-
-	del := mustServiceRequest(t, httpServer, secret, http.MethodDelete, "/internal/v1/mcp/servers/local", "")
-	delResp, err := httpServer.Client().Do(del)
-	if err != nil {
-		t.Fatalf("delete MCP server: %v", err)
-	}
-	defer delResp.Body.Close()
-	if delResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected delete 200, got %d (%s)", delResp.StatusCode, mustReadBody(t, delResp.Body))
-	}
-	loaded, err = config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("Load config after delete: %v", err)
-	}
-	if _, ok := loaded.Tools.MCPServers["local"]; ok {
-		t.Fatalf("expected MCP server to be deleted, got %#v", loaded.Tools.MCPServers)
-	}
-}
-
-func TestServiceMCPServers_ValidationAndTestEndpoint(t *testing.T) {
-	cfg := config.Default()
-	cfg.Service.SharedSecretRole = approval.RoleOperator
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"local": {Enabled: true, Transport: "stdio", Command: "mcp-local"},
-	}
-	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Save(cfgPath, cfg); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
-	secret := strings.Repeat("n", 32)
-	server := &serviceServer{
-		config:     cfg,
-		configPath: cfgPath,
-		mcpTestManagerFactory: func(map[string]config.MCPServerConfig) serviceMCPTestManager {
-			return &fakeServiceMCPTestManager{status: map[string]mcp.ServerStatus{
-				"local": {Connected: true, ToolCount: 1, Tools: []string{"mcp_local_echo"}},
-			}}
-		},
-	}
-	httpServer := newServiceTestHTTPServer(t, secret, server)
-	defer httpServer.Close()
-
-	invalid := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers", `{
-		"name":"bad",
-		"config":{"enabled":true,"transport":"streamableHttp","url":"http://example.com/mcp"}
-	}`)
-	invalidResp, err := httpServer.Client().Do(invalid)
-	if err != nil {
-		t.Fatalf("invalid create: %v", err)
-	}
-	defer invalidResp.Body.Close()
-	if invalidResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected invalid create 400, got %d (%s)", invalidResp.StatusCode, mustReadBody(t, invalidResp.Body))
-	}
-
-	testReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, "/internal/v1/mcp/servers/local/test", `{}`)
-	testResp, err := httpServer.Client().Do(testReq)
-	if err != nil {
-		t.Fatalf("test MCP server: %v", err)
-	}
-	defer testResp.Body.Close()
-	if testResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected test 200, got %d (%s)", testResp.StatusCode, mustReadBody(t, testResp.Body))
-	}
-	result := mustDecodeJSONBody(t, testResp.Body)
-	if result["ok"] != true || result["toolCount"].(float64) != 1 {
-		t.Fatalf("unexpected test result: %#v", result)
-	}
-}
-
 func TestServiceCron_CRUDAndRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cron.Enabled = true
@@ -1609,7 +1411,7 @@ func TestServiceCron_CRUDAndRun(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
 		"name":"Morning summary",
 		"schedule":{"kind":"every","every_ms":3600000},
-		"payload":{"kind":"agent_cli_run","session_key":"cron:test","agent_run":{"runner_id":"opencode","task":"Summarize overnight changes"}}
+		"payload":{"kind":"runner_run","session_key":"cron:test","agent_run":{"runner_id":"opencode","task":"Summarize overnight changes"}}
 	}`))
 	createReq = createReq.WithContext(context.WithValue(createReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
 	createRec := httptest.NewRecorder()
@@ -1671,7 +1473,7 @@ func TestServiceCron_CRUDAndRun(t *testing.T) {
 	}
 }
 
-func TestServiceCron_AgentCLIRunPayloadCRUDAndRun(t *testing.T) {
+func TestServiceCron_RunnerRunPayloadCRUDAndRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cron.Enabled = true
 	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
@@ -1690,7 +1492,7 @@ func TestServiceCron_AgentCLIRunPayloadCRUDAndRun(t *testing.T) {
 		"name":"Weekly external review",
 		"schedule":{"kind":"every","every_ms":3600000},
 		"payload":{
-			"kind":"agent_cli_run",
+			"kind":"runner_run",
 			"session_key":"cron:agents",
 			"agent_run":{"runner_id":"codex","task":"review the repo"}
 		}
@@ -1706,10 +1508,10 @@ func TestServiceCron_AgentCLIRunPayloadCRUDAndRun(t *testing.T) {
 	jobID := jobBody["id"].(string)
 	payload := jobBody["payload"].(map[string]any)
 	agentRun := payload["agent_run"].(map[string]any)
-	if agentRun["mode"] != cron.DefaultAgentCLICronMode {
+	if agentRun["mode"] != cron.DefaultRunnerRunCronMode {
 		t.Fatalf("expected review default, got %#v", agentRun)
 	}
-	if agentRun["isolation"] != cron.DefaultAgentCLICronIsolation {
+	if agentRun["isolation"] != cron.DefaultRunnerRunCronIsolation {
 		t.Fatalf("expected host_readonly default, got %#v", agentRun)
 	}
 
@@ -1760,7 +1562,7 @@ func TestServiceCron_RunDisabledWithoutForceReportsSkipped(t *testing.T) {
 		Enabled:  false,
 		Schedule: cron.CronSchedule{Kind: cron.KindEvery, EveryMS: 3600000},
 		Payload: cron.CronPayload{
-			Kind:     cron.PayloadAgentCLIRun,
+			Kind:     cron.PayloadRunnerRun,
 			AgentRun: &cron.CronAgentRunPayload{RunnerID: "opencode", Task: "skip me"},
 		},
 	}); err != nil {
@@ -1785,7 +1587,7 @@ func TestServiceCron_RunDisabledWithoutForceReportsSkipped(t *testing.T) {
 	}
 }
 
-func TestServiceCron_AgentCLIRunPayloadValidation(t *testing.T) {
+func TestServiceCron_RunnerRunPayloadValidation(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cron.Enabled = true
 	cfg.Cron.StorePath = filepath.Join(t.TempDir(), "cron.json")
@@ -1801,7 +1603,7 @@ func TestServiceCron_AgentCLIRunPayloadValidation(t *testing.T) {
 	createReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
 		"name":"Bad external review",
 		"schedule":{"kind":"every","every_ms":3600000},
-		"payload":{"kind":"agent_cli_run","agent_run":{"task":"review the repo"}}
+		"payload":{"kind":"runner_run","agent_run":{"task":"review the repo"}}
 	}`))
 	createReq = createReq.WithContext(context.WithValue(createReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
 	createRec := httptest.NewRecorder()
@@ -1813,7 +1615,7 @@ func TestServiceCron_AgentCLIRunPayloadValidation(t *testing.T) {
 	unknownReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs", strings.NewReader(`{
 		"name":"Bad external review",
 		"schedule":{"kind":"every","every_ms":3600000},
-		"payload":{"kind":"agent_cli_run","agent_run":{"runner_id":"opencode","task":"hello"},"surprise":true}
+		"payload":{"kind":"runner_run","agent_run":{"runner_id":"opencode","task":"hello"},"surprise":true}
 	}`))
 	unknownReq = unknownReq.WithContext(context.WithValue(unknownReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
 	unknownRec := httptest.NewRecorder()
@@ -2028,7 +1830,6 @@ func TestServiceServer_AbortTurnJob(t *testing.T) {
 }
 
 func TestServiceAbortJob_Matrix(t *testing.T) {
-	disableRunnerFirstForLegacyServiceTests(t)
 	database, cleanup := openServiceTestDB(t)
 	defer cleanup()
 	jobReg := jobs.NewRegistry(time.Minute, 32)
@@ -2542,7 +2343,7 @@ func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	}
 }
 
-func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testing.T) {
+func TestServiceApprovals_Approve_ReturnsSuccessWithoutResumeJob(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
 	})
@@ -2553,7 +2354,7 @@ func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testin
 		Argv:           []string{"hello"},
 		WorkingDir:     "/tmp",
 		ToolName:       "exec",
-		SessionID:      "sess-approval-resume",
+		SessionID:      "sess-approval-no-resume",
 	})
 	if err != nil {
 		t.Fatalf("EvaluateExec: %v", err)
@@ -2579,25 +2380,17 @@ func TestServiceApprovals_Approve_StartsResumeJobWhenBlockedTurnExists(t *testin
 	}
 	defer approveResp.Body.Close()
 	if approveResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
+		t.Fatalf("expected approval 200, got %d (%s)", approveResp.StatusCode, approveResp.Body)
 	}
 	payload := mustDecodeJSONBody(t, approveResp.Body)
-	resumeJobID, _ := payload["resume_job_id"].(string)
-	if strings.TrimSpace(resumeJobID) == "" {
-		t.Fatalf("expected resume_job_id in response, got %#v", payload)
+	if payload["request_id"] == nil {
+		t.Fatalf("expected request_id in response, got %#v", payload)
 	}
-	if payload["session_key"] != "sess-approval-resume" {
-		t.Fatalf("expected session_key for resume job routing, got %#v", payload)
+	if _, hasResume := payload["resume_job_id"]; hasResume {
+		t.Fatalf("expected no resume_job_id in response, got %#v", payload)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	snapshot, ok := server.jobs.Wait(ctx, resumeJobID)
-	if !ok {
-		t.Fatalf("expected resume job %q to complete", resumeJobID)
-	}
-	if snapshot.Status != "failed" && snapshot.Status != "completed" {
-		t.Fatalf("expected terminal resume job after legacy replay disable, got %#v", snapshot)
+	if payload["session_key"] != "sess-approval-no-resume" {
+		t.Fatalf("expected session_key, got %#v", payload)
 	}
 }
 
@@ -3021,7 +2814,6 @@ func TestServiceAppBootstrapRoute_SharedSecretWarnsAboutLimitedExec(t *testing.T
 	cfg := config.Default()
 	cfg.Service.Secret = strings.Repeat("e", 32)
 	cfg.Service.SharedSecretRole = approval.RoleServiceClient
-	cfg.Tools.EnableExec = true
 	server := &serviceServer{config: cfg, jobs: jobs.NewRegistry(time.Minute, 32)}
 	httpServer := newServiceTestHTTPServer(t, cfg.Service.Secret, server)
 	defer httpServer.Close()
@@ -3458,7 +3250,6 @@ func hostedNoExecBaseConfig() config.Config {
 
 func TestRunServiceCommandWithBrokerOptions_AllowsUnsafeDevOverride(t *testing.T) {
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = false
 	cfg.Service.Secret = strings.Repeat("x", 32)
 	cfg.Service.Listen = "127.0.0.1:0"
 	cfg.Service.MaxCapability = "guarded"

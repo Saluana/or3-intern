@@ -86,12 +86,6 @@ func TestRunSecretsCommand_MigrateConfigUpdatesConfigAndStoresSecret(t *testing.
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.Default()
 	cfg.Provider.APIKey = "plain-provider-key"
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"demo.server": {
-			Headers: map[string]string{"Authorization": "Bearer plain"},
-			Env:     map[string]string{"API_TOKEN": "plain-token"},
-		},
-	}
 	if err := config.Save(configPath, cfg); err != nil {
 		t.Fatalf("Save config: %v", err)
 	}
@@ -108,13 +102,6 @@ func TestRunSecretsCommand_MigrateConfigUpdatesConfigAndStoresSecret(t *testing.
 	}
 	if updated.Provider.APIKey != "secret:provider-api-key" {
 		t.Fatalf("expected provider API key ref, got %q", updated.Provider.APIKey)
-	}
-	server := updated.Tools.MCPServers["demo.server"]
-	if server.Headers["Authorization"] != "secret:mcp-demo.server-header-Authorization" {
-		t.Fatalf("expected MCP header ref, got %#v", server.Headers)
-	}
-	if server.Env["API_TOKEN"] != "secret:mcp-demo.server-env-API_TOKEN" {
-		t.Fatalf("expected MCP env ref, got %#v", server.Env)
 	}
 	value, ok, err := mgr.Get(ctx, "provider-api-key")
 	if err != nil {

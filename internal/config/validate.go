@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
@@ -152,66 +151,6 @@ func requiresChannelAllowlist(policy InboundPolicy, openAccess bool, hasAllowlis
 		return false
 	default:
 		return !openAccess && !hasAllowlist
-	}
-}
-
-func validateMCPServers(servers map[string]MCPServerConfig) error {
-	for name, server := range servers {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			return errors.New("tools.mcpServers contains an empty server name")
-		}
-		if !server.Enabled {
-			continue
-		}
-		switch server.Transport {
-		case "stdio":
-			if server.Command == "" {
-				return errors.New("tools.mcpServers." + name + ": stdio transport requires command")
-			}
-		case "sse", "streamablehttp":
-			if err := validateMCPHTTPURL(name, server); err != nil {
-				return err
-			}
-		default:
-			return errors.New("tools.mcpServers." + name + ": unsupported transport " + strconv.Quote(server.Transport))
-		}
-	}
-	return nil
-}
-
-// ValidateMCPServers validates an MCP server map before persisting user edits.
-func ValidateMCPServers(servers map[string]MCPServerConfig) error {
-	return validateMCPServers(servers)
-}
-
-func validateMCPHTTPURL(name string, server MCPServerConfig) error {
-	if server.URL == "" {
-		return errors.New("tools.mcpServers." + name + ": transport " + strconv.Quote(server.Transport) + " requires url")
-	}
-	u, err := url.Parse(server.URL)
-	if err != nil {
-		return errors.New("tools.mcpServers." + name + ": invalid url")
-	}
-	if u.User != nil {
-		return errors.New("tools.mcpServers." + name + ": url must not embed credentials")
-	}
-	if u.Host == "" {
-		return errors.New("tools.mcpServers." + name + ": url must include host")
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return nil
-	case "http":
-		if !server.AllowInsecureHTTP {
-			return errors.New("tools.mcpServers." + name + ": insecure http requires allowInsecureHttp=true")
-		}
-		if !isLoopbackHost(u.Hostname()) {
-			return errors.New("tools.mcpServers." + name + ": insecure http is limited to localhost or loopback hosts")
-		}
-		return nil
-	default:
-		return errors.New("tools.mcpServers." + name + ": url scheme must be https or http")
 	}
 }
 
@@ -458,14 +397,6 @@ func ValidateProfile(cfg Config) error {
 			return errors.New("hosted profiles require security.network policy to be configured")
 		}
 	}
-	if spec.Hosted && hasRemoteHTTPMCPServers(cfg.Tools.MCPServers) {
-		if !cfg.Security.Network.Enabled || !cfg.Security.Network.DefaultDeny {
-			return errors.New("hosted profiles require deny-by-default security.network for remote MCP HTTP")
-		}
-		if networkAllowlistTooBroad(cfg.Security.Network.AllowedHosts) {
-			return errors.New("hosted profiles require a narrow security.network.allowedHosts for remote MCP HTTP")
-		}
-	}
 	if spec.RequireStrictAudit {
 		if !cfg.Security.Audit.Strict {
 			return errors.New("profile requires security.audit.strict")
@@ -491,19 +422,6 @@ func IsHostedProfile(p RuntimeProfile) bool {
 		return true
 	}
 	return false
-}
-
-func normalizeQuotaExceededAction(action QuotaExceededAction, fallback QuotaExceededAction) QuotaExceededAction {
-	normalized := QuotaExceededAction(strings.ToLower(strings.TrimSpace(string(action))))
-	if normalized == "" {
-		return fallback
-	}
-	switch normalized {
-	case QuotaExceededActionAsk, QuotaExceededActionFail:
-		return normalized
-	default:
-		return fallback
-	}
 }
 
 func compactStrings(values []string) []string {
@@ -535,26 +453,6 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func hasRemoteHTTPMCPServers(servers map[string]MCPServerConfig) bool {
-	for _, server := range servers {
-		if !server.Enabled {
-			continue
-		}
-		transport := strings.ToLower(strings.TrimSpace(server.Transport))
-		if transport != "sse" && transport != "streamablehttp" {
-			continue
-		}
-		u, err := url.Parse(strings.TrimSpace(server.URL))
-		if err != nil {
-			return true
-		}
-		if u.Hostname() == "" || !isLoopbackHost(u.Hostname()) {
-			return true
-		}
-	}
-	return false
-}
-
 func networkAllowlistTooBroad(hosts []string) bool {
 	if len(hosts) > 10 {
 		return true
@@ -574,59 +472,57 @@ func networkAllowlistTooBroad(hosts []string) bool {
 	return false
 }
 
-func validateAgentCLIConfig(cfg AgentCLIConfig) error {
-	if cfg.Enabled {
-		defaultRunner := strings.ToLower(strings.TrimSpace(cfg.DefaultRunner))
-		if defaultRunner == "" {
-			return errors.New("agentCLI.defaultRunner is required when agentCLI is enabled")
-		}
-		switch defaultRunner {
-		case "opencode", "codex", "claude", "gemini":
-		default:
-			return fmt.Errorf("agentCLI.defaultRunner must be opencode, codex, claude, or gemini (got %q)", cfg.DefaultRunner)
-		}
-		for _, disabled := range cfg.DisabledRunners {
-			if strings.EqualFold(strings.TrimSpace(disabled), defaultRunner) {
-				return fmt.Errorf("agentCLI.defaultRunner %q is listed in agentCLI.disabledRunners", cfg.DefaultRunner)
-			}
+func validateRunnersConfig(cfg RunnersConfig) error {
+	defaultRunner := strings.ToLower(strings.TrimSpace(cfg.Default))
+	if defaultRunner == "" {
+		return errors.New("runners.default is required")
+	}
+	switch defaultRunner {
+	case "opencode", "codex", "claude", "gemini":
+	default:
+		return fmt.Errorf("runners.default must be opencode, codex, claude, or gemini (got %q)", cfg.Default)
+	}
+	for _, disabled := range cfg.Disabled {
+		if strings.EqualFold(strings.TrimSpace(disabled), defaultRunner) {
+			return fmt.Errorf("runners.default %q is listed in runners.disabledRunners", cfg.Default)
 		}
 	}
 	mode := strings.TrimSpace(cfg.DefaultMode)
 	switch mode {
 	case "review", "safe_edit", "sandbox_auto":
 	default:
-		return errors.New("agentCLI.defaultMode must be review, safe_edit, or sandbox_auto")
+		return errors.New("runners.defaultMode must be review, safe_edit, or sandbox_auto")
 	}
 	iso := strings.TrimSpace(cfg.DefaultIsolation)
 	switch iso {
 	case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
 	default:
-		return errors.New("agentCLI.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
+		return errors.New("runners.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
 	}
 	if mode == "sandbox_auto" && iso != "sandbox_dangerous" {
-		return errors.New("agentCLI.defaultMode=sandbox_auto requires agentCLI.defaultIsolation=sandbox_dangerous")
+		return errors.New("runners.defaultMode=sandbox_auto requires runners.defaultIsolation=sandbox_dangerous")
 	}
 	for runner, runtimeMode := range cfg.RuntimeMode {
 		switch strings.TrimSpace(runtimeMode) {
 		case "", "auto", "native", "cli":
 		default:
-			return fmt.Errorf("agentCLI.runtimeMode[%s] must be auto, native, or cli", runner)
+			return fmt.Errorf("runners.runtimeMode[%s] must be auto, native, or cli", runner)
 		}
 	}
 	for runner, endpoint := range cfg.NativeServerURLs {
 		u, err := url.Parse(strings.TrimSpace(endpoint))
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must be an absolute loopback http URL", runner)
+			return fmt.Errorf("runners.nativeServerUrls[%s] must be an absolute loopback http URL", runner)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must use http or https", runner)
+			return fmt.Errorf("runners.nativeServerUrls[%s] must use http or https", runner)
 		}
 		if !isLoopbackHost(u.Hostname()) {
-			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must point at loopback", runner)
+			return fmt.Errorf("runners.nativeServerUrls[%s] must point at loopback", runner)
 		}
 	}
 	if strings.TrimSpace(cfg.CodexShadowHomePath) != "" && strings.TrimSpace(cfg.CodexHomePath) == "" {
-		return errors.New("agentCLI.codexShadowHomePath requires agentCLI.codexHomePath")
+		return errors.New("runners.codexShadowHomePath requires runners.codexHomePath")
 	}
 	return nil
 }

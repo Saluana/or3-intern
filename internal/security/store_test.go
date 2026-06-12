@@ -45,42 +45,6 @@ func TestSecretManager_RoundTripAndResolveConfigSecrets(t *testing.T) {
 	}
 }
 
-func TestResolveConfigSecrets_ResolvesMCPServerSecrets(t *testing.T) {
-	d := openSecurityTestDB(t)
-	ctx := context.Background()
-	mgr := &SecretManager{DB: d, Key: []byte("01234567890123456789012345678901")}
-	if err := mgr.Put(ctx, "mcp.auth", "Bearer top-secret"); err != nil {
-		t.Fatalf("Put auth: %v", err)
-	}
-	if err := mgr.Put(ctx, "mcp.env.token", "env-secret"); err != nil {
-		t.Fatalf("Put env: %v", err)
-	}
-	cfg := config.Default()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"demo": {
-			Enabled:   true,
-			Transport: "sse",
-			URL:       "secret:mcp.url",
-			Headers:   map[string]string{"Authorization": "secret:mcp.auth"},
-			Env:       map[string]string{"TOKEN": "secret:mcp.env.token"},
-		},
-	}
-	resolved, err := ResolveConfigSecrets(ctx, cfg, mgr)
-	if err != nil {
-		t.Fatalf("ResolveConfigSecrets: %v", err)
-	}
-	server := resolved.Tools.MCPServers["demo"]
-	if server.URL != "secret:mcp.url" {
-		t.Fatalf("expected non-secret MCP url to remain unresolved, got %q", server.URL)
-	}
-	if server.Headers["Authorization"] != "Bearer top-secret" {
-		t.Fatalf("expected resolved MCP header, got %#v", server.Headers)
-	}
-	if server.Env["TOKEN"] != "env-secret" {
-		t.Fatalf("expected resolved MCP env, got %#v", server.Env)
-	}
-}
-
 func TestValidateNoSecretRefs_DetectsRemainingSecretRefs(t *testing.T) {
 	cfg := config.Default()
 	cfg.Provider.APIKey = "secret:provider.apiKey"

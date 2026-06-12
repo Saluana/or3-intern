@@ -118,7 +118,7 @@ func (s *serviceServer) handleDoctorLogs(w http.ResponseWriter, r *http.Request)
 		EventType:     strings.TrimSpace(r.URL.Query().Get("event_type")),
 		Pattern:       serviceFirstNonEmpty(strings.TrimSpace(r.URL.Query().Get("pattern")), strings.TrimSpace(r.URL.Query().Get("known_failure_pattern"))),
 		SinceUnixMS:   sinceMS,
-		UntilUnixMS:    untilMS,
+		UntilUnixMS:   untilMS,
 		Limit:         limit,
 	})
 	if err != nil {

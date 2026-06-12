@@ -30,7 +30,7 @@ func TestParseChannelCommandAllowsTelegramBotSuffix(t *testing.T) {
 func TestChannelCommandHandlerPersistsAndInjectsPreferences(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Default()
-	cfg.AgentCLI.DefaultRunner = "opencode"
+	cfg.Runners.Default = "opencode"
 	database := openChannelCommandTestDB(t)
 	handler := &channelCommandHandler{Config: cfg, DB: database}
 	ev := bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", From: "123", Message: "/runner opencode", Meta: map[string]any{"chat_id": "123"}}
@@ -56,7 +56,7 @@ func TestChannelCommandHandlerPersistsAndInjectsPreferences(t *testing.T) {
 func TestChannelCommandHandlerResetClearsPreferences(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Default()
-	cfg.AgentCLI.DefaultRunner = "opencode"
+	cfg.Runners.Default = "opencode"
 	database := openChannelCommandTestDB(t)
 	if _, err := database.SetChatSessionRunnerPreference(ctx, "telegram:123", "opencode", "OpenCode", "gpt-5"); err != nil {
 		t.Fatalf("SetChatSessionRunnerPreference: %v", err)

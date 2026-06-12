@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
 	"or3-intern/internal/capability"
@@ -18,6 +17,7 @@ import (
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/streaming"
 	"or3-intern/internal/turns"
 )
@@ -25,7 +25,7 @@ import (
 type ServiceApp struct {
 	cfg              config.Config
 	jobs             *jobs.Registry
-	agentCLIManager  *agentcli.Manager
+	runnerManager    *runners.Manager
 	turnOrchestrator *RunnerTurnOrchestrator
 	control          *controlplane.Service
 	auth             *auth.Service
@@ -35,12 +35,12 @@ func NewServiceApp(cfg config.Config, jobs *jobs.Registry, control *controlplane
 	return NewServiceAppWithAgentCLI(cfg, jobs, nil, control)
 }
 
-func NewServiceAppWithAgentCLI(cfg config.Config, jobs *jobs.Registry, agentCLIManager *agentcli.Manager, control *controlplane.Service) *ServiceApp {
-	return NewServiceAppWithRunnerTurns(cfg, jobs, agentCLIManager, nil, control)
+func NewServiceAppWithAgentCLI(cfg config.Config, jobs *jobs.Registry, runnerManager *runners.Manager, control *controlplane.Service) *ServiceApp {
+	return NewServiceAppWithRunnerTurns(cfg, jobs, runnerManager, nil, control)
 }
 
-func NewServiceAppWithRunnerTurns(cfg config.Config, jobs *jobs.Registry, agentCLIManager *agentcli.Manager, turnOrchestrator *RunnerTurnOrchestrator, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{cfg: cfg, jobs: jobs, agentCLIManager: agentCLIManager, turnOrchestrator: turnOrchestrator, control: control}
+func NewServiceAppWithRunnerTurns(cfg config.Config, jobs *jobs.Registry, runnerManager *runners.Manager, turnOrchestrator *RunnerTurnOrchestrator, control *controlplane.Service) *ServiceApp {
+	app := &ServiceApp{cfg: cfg, jobs: jobs, runnerManager: runnerManager, turnOrchestrator: turnOrchestrator, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
 			app.auth = authSvc
@@ -61,12 +61,25 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 	}
 }
 
-func (a *ServiceApp) SetRunnerRuntime(agentCLIManager *agentcli.Manager, turnOrchestrator *RunnerTurnOrchestrator) {
+func (a *ServiceApp) SetRunnerRuntime(runnerManager *runners.Manager, turnOrchestrator *RunnerTurnOrchestrator) {
 	if a == nil {
 		return
 	}
-	a.agentCLIManager = agentCLIManager
+	a.runnerManager = runnerManager
 	a.turnOrchestrator = turnOrchestrator
+}
+
+// DetectRunnerRunners returns a snapshot of available external runners, using
+// the runner manager's registry when one is attached. Returns an empty slice
+// when the runner host is not configured.
+func (a *ServiceApp) DetectRunnerRunners(ctx context.Context) ([]runners.RunnerInfo, error) {
+	if a == nil {
+		return nil, errors.New("service app not initialized")
+	}
+	if a.runnerManager == nil || a.runnerManager.Registry == nil {
+		return nil, nil
+	}
+	return a.runnerManager.Registry.DetectAll(ctx, a.runnerManager.DetectOptions()), nil
 }
 
 type TurnRequest struct {
@@ -76,8 +89,6 @@ type TurnRequest struct {
 	Attachments   []turns.Attachment
 	SystemPrompt  string
 	Meta          map[string]any
-	AllowedTools  []string
-	RestrictTools bool
 	ProfileName   string
 	Capability    capability.Level
 	ApprovalToken string
@@ -112,7 +123,7 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, 
 	}
 	if a.turnOrchestrator == nil {
 		if a.cfg.RunnerFirst() {
-			return TurnResult{}, ErrRunnerTurnsDisabled
+			return TurnResult{}, ErrRunnerRuntimeUnavailable
 		}
 		return TurnResult{}, errors.New("runner orchestrator unavailable")
 	}
@@ -155,40 +166,6 @@ func cloneServiceMeta(in map[string]any) map[string]any {
 	return out
 }
 
-type ReplayToolCallRequest struct {
-	SessionKey             string
-	ConversationSessionKey string
-	ToolName               string
-	ArgumentsJSON          string
-	ApprovalRequestID      int64
-	RequesterContextJSON   string
-	AllowedTools           []string
-	RestrictTools          bool
-	ProfileName            string
-	Capability             capability.Level
-	ApprovalToken          string
-	Actor                  string
-	Role                   string
-	Observer               streaming.ConversationObserver
-}
-
-type ResumeApprovedRequest struct {
-	IssuedApproval approval.IssuedApproval
-	ProfileName    string
-	Capability     capability.Level
-	Actor          string
-	Role           string
-	Observer       streaming.ConversationObserver
-}
-
-func (a *ServiceApp) ReplayToolCall(ctx context.Context, req ReplayToolCallRequest) (string, error) {
-	return "", ErrLegacyToolReplayDisabled
-}
-
-func (a *ServiceApp) ResumeApprovedRequest(ctx context.Context, req ResumeApprovedRequest) (string, error) {
-	return "", ErrLegacyToolReplayDisabled
-}
-
 func (a *ServiceApp) GetJob(jobID string) (jobs.Snapshot, error) {
 	if a == nil || a.control == nil {
 		return jobs.Snapshot{}, controlplane.ErrJobRegistryUnavailable
@@ -203,8 +180,8 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 	if a.jobs.Cancel(jobID) {
 		return true, "", nil
 	}
-	if a.agentCLIManager != nil {
-		if err := a.agentCLIManager.Abort(ctx, jobID); err == nil {
+	if a.runnerManager != nil {
+		if err := a.runnerManager.Abort(ctx, jobID); err == nil {
 			return true, "", nil
 		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
 			return false, "not_abortable", nil
@@ -221,81 +198,81 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 }
 
 // DetectAgentCLIRunners returns runner info for all registered external CLIs.
-func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]agentcli.RunnerInfo, error) {
+func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]runners.RunnerInfo, error) {
 	if a == nil {
 		return nil, fmt.Errorf("service app is not available")
 	}
-	if a.agentCLIManager != nil {
-		if a.agentCLIManager.Registry == nil {
+	if a.runnerManager != nil {
+		if a.runnerManager.Registry == nil {
 			return nil, fmt.Errorf("runner registry is not configured")
 		}
-		runners := a.agentCLIManager.Registry.DetectAll(ctx, a.agentCLIManager.DetectOptions())
-		return a.decorateAgentCLIRuntimeInfo(ctx, runners), nil
+		detected := a.runnerManager.Registry.DetectAll(ctx, a.runnerManager.DetectOptions())
+		return a.decorateAgentCLIRuntimeInfo(ctx, detected), nil
 	}
-	detectManager := &agentcli.Manager{Cfg: a.cfg.AgentCLI}
-	runners := agentcli.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions())
-	return a.decorateAgentCLIRuntimeInfo(ctx, runners), nil
+	detectManager := &runners.Manager{Cfg: a.cfg.Runners}
+	detected := runners.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions())
+	return a.decorateAgentCLIRuntimeInfo(ctx, detected), nil
 }
 
-func (a *ServiceApp) decorateAgentCLIRuntimeInfo(ctx context.Context, runners []agentcli.RunnerInfo) []agentcli.RunnerInfo {
-	if len(runners) == 0 {
-		return runners
+func (a *ServiceApp) decorateAgentCLIRuntimeInfo(ctx context.Context, detected []runners.RunnerInfo) []runners.RunnerInfo {
+	if len(detected) == 0 {
+		return detected
 	}
-	cfg := a.cfg.AgentCLI
-	var runtimes *agentcli.RunnerRuntimeRegistry
-	if a.agentCLIManager != nil && a.agentCLIManager.Runtimes != nil {
-		runtimes = a.agentCLIManager.Runtimes
+	cfg := a.cfg.Runners
+	var runtimes *runners.RunnerRuntimeRegistry
+	if a.runnerManager != nil && a.runnerManager.Runtimes != nil {
+		runtimes = a.runnerManager.Runtimes
 	} else {
-		runtimes = agentcli.NewDefaultRuntimeRegistry()
+		runtimes = runners.NewDefaultRuntimeRegistry()
 	}
-	env := agentcli.BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
-	for i := range runners {
-		id := agentcli.RunnerID(runners[i].ID)
+	env := runners.BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
+	for i := range detected {
+		id := runners.RunnerID(detected[i].ID)
 		if runtime, ok := runtimes.Get(id); ok {
-			runners[i].Runtime = runtime.Info(ctx, cfg, env)
+			detected[i].Runtime = runtime.Info(ctx, cfg, env)
 		} else {
-			runners[i].Runtime = agentcli.RunnerRuntimeInfo{Kind: agentcli.RuntimeCLI, Mode: agentcli.RuntimeModeCLI, State: agentcli.RuntimeStateUnavailable, Ownership: agentcli.RuntimeOwnershipNone, Fallback: true, FallbackReason: "using CLI adapter"}
+			detected[i].Runtime = runners.RunnerRuntimeInfo{Kind: runners.RuntimeCLI, Mode: runners.RuntimeModeCLI, State: runners.RuntimeStateUnavailable, Ownership: runners.RuntimeOwnershipNone, Fallback: true, FallbackReason: "using CLI adapter"}
 		}
-		if model := strings.TrimSpace(cfg.DefaultModels[runners[i].ID]); model != "" && runners[i].Runtime.DefaultModel == "" {
-			runners[i].Runtime.DefaultModel = model
+		if model := strings.TrimSpace(cfg.DefaultModels[detected[i].ID]); model != "" && detected[i].Runtime.DefaultModel == "" {
+			detected[i].Runtime.DefaultModel = model
 		}
 	}
-	return runners
+	return detected
 }
 
-// StartAgentCLIRun enqueues a new external CLI run.
-func (a *ServiceApp) StartAgentCLIRun(ctx context.Context, req agentcli.AgentRunRequest) (db.AgentCLIRun, error) {
-	if a == nil || a.agentCLIManager == nil {
-		return db.AgentCLIRun{}, fmt.Errorf("agent CLI manager is not available")
+// StartRunnerRun enqueues a new runner run.
+func (a *ServiceApp) StartRunnerRun(ctx context.Context, req runners.RunnerRunRequest) (db.RunnerRun, error) {
+	if a == nil || a.runnerManager == nil {
+		return db.RunnerRun{}, fmt.Errorf("agent CLI manager is not available")
 	}
 	if a.turnOrchestrator != nil {
-		req = a.turnOrchestrator.PrepareAgentRunRequest(ctx, req)
+		req = a.turnOrchestrator.PrepareRunnerRunRequest(ctx, req)
 	}
-	return a.agentCLIManager.Enqueue(ctx, req)
+	return a.runnerManager.Enqueue(ctx, req)
 }
 
-// GetAgentCLIRun reads a persisted CLI run by run ID or job ID.
-func (a *ServiceApp) GetAgentCLIRun(ctx context.Context, id string) (db.AgentCLIRun, bool, error) {
-	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
-		return db.AgentCLIRun{}, false, fmt.Errorf("agent CLI manager is not available")
+// GetRunnerRun reads a persisted runner run by run ID or job ID.
+func (a *ServiceApp) GetRunnerRun(ctx context.Context, id string) (db.RunnerRun, bool, error) {
+	if a == nil || a.runnerManager == nil || a.runnerManager.DB == nil {
+		return db.RunnerRun{}, false, fmt.Errorf("agent CLI manager is not available")
 	}
-	return a.agentCLIManager.DB.GetAgentCLIRun(ctx, id)
+	return a.runnerManager.DB.GetRunnerRun(ctx, id)
 }
 
-// ListAgentCLIEvents lists persisted events for a job.
-func (a *ServiceApp) ListAgentCLIEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.AgentCLIEvent, error) {
-	if a == nil || a.agentCLIManager == nil || a.agentCLIManager.DB == nil {
+// ListRunnerRunEvents lists persisted events for a job.
+func (a *ServiceApp) ListRunnerRunEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.RunnerRunEvent, error) {
+	if a == nil || a.runnerManager == nil || a.runnerManager.DB == nil {
 		return nil, fmt.Errorf("agent CLI manager is not available")
 	}
-	return a.agentCLIManager.DB.ListAgentCLIEvents(ctx, jobID, afterSeq, limit)
+	return a.runnerManager.DB.ListRunnerRunEvents(ctx, jobID, afterSeq, limit)
 }
 
-// AbortAgentCLIRun cancels an external CLI job.
-func (a *ServiceApp) AbortAgentCLIRun(ctx context.Context, jobID string) error {
-	if a == nil || a.agentCLIManager == nil {
+// AbortRunnerRun cancels a runner run.
+func (a *ServiceApp) AbortRunnerRun(ctx context.Context, jobID string) error {
+	if a == nil || a.runnerManager == nil {
 		return fmt.Errorf("agent CLI manager is not available")
 	}
-	return a.agentCLIManager.Abort(ctx, jobID)
+	return a.runnerManager.Abort(ctx, jobID)
 }
 
 func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (jobs.Snapshot, bool) {
@@ -520,10 +497,6 @@ func (a *ServiceApp) RemoveAllowlist(ctx context.Context, id int64, actor string
 		return controlplane.ErrApprovalBrokerUnavailable
 	}
 	return a.control.RemoveAllowlist(ctx, id, actor)
-}
-
-func ResolveToolPolicy(_ any, _ any, _ []string) ([]string, bool, error) {
-	return nil, false, ErrLegacyToolReplayDisabled
 }
 
 func DecodeServiceFilePayload(reader io.Reader, maxBytes int64) ([]byte, error) {

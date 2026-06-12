@@ -102,12 +102,12 @@ func profileFindings(cfg config.Config, opts Options) []Finding {
 				Summary:  fmt.Sprintf("profile %q has broad allowedHosts", name),
 			})
 		}
-		if profileAllowsPrivileged(profile) && len(profile.AllowedTools) == 0 {
+		if profileAllowsPrivileged(profile) && len(profile.DeclaredTools) == 0 {
 			findings = append(findings, Finding{
 				ID:       "profiles.privileged_without_tools",
 				Area:     "profiles",
 				Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
-				Summary:  fmt.Sprintf("profile %q permits privileged capability without an explicit tool allowlist", name),
+				Summary:  fmt.Sprintf("profile %q permits privileged capability without declaring any tools; the runner enforces its own tool policy, so this is documentation only", name),
 			})
 		}
 	}
@@ -144,23 +144,67 @@ func profileAllowsGuarded(profile config.AccessProfileConfig) bool {
 	return maxCapability == "" || maxCapability == "privileged" || maxCapability == "guarded"
 }
 
+// profileAllowsTool is advisory: it inspects the profile's declared tool
+// metadata to feed doctor findings. The runner enforces its own tool policy
+// at command execution time; this helper does not gate execution.
 func profileAllowsTool(profile config.AccessProfileConfig, toolName string) bool {
-	if len(profile.AllowedTools) == 0 {
+	if len(profile.DeclaredTools) == 0 {
 		return true
 	}
 	toolName = strings.TrimSpace(toolName)
-	for _, allowed := range profile.AllowedTools {
-		if strings.TrimSpace(allowed) == toolName {
+	aliases := legacyToolNameAliases(toolName)
+	for _, allowed := range profile.DeclaredTools {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == toolName {
+			return true
+		}
+		if aliases[allowed] {
 			return true
 		}
 	}
 	return false
 }
 
+// legacyToolNameAliases returns the set of accepted names for a tool query.
+// Old persisted profiles use the legacy built-in tool names; new profiles
+// use runner/service permission language. Both forms match so old configs
+// remain readable in doctor output without a data migration. Note: this
+// helper is advisory only — runner permission policy is enforced by the
+// runner itself, not by profile metadata.
+func legacyToolNameAliases(toolName string) map[string]bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "shell_exec", "exec":
+		return map[string]bool{"shell_exec": true, "exec": true}
+	case "read_files", "read_file":
+		return map[string]bool{"read_files": true, "read_file": true}
+	case "search_files", "search_file":
+		return map[string]bool{"search_files": true, "search_file": true}
+	case "list_dirs", "list_dir":
+		return map[string]bool{"list_dirs": true, "list_dir": true}
+	case "read_artifacts", "read_artifact":
+		return map[string]bool{"read_artifacts": true, "read_artifact": true}
+	case "write_files", "write_file":
+		return map[string]bool{"write_files": true, "write_file": true}
+	case "edit_files", "edit_file":
+		return map[string]bool{"edit_files": true, "edit_file": true}
+	case "delete_files", "delete_file":
+		return map[string]bool{"delete_files": true, "delete_file": true}
+	case "send_messages", "send_message":
+		return map[string]bool{"send_messages": true, "send_message": true}
+	case "schedule_cron", "cron":
+		return map[string]bool{"schedule_cron": true, "cron": true}
+	}
+	return nil
+}
+
+// profileHasMeaningfulToolRestriction is advisory: it inspects the profile's
+// declared tool metadata to feed doctor findings about whether the profile
+// documents *any* tool boundary. The runner enforces its own tool policy;
+// this helper does not gate execution.
 func profileHasMeaningfulToolRestriction(profile config.AccessProfileConfig) bool {
-	return !profileAllowsGuarded(profile) || len(profile.AllowedTools) > 0
+	return !profileAllowsGuarded(profile) || len(profile.DeclaredTools) > 0
 }
 
 func profileCanReachExec(profile config.AccessProfileConfig) bool {
-	return profileAllowsPrivileged(profile) && profileAllowsTool(profile, "exec")
+	return profileAllowsPrivileged(profile) && profileAllowsTool(profile, "shell_exec")
 }

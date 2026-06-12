@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 const serviceChatSessionsBodyLimit = 64 * 1024
@@ -27,23 +27,23 @@ func (s *serviceServer) handleChatRunners(w http.ResponseWriter, r *http.Request
 		return
 	}
 	appSvc := s.app()
-	detected, err := appSvc.DetectAgentCLIRunners(r.Context())
+	detected, err := appSvc.DetectRunnerRunners(r.Context())
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runner detection unavailable", err)
 		return
 	}
-	infoByID := make(map[string]agentcli.RunnerInfo, len(detected))
+	infoByID := make(map[string]runners.RunnerInfo, len(detected))
 	for _, info := range detected {
 		infoByID[info.ID] = info
 	}
-	specs := agentcli.SelectableRunners()
-	if s.agentCLIManager == nil {
+	specs := runners.SelectableRunners()
+	if s.runnerManager == nil {
 		specs = nil
 	}
-	defaultRunner := string(agentcli.ResolveDefaultRunner(s.config))
-	defaultModel := strings.TrimSpace(s.config.AgentCLI.DefaultModels[defaultRunner])
-	defaultMode := strings.TrimSpace(s.config.AgentCLI.DefaultMode)
-	defaultIsolation := strings.TrimSpace(s.config.AgentCLI.DefaultIsolation)
+	defaultRunner := string(runners.ResolveDefaultRunner(s.config))
+	defaultModel := strings.TrimSpace(s.config.Runners.DefaultModels[defaultRunner])
+	defaultMode := strings.TrimSpace(s.config.Runners.DefaultMode)
+	defaultIsolation := strings.TrimSpace(s.config.Runners.DefaultIsolation)
 	out := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
 		info := infoByID[string(spec.ID)]

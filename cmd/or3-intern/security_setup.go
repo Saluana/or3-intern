@@ -10,19 +10,13 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/security"
-	"or3-intern/internal/tools"
 )
 
 func buildHostPolicy(cfg config.Config) security.HostPolicy {
-	allowedHosts := append([]string{}, cfg.Security.Network.AllowedHosts...)
-	if tools.BraveSearchConfigured(cfg.Tools.BraveAPIKey) &&
-		(cfg.Security.Network.Enabled || cfg.Security.Network.DefaultDeny) {
-		allowedHosts = tools.AppendBraveSearchHostIfMissing(allowedHosts)
-	}
 	return security.HostPolicy{
 		Enabled:       cfg.Security.Network.Enabled,
 		DefaultDeny:   cfg.Security.Network.DefaultDeny,
-		AllowedHosts:  allowedHosts,
+		AllowedHosts:  append([]string{}, cfg.Security.Network.AllowedHosts...),
 		AllowLoopback: cfg.Security.Network.AllowLoopback,
 		AllowPrivate:  cfg.Security.Network.AllowPrivate,
 	}
@@ -128,14 +122,6 @@ func validateConfiguredOutboundEndpoints(ctx context.Context, cfg config.Config,
 			if err := policy.ValidateEndpoint(ctx, host); err != nil {
 				return err
 			}
-		}
-	}
-	for name, server := range cfg.Tools.MCPServers {
-		if !server.Enabled || (server.Transport != "sse" && server.Transport != "streamablehttp") {
-			continue
-		}
-		if err := policy.ValidateEndpoint(ctx, server.URL); err != nil {
-			return fmt.Errorf("mcp server %s denied by network policy: %w", name, err)
 		}
 	}
 	return nil

@@ -10,15 +10,15 @@ import (
 )
 
 const (
-	attachmentSourceWorkspaceRef = "workspace_ref"
+	attachmentSourceWorkspaceRef  = "workspace_ref"
 	attachmentSourceLocalArtifact = "local_artifact"
-	attachmentSourceTextBlock    = "text_block"
+	attachmentSourceTextBlock     = "text_block"
 
-	maxAttachmentCount       = 24
-	maxAttachmentNameLen     = 240
-	maxAttachmentPathLen     = 1024
-	maxAttachmentPreviewLen  = 600
-	maxAttachmentExcerptLen  = 1200
+	maxAttachmentCount      = 24
+	maxAttachmentNameLen    = 240
+	maxAttachmentPathLen    = 1024
+	maxAttachmentPreviewLen = 600
+	maxAttachmentExcerptLen = 1200
 )
 
 // Attachment is the canonical turn attachment shape shared by app and service.

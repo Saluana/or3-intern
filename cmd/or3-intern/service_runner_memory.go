@@ -100,18 +100,18 @@ func (s *serviceServer) handleRunnerMemorySearch(w http.ResponseWriter, r *http.
 }
 
 type runnerMemoryNotePayload struct {
-	SessionKey        string `json:"session_key"`
-	SessionKeyCamel   string `json:"sessionKey"`
-	Text              string `json:"text"`
-	Tags              string `json:"tags"`
-	SourceMessageID   int64  `json:"source_message_id"`
-	SourceMessageCamel int64 `json:"sourceMessageId"`
-	GlobalOnly        bool   `json:"global_only"`
-	GlobalOnlyCamel   bool   `json:"globalOnly"`
-	RunnerID          string `json:"runner_id"`
-	RunnerIDCamel     string `json:"runnerId"`
-	RunnerTurnID      string `json:"runner_turn_id"`
-	RunnerTurnIDCamel string `json:"runnerTurnId"`
+	SessionKey         string `json:"session_key"`
+	SessionKeyCamel    string `json:"sessionKey"`
+	Text               string `json:"text"`
+	Tags               string `json:"tags"`
+	SourceMessageID    int64  `json:"source_message_id"`
+	SourceMessageCamel int64  `json:"sourceMessageId"`
+	GlobalOnly         bool   `json:"global_only"`
+	GlobalOnlyCamel    bool   `json:"globalOnly"`
+	RunnerID           string `json:"runner_id"`
+	RunnerIDCamel      string `json:"runnerId"`
+	RunnerTurnID       string `json:"runner_turn_id"`
+	RunnerTurnIDCamel  string `json:"runnerTurnId"`
 }
 
 func (s *serviceServer) handleRunnerMemoryAddNote(w http.ResponseWriter, r *http.Request, svc *memorysvc.Service, identity serviceAuthIdentity) {

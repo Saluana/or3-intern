@@ -545,7 +545,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			FOREIGN KEY(approval_request_id) REFERENCES approval_requests(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS approval_tokens_request_expires_at ON approval_tokens(approval_request_id, expires_at);`,
-		`CREATE TABLE IF NOT EXISTS agent_cli_runs(
+		`CREATE TABLE IF NOT EXISTS runner_runs(
 			id TEXT PRIMARY KEY,
 			job_id TEXT NOT NULL UNIQUE,
 			parent_session_key TEXT NOT NULL,
@@ -569,7 +569,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			attempts INTEGER NOT NULL DEFAULT 0,
 			meta_json TEXT NOT NULL DEFAULT '{}'
 		);`,
-		`CREATE TABLE IF NOT EXISTS agent_cli_events(
+		`CREATE TABLE IF NOT EXISTS runner_run_events(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			run_id TEXT NOT NULL,
 			job_id TEXT NOT NULL,
@@ -581,9 +581,9 @@ func (d *DB) migrate(ctx context.Context) error {
 			payload_json TEXT NOT NULL DEFAULT '',
 			UNIQUE(run_id, seq)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_agent_cli_runs_status_requested_at ON agent_cli_runs(status, requested_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_agent_cli_runs_parent ON agent_cli_runs(parent_session_key, requested_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_agent_cli_events_job_seq ON agent_cli_events(job_id, seq);`,
+		`CREATE INDEX IF NOT EXISTS idx_runner_runs_status_requested_at ON runner_runs(status, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_runner_runs_parent ON runner_runs(parent_session_key, requested_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_runner_run_events_job_seq ON runner_run_events(job_id, seq);`,
 		// Runner chat selection (planning/runner-chat-selection).
 		`CREATE TABLE IF NOT EXISTS chat_session_meta(
 			session_key TEXT PRIMARY KEY,
@@ -637,8 +637,8 @@ func (d *DB) migrate(ctx context.Context) error {
 			user_message TEXT NOT NULL DEFAULT '',
 			final_text TEXT NOT NULL DEFAULT '',
 			error_message TEXT NOT NULL DEFAULT '',
-			agent_cli_run_id TEXT NOT NULL DEFAULT '',
-			agent_cli_job_id TEXT NOT NULL DEFAULT '',
+			runner_run_id TEXT NOT NULL DEFAULT '',
+			runner_job_id TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
 			mode TEXT NOT NULL DEFAULT '',
 			isolation TEXT NOT NULL DEFAULT '',

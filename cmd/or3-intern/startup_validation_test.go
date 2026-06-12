@@ -66,38 +66,6 @@ func TestValidateStartupCommand_ServiceDeclaresReadinessChecks(t *testing.T) {
 	}
 }
 
-func TestValidateStartupCommand_ChatAllowsLocalStdioMCPWithGlobalAllowlist(t *testing.T) {
-	cfg := hostedStartupConfig()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"local": {
-			Enabled:   true,
-			Transport: "stdio",
-			Command:   "mcp-local",
-		},
-	}
-
-	if err := validateStartupCommand("chat", cfg, false); err != nil {
-		t.Fatalf("expected hosted chat with local stdio MCP to pass, got %v", err)
-	}
-}
-
-func TestValidateStartupCommand_HostedNoExecAllowsRemoteMCPWithSafeNetworkPosture(t *testing.T) {
-	cfg := hostedStartupConfig()
-	cfg.RuntimeProfile = config.ProfileHostedNoExec
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"remote": {
-			Enabled:   true,
-			Transport: "sse",
-			URL:       "https://mcp.example.com/stream",
-		},
-	}
-	cfg.Security.Network.AllowedHosts = []string{"mcp.example.com"}
-
-	if err := validateStartupCommand("chat", cfg, false); err != nil {
-		t.Fatalf("expected hosted-no-exec remote MCP flow to pass, got %v", err)
-	}
-}
-
 func TestValidateStartupCommand_RemoteSandboxWarnsButAllowsBroadLocalExecWithoutSandbox(t *testing.T) {
 	cfg := hostedStartupConfig()
 	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
@@ -143,28 +111,6 @@ func TestValidateStartupCommand_StillRejectsOtherBlockersWhenSandboxWarningPrese
 	}
 	if !strings.Contains(warnings.String(), "without sandbox protection") {
 		t.Fatalf("expected sandbox warning to still be emitted, got %q", warnings.String())
-	}
-}
-
-func TestValidateStartupCommand_RemoteSandboxAllowsRemoteFlowWithSandbox(t *testing.T) {
-	cfg := hostedStartupConfig()
-	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
-	cfg.Service.Secret = strings.Repeat("s", 32)
-	cfg.Hardening.PrivilegedTools = true
-	cfg.Hardening.ExecAllowedPrograms = []string{"git"}
-	cfg.Hardening.Sandbox.Enabled = true
-	cfg.Hardening.Sandbox.BubblewrapPath = "sh"
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"remote": {
-			Enabled:   true,
-			Transport: "streamablehttp",
-			URL:       "https://mcp.example.com/stream",
-		},
-	}
-	cfg.Security.Network.AllowedHosts = []string{"mcp.example.com"}
-
-	if err := validateStartupCommand("service", cfg, false); err != nil {
-		t.Fatalf("expected sandboxed hosted-remote-sandbox-only remote flow to pass, got %v", err)
 	}
 }
 

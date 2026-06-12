@@ -125,11 +125,11 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 
 func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, deviceCount, pendingApprovals int) AccessDashboardView {
 	fileRisk := "green"
-	if !cfg.Tools.RestrictToWorkspace {
+	if strings.TrimSpace(cfg.WorkspaceDir) == "" {
 		fileRisk = "red"
 	}
 	commandRisk := "green"
-	execAvailable := cfg.Tools.EnableExec && len(cfg.Hardening.ExecAllowedPrograms) > 0 && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools
+	execAvailable := len(cfg.Hardening.ExecAllowedPrograms) > 0 && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools
 	if execAvailable && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny {
 		commandRisk = "green"
 	} else if execAvailable {
@@ -297,16 +297,10 @@ func channelsRisk(cfg config.Config) string {
 
 func toolsSummary(cfg config.Config) string {
 	parts := []string{}
-	if cfg.Tools.EnableExec {
+	if len(cfg.Hardening.ExecAllowedPrograms) > 0 {
 		parts = append(parts, "commands enabled")
 	} else {
 		parts = append(parts, "commands off")
-	}
-	if len(cfg.Tools.MCPServers) > 0 {
-		parts = append(parts, fmt.Sprintf("%d MCP server(s)", len(cfg.Tools.MCPServers)))
-	}
-	if strings.TrimSpace(cfg.Tools.BraveAPIKey) != "" {
-		parts = append(parts, "web search configured")
 	}
 	return strings.Join(parts, ", ")
 }
@@ -319,16 +313,12 @@ func memorySummary(cfg config.Config) string {
 }
 
 func contextSummary(cfg config.Config) string {
-	dynamic := "dynamic tools off"
-	if cfg.Context.Tools.DynamicExpose {
-		dynamic = "dynamic tools on"
-	}
 	manager := "manager off"
 	if cfg.ContextManager.Enabled {
 		manager = "manager on"
 	}
 	mode := firstNonEmpty(strings.TrimSpace(cfg.Context.Mode), "quality")
-	return fmt.Sprintf("%s mode; %d max input tokens; %s; %s", mode, cfg.Context.MaxInputTokens, dynamic, manager)
+	return fmt.Sprintf("%s mode; %d max input tokens; %s", mode, cfg.Context.MaxInputTokens, manager)
 }
 
 func headline(report intdoctor.Report) string {
@@ -342,19 +332,10 @@ func headline(report intdoctor.Report) string {
 }
 
 func workspaceSummary(cfg config.Config) string {
-	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) != "" {
-		if cfg.Tools.AllowFullFileRead {
-			return "Reads computer; writes only: " + cfg.WorkspaceDir
-		}
+	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
 		return "Only this folder: " + cfg.WorkspaceDir
 	}
-	if cfg.Tools.RestrictToWorkspace {
-		if cfg.Tools.AllowFullFileRead {
-			return "Reads computer; writes restricted to workspace"
-		}
-		return "Restricted to your workspace folder"
-	}
-	return "Not restricted to one folder"
+	return "No workspace folder set"
 }
 
 func commandSummary(cfg config.Config) string {
@@ -371,9 +352,6 @@ func commandSummary(cfg config.Config) string {
 func internetSummary(cfg config.Config) string {
 	if cfg.Security.Network.Enabled && cfg.Security.Network.DefaultDeny {
 		return "Internet access is restricted"
-	}
-	if strings.TrimSpace(cfg.Tools.WebProxy) != "" {
-		return "Internet access uses a proxy"
 	}
 	return "Internet access follows the default tool settings"
 }

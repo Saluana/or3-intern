@@ -59,7 +59,7 @@ func New(buffer int) *Bus {
 		panic("bus buffer exceeds maxBufferSize")
 	}
 	legacy := make(chan Event, buffer)
-	return &Bus{buffer: buffer, legacy: legacy, subscribers: map[chan Event]struct{}{legacy: struct{}{}}}
+	return &Bus{buffer: buffer, legacy: legacy, subscribers: map[chan Event]struct{}{legacy: {}}}
 }
 
 // Subscribe returns a per-subscriber event stream and an idempotent unsubscribe function.

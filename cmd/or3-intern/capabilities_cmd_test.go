@@ -23,7 +23,7 @@ func TestRunCapabilitiesCommand_TextOutputIncludesIngressAndApprovals(t *testing
 	cfg.Security.Profiles.Profiles["default"] = config.AccessProfileConfig{MaxCapability: "guarded"}
 	cfg.Security.Profiles.Profiles["ops"] = config.AccessProfileConfig{
 		MaxCapability: "guarded",
-		AllowedTools:  []string{"read_file", "web_fetch"},
+		DeclaredTools: []string{"read_files", "web_fetch"},
 		AllowedHosts:  []string{"api.example.com"},
 	}
 	cfg.Channels.Slack.Enabled = true
@@ -45,7 +45,7 @@ func TestRunCapabilitiesCommand_TextOutputIncludesIngressAndApprovals(t *testing
 		"exec_available: false",
 		"shell_mode_available: false",
 		"pairing: allowlist",
-		"- slack enabled=true inbound=pairing profile=ops max=guarded tools=read_file,web_fetch hosts=api.example.com",
+		"- slack enabled=true inbound=pairing profile=ops max=guarded declaredTools=read_files,web_fetch hosts=api.example.com",
 	} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected %q in output, got %q", needle, text)
@@ -62,7 +62,7 @@ func TestRunCapabilitiesCommand_JSONOutputIncludesFilteredTrigger(t *testing.T) 
 	cfg.Security.Profiles.Triggers["file_change"] = "files"
 	cfg.Security.Profiles.Profiles["files"] = config.AccessProfileConfig{
 		MaxCapability: "safe",
-		AllowedTools:  []string{"read_file"},
+		DeclaredTools: []string{"read_files"},
 	}
 	cfg.Triggers.FileWatch.Enabled = true
 

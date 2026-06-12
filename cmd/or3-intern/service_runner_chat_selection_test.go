@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
+	"or3-intern/internal/runners"
 )
 
 type runnerChatServiceFixture struct {
@@ -27,15 +27,15 @@ type runnerChatServiceFixture struct {
 	cleanup    func()
 }
 
-func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.DB, agentManager *agentcli.Manager, chatManager *agentcli.ChatManager) *runnerChatServiceFixture {
+func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.DB, agentManager *runners.Manager, chatManager *runners.ChatManager) *runnerChatServiceFixture {
 	t.Helper()
 	secret := strings.Repeat("r", 32)
 	server := &serviceServer{
-		config:          cfg,
-		database:        database,
-		jobs:            jobs.NewRegistry(time.Minute, 32),
-		agentCLIManager: agentManager,
-		chatManager:     chatManager,
+		config:        cfg,
+		database:      database,
+		jobs:          jobs.NewRegistry(time.Minute, 32),
+		runnerManager: agentManager,
+		chatManager:   chatManager,
 	}
 	httpServer := newServiceTestHTTPServer(t, secret, server)
 	return &runnerChatServiceFixture{
@@ -50,13 +50,13 @@ func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.D
 	}
 }
 
-func newDiscoveryRegistry() *agentcli.RunnerRegistry {
-	specs := agentcli.AllRunners()
-	return agentcli.NewRunnerRegistry(specs, []agentcli.RunnerAdapter{
-		agentcli.NewOpenCodeAdapter(),
-		agentcli.NewCodexAdapter(),
-		agentcli.NewClaudeAdapter(),
-		agentcli.NewGeminiAdapter(),
+func newDiscoveryRegistry() *runners.RunnerRegistry {
+	specs := runners.AllRunners()
+	return runners.NewRunnerRegistry(specs, []runners.RunnerAdapter{
+		runners.NewOpenCodeAdapter(),
+		runners.NewCodexAdapter(),
+		runners.NewClaudeAdapter(),
+		runners.NewGeminiAdapter(),
 	})
 }
 
@@ -110,8 +110,8 @@ func seedRunnerChatTerminalTurn(t *testing.T, database *db.DB) (db.RunnerChatSes
 	sess, err := database.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{
 		ID:               "rcs-stream",
 		AppSessionKey:    "svc:stream",
-		RunnerID:         string(agentcli.RunnerOpenCode),
-		ContinuationMode: string(agentcli.ContinuationReplay),
+		RunnerID:         string(runners.RunnerOpenCode),
+		ContinuationMode: string(runners.ContinuationReplay),
 	})
 	if err != nil {
 		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
@@ -121,7 +121,7 @@ func seedRunnerChatTerminalTurn(t *testing.T, database *db.DB) (db.RunnerChatSes
 		SessionID:        sess.ID,
 		Status:           db.RunnerChatTurnStatusRunning,
 		UserMessage:      "tell me more",
-		ContinuationMode: string(agentcli.ContinuationReplay),
+		ContinuationMode: string(runners.ContinuationReplay),
 	})
 	if err != nil {
 		t.Fatalf("CreateRunnerChatTurn: %v", err)
@@ -244,11 +244,10 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	defer os.Setenv("PATH", oldPath)
 
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
-	cfg.AgentCLI.DisabledRunners = []string{string(agentcli.RunnerClaude)}
+	cfg.Runners.Disabled = []string{string(runners.RunnerClaude)}
 	registry := newDiscoveryRegistry()
-	manager := &agentcli.Manager{DB: database, Cfg: cfg.AgentCLI, Registry: registry}
-	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, &agentcli.ChatManager{DB: database, Manager: manager})
+	manager := &runners.Manager{DB: database, Cfg: cfg.Runners, Registry: registry}
+	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, &runners.ChatManager{DB: database, Manager: manager})
 	defer fixture.httpServer.Close()
 
 	chatReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/chat-runners", "")
@@ -265,31 +264,31 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	if _, ok := chatPayload["default_runner"]; !ok {
 		t.Fatalf("expected default_runner in response, got %#v", chatPayload)
 	}
-	if got := chatPayload["default_runner"]; got != string(agentcli.RunnerOpenCode) {
+	if got := chatPayload["default_runner"]; got != string(runners.RunnerOpenCode) {
 		t.Fatalf("expected default_runner=opencode, got %#v", got)
 	}
 	for _, raw := range chatPayload["runners"].([]any) {
-		if item, ok := raw.(map[string]any); ok && item["id"] == string(agentcli.RunnerOR3) {
-			t.Fatalf("OR3 runner must not be chat-selectable, got %#v", chatPayload)
+		if item, ok := raw.(map[string]any); ok && item["id"] == "or3-intern" {
+			t.Fatalf("legacy or3-intern runner must not be chat-selectable, got %#v", chatPayload)
 		}
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerOpenCode))["status"]; got != string(agentcli.RunnerStatusAuthMissing) {
+	if got := findRunnerByID(t, chatPayload, string(runners.RunnerOpenCode))["status"]; got != string(runners.RunnerStatusAuthMissing) {
 		t.Fatalf("expected OpenCode auth_missing, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerCodex))["status"]; got != string(agentcli.RunnerStatusAvailable) {
+	if got := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["status"]; got != string(runners.RunnerStatusAvailable) {
 		t.Fatalf("expected Codex available, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerClaude))["status"]; got != string(agentcli.RunnerStatusDisabledByConfig) {
+	if got := findRunnerByID(t, chatPayload, string(runners.RunnerClaude))["status"]; got != string(runners.RunnerStatusDisabledByConfig) {
 		t.Fatalf("expected Claude disabled_by_config, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerGemini))["status"]; got != string(agentcli.RunnerStatusError) {
+	if got := findRunnerByID(t, chatPayload, string(runners.RunnerGemini))["status"]; got != string(runners.RunnerStatusError) {
 		t.Fatalf("expected Gemini error, got %#v", got)
 	}
-	codexCaps, ok := findRunnerByID(t, chatPayload, string(agentcli.RunnerCodex))["chat_capabilities"].(map[string]any)
+	codexCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["chat_capabilities"].(map[string]any)
 	if !ok || codexCaps["chatNativeSession"] != true || codexCaps["streamToolEvents"] != true {
 		t.Fatalf("expected Codex native/tool chat capabilities to be enabled, got %#v", codexCaps)
 	}
-	openCodeCaps, ok := findRunnerByID(t, chatPayload, string(agentcli.RunnerOpenCode))["chat_capabilities"].(map[string]any)
+	openCodeCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerOpenCode))["chat_capabilities"].(map[string]any)
 	if !ok || openCodeCaps["chatNativeSession"] != true {
 		t.Fatalf("expected OpenCode native session capability to remain enabled, got %#v", openCodeCaps)
 	}
@@ -304,8 +303,8 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 		t.Fatalf("expected 200, got %d (%s)", agentResp.StatusCode, mustReadBody(t, agentResp.Body))
 	}
 	agentPayload := decodeServiceResponseMap(t, agentResp)
-	rawOpenCode := findRunnerByID(t, agentPayload, string(agentcli.RunnerOpenCode))
-	if rawOpenCode["status"] != string(agentcli.RunnerStatusAuthMissing) {
+	rawOpenCode := findRunnerByID(t, agentPayload, string(runners.RunnerOpenCode))
+	if rawOpenCode["status"] != string(runners.RunnerStatusAuthMissing) {
 		t.Fatalf("expected raw agent-runners status passthrough, got %#v", rawOpenCode)
 	}
 	if _, ok := rawOpenCode["chat_capabilities"]; ok {
@@ -317,7 +316,7 @@ func TestServiceChatRunners_HidesExternalWhenAgentCLIDisabled(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
 
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/chat-runners", "")
@@ -340,7 +339,7 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 	t.Run("disabled manager returns 503", func(t *testing.T) {
 		database, closeDB := openServiceTestDB(t)
 		defer closeDB()
-		fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+		fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 		defer fixture.httpServer.Close()
 
 		req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodPost, "/internal/v1/runner-chat/sessions", `{"app_session_key":"svc:1","runner_id":"opencode"}`)
@@ -362,19 +361,18 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 		database, closeDB := openServiceTestDB(t)
 		defer closeDB()
 		cfg := config.Default()
-		cfg.AgentCLI.Enabled = true
-		specs := agentcli.AllRunners()
+		specs := runners.AllRunners()
 		for i := range specs {
-			if specs[i].ID == agentcli.RunnerCodex {
+			if specs[i].ID == runners.RunnerCodex {
 				specs[i].Supports.Chat.ChatNativeSession = false
 				specs[i].Supports.Chat.ChatResume = false
 				specs[i].Supports.Chat.ChatSessionRefExtractable = false
 			}
 		}
-		registry := agentcli.NewRunnerRegistry(specs, []agentcli.RunnerAdapter{agentcli.NewCodexAdapter()})
+		registry := runners.NewRunnerRegistry(specs, []runners.RunnerAdapter{runners.NewCodexAdapter()})
 		jobs := jobs.NewRegistry(time.Minute, 32)
-		manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
-		chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
+		manager := &runners.Manager{DB: database, Jobs: jobs, Cfg: cfg.Runners, Registry: registry}
+		chatManager := &runners.ChatManager{DB: database, Manager: manager, Jobs: jobs}
 		fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
 		defer fixture.httpServer.Close()
 
@@ -401,11 +399,10 @@ func TestServiceRunnerChat_ActiveTurnConflictAndAbort(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
 	registry := newDiscoveryRegistry()
 	jobs := jobs.NewRegistry(time.Minute, 32)
-	manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
-	chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
+	manager := &runners.Manager{DB: database, Jobs: jobs, Cfg: cfg.Runners, Registry: registry}
+	chatManager := &runners.ChatManager{DB: database, Manager: manager, Jobs: jobs}
 	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
 	defer fixture.httpServer.Close()
 
@@ -446,7 +443,7 @@ func TestServiceRunnerChat_ActiveTurnConflictAndAbort(t *testing.T) {
 func TestServiceRunnerChat_StreamReplaysAfterSeqAndEmitsDoneSnapshot(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	sess, turn := seedRunnerChatTerminalTurn(t, database)
@@ -480,7 +477,7 @@ func TestServiceRunnerChat_StreamReplaysAfterSeqAndEmitsDoneSnapshot(t *testing.
 func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	sess, turn := seedRunnerChatTerminalTurn(t, database)
@@ -538,7 +535,7 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 func TestServiceChatSessions_LifecyclePaginationAndForkErrors(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 	ctx := context.Background()
 
@@ -614,7 +611,7 @@ func TestServiceChatSessions_LifecyclePaginationAndForkErrors(t *testing.T) {
 func TestServiceChatSessionsListBackfillsExternalChannelMessages(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 	ctx := context.Background()
 
@@ -639,7 +636,7 @@ func TestServiceChatSessionsListBackfillsExternalChannelMessages(t *testing.T) {
 func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	missingReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/runner-chat/sessions/rcs-missing/turns/rct-missing", "")
@@ -702,11 +699,10 @@ func TestServiceRunnerChat_ApproveRejectsWithoutApproval(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
 	registry := newDiscoveryRegistry()
 	jobsReg := jobs.NewRegistry(time.Minute, 32)
-	manager := &agentcli.Manager{DB: database, Jobs: jobsReg, Cfg: cfg.AgentCLI, Registry: registry}
-	chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobsReg}
+	manager := &runners.Manager{DB: database, Jobs: jobsReg, Cfg: cfg.Runners, Registry: registry}
+	chatManager := &runners.ChatManager{DB: database, Manager: manager, Jobs: jobsReg}
 	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
 	defer fixture.httpServer.Close()
 
@@ -734,7 +730,7 @@ func TestServiceRunnerChat_ApproveRejectsWithoutApproval(t *testing.T) {
 func TestServiceRunnerChat_ApproveRejectsWrongMethod(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	sess, _ := seedRunnerChatTerminalTurn(t, database)

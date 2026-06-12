@@ -9,9 +9,6 @@ import (
 func TestApplyBalanced(t *testing.T) {
 	cfg := config.Default()
 	Apply(&cfg, ModeBalanced)
-	if !cfg.Tools.RestrictToWorkspace {
-		t.Fatal("expected workspace restriction enabled")
-	}
 	if !cfg.Security.Audit.Enabled {
 		t.Fatal("expected audit enabled")
 	}

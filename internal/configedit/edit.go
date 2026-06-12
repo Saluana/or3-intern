@@ -134,24 +134,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		}
 		return false
 	}
-	if section == "mcp" && fieldKey == "mcp_enabled" {
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false
-		}
-		server.Enabled = value
-		cfg.Tools.MCPServers[channel] = server
-		return true
-	}
-	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false
-		}
-		server.AllowInsecureHTTP = value
-		cfg.Tools.MCPServers[channel] = server
-		return true
-	}
 	if section == "skills_entry" {
 		if strings.TrimSpace(channel) == "" {
 			return false
@@ -172,24 +154,14 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Provider.EnableVision = value
 	case "runtime_consolidation_enabled":
 		cfg.ConsolidationEnabled = value
-	case "context_dynamic_tools":
-		cfg.Context.Tools.DynamicExpose = value
 	case "context_task_card_enabled":
 		cfg.Context.TaskCard.Enabled = value
-	case "context_task_card_enforce_plan":
-		cfg.Context.TaskCard.EnforcePlan = value
 	case "context_manager_enabled":
 		cfg.ContextManager.Enabled = value
 	case "context_manager_allow_task_updates":
 		cfg.ContextManager.AllowTaskUpdates = value
 	case "context_manager_allow_stale_propose":
 		cfg.ContextManager.AllowStalePropose = value
-	case "workspace_restrict", "tools_restrict_to_workspace":
-		cfg.Tools.RestrictToWorkspace = value
-	case "workspace_allow_full_read":
-		cfg.Tools.AllowFullFileRead = value
-	case "tools_enable_exec":
-		cfg.Tools.EnableExec = value
 	case "docindex_enabled":
 		cfg.DocIndex.Enabled = value
 	case "skills_enable_exec":
@@ -243,8 +215,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Hardening.Sandbox.Enabled = value
 	case "hardening_sandbox_allow_network":
 		cfg.Hardening.Sandbox.AllowNetwork = value
-	case "hardening_quotas_enabled":
-		cfg.Hardening.Quotas.Enabled = value
 	case "session_direct_messages_share_default":
 		cfg.Session.DirectMessagesShareDefault = value
 	case "automation_cron_enabled":
@@ -259,10 +229,8 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Service.Enabled = value
 	case "service_allow_unauthenticated_pairing":
 		cfg.Service.AllowUnauthenticatedPairing = value
-	case "agentCLI_enabled":
-		cfg.AgentCLI.Enabled = value
-	case "agentCLI_allow_sandbox_auto":
-		cfg.AgentCLI.AllowSandboxAuto = value
+	case "runners_allow_sandbox_auto":
+		cfg.Runners.AllowSandboxAuto = value
 	default:
 		return false
 	}
@@ -284,14 +252,8 @@ func ApplyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		applyAgentAccessRuntimeRequirements(cfg, choice)
 		return true, nil
 	}
-	if section == "mcp" && fieldKey == "mcp_transport" {
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false, nil
-		}
-		server.Transport = choice
-		cfg.Tools.MCPServers[channel] = server
-		return true, nil
+	if section == "mcp" {
+		return false, nil
 	}
 	switch fieldKey {
 	case "provider_preset":
@@ -327,21 +289,21 @@ func ApplyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 		}
 		cfg.Service.MaxCapability = normalized
 		return true, nil
-	case "agentCLI_default_mode":
+	case "runners_default_mode":
 		switch choice {
 		case "review", "safe_edit", "sandbox_auto":
-			cfg.AgentCLI.DefaultMode = choice
+			cfg.Runners.DefaultMode = choice
 			return true, nil
 		default:
-			return false, fmt.Errorf("agentCLI.defaultMode must be review, safe_edit, or sandbox_auto")
+			return false, fmt.Errorf("runners.defaultMode must be review, safe_edit, or sandbox_auto")
 		}
-	case "agentCLI_default_isolation":
+	case "runners_default_isolation":
 		switch choice {
 		case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
-			cfg.AgentCLI.DefaultIsolation = choice
+			cfg.Runners.DefaultIsolation = choice
 			return true, nil
 		default:
-			return false, fmt.Errorf("agentCLI.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
+			return false, fmt.Errorf("runners.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
 		}
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)
@@ -504,47 +466,7 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return false, nil
 	}
 	if section == "mcp" {
-		if cfg.Tools.MCPServers == nil {
-			cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
-		}
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false, nil
-		}
-		switch fieldKey {
-		case "mcp_command":
-			server.Command = value
-		case "mcp_args":
-			server.Args = splitAndCompact(value)
-		case "mcp_child_env_allowlist":
-			server.ChildEnvAllowlist = splitAndCompact(value)
-		case "mcp_url":
-			server.URL = value
-		case "mcp_headers":
-			headers, err := parseStringMap(value)
-			if err != nil {
-				return false, err
-			}
-			server.Headers = headers
-		case "mcp_env":
-			env, err := parseStringMap(value)
-			if err != nil {
-				return false, err
-			}
-			server.Env = env
-		case "mcp_connect_timeout":
-			changed, err := setIntValue(&server.ConnectTimeoutSeconds, value, fieldKey)
-			cfg.Tools.MCPServers[channel] = server
-			return changed, err
-		case "mcp_tool_timeout":
-			changed, err := setIntValue(&server.ToolTimeoutSeconds, value, fieldKey)
-			cfg.Tools.MCPServers[channel] = server
-			return changed, err
-		default:
-			return false, nil
-		}
-		cfg.Tools.MCPServers[channel] = server
-		return true, nil
+		return false, nil
 	}
 	if section == "skills_entry" {
 		if strings.TrimSpace(channel) == "" {
@@ -788,8 +710,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Context.Sections.SystemCore, value, fieldKey)
 	case "context_section_soul_identity":
 		return setIntValue(&cfg.Context.Sections.SoulIdentity, value, fieldKey)
-	case "context_section_tool_policy":
-		return setIntValue(&cfg.Context.Sections.ToolPolicy, value, fieldKey)
 	case "context_section_active_task_card":
 		return setIntValue(&cfg.Context.Sections.ActiveTaskCard, value, fieldKey)
 	case "context_section_pinned_memory":
@@ -802,8 +722,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Context.Sections.MemoryDigest, value, fieldKey)
 	case "context_section_workspace":
 		return setIntValue(&cfg.Context.Sections.WorkspaceContext, value, fieldKey)
-	case "context_section_tool_schemas":
-		return setIntValue(&cfg.Context.Sections.ToolSchemas, value, fieldKey)
 	case "context_task_card_max_refs":
 		return setIntValue(&cfg.Context.TaskCard.MaxRefs, value, fieldKey)
 	case "context_task_card_max_plan":
@@ -830,43 +748,12 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "workspace_allowed_dir":
 		cfg.AllowedDir = value
 		return true, nil
-	case "tools_brave":
-		if clearRequested {
-			cfg.Tools.BraveAPIKey = ""
-			return true, nil
-		}
-		if value != "" {
-			cfg.Tools.BraveAPIKey = value
-		}
-		return true, nil
-	case "tools_web_proxy":
-		cfg.Tools.WebProxy = value
-		return true, nil
-	case "tools_enable_exec":
-		enabled, err := parseBoolValue(value, fieldKey)
-		if err != nil {
-			return false, err
-		}
-		cfg.Tools.EnableExec = enabled
-		return true, nil
-	case "workspace_restrict", "tools_restrict_to_workspace":
-		enabled, err := parseBoolValue(value, fieldKey)
-		if err != nil {
-			return false, err
-		}
-		cfg.Tools.RestrictToWorkspace = enabled
-		return true, nil
 	case "hardening_guarded_tools":
 		enabled, err := parseBoolValue(value, fieldKey)
 		if err != nil {
 			return false, err
 		}
 		cfg.Hardening.GuardedTools = enabled
-		return true, nil
-	case "tools_exec_timeout":
-		return setIntValue(&cfg.Tools.ExecTimeoutSeconds, value, fieldKey)
-	case "tools_path_append":
-		cfg.Tools.PathAppend = value
 		return true, nil
 	case "docindex_roots":
 		cfg.DocIndex.Roots = splitAndCompact(value)
@@ -985,25 +872,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "hardening_sandbox_writable_paths":
 		cfg.Hardening.Sandbox.WritablePaths = splitAndCompact(value)
 		return true, nil
-	case "hardening_quota_exceeded_action":
-		action := config.QuotaExceededAction(strings.ToLower(strings.TrimSpace(value)))
-		if action != config.QuotaExceededActionAsk && action != config.QuotaExceededActionFail {
-			return false, fmt.Errorf("%s must be ask or fail", fieldKey)
-		}
-		cfg.Hardening.Quotas.ExceededAction = action
-		return true, nil
-	case "hardening_max_tool_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxToolCalls, value, fieldKey)
-	case "hardening_max_exec_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxExecCalls, value, fieldKey)
-	case "hardening_max_web_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxWebCalls, value, fieldKey)
-	case "hardening_max_session_tool_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxSessionToolCalls, value, fieldKey)
-	case "hardening_max_session_exec_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxSessionExecCalls, value, fieldKey)
-	case "hardening_max_session_web_calls":
-		return setIntValue(&cfg.Hardening.Quotas.MaxSessionWebCalls, value, fieldKey)
 	case "session_identity_links":
 		links, err := parseIdentityLinks(value)
 		if err != nil {
@@ -1068,25 +936,22 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "service_trusted_browser_cidrs":
 		cfg.Service.TrustedBrowserCIDRs = splitAndCompact(value)
 		return true, nil
-	case "agentCLI_max_concurrent":
-		return setIntValue(&cfg.AgentCLI.MaxConcurrent, value, fieldKey)
-	case "agentCLI_max_queued":
-		return setIntValue(&cfg.AgentCLI.MaxQueued, value, fieldKey)
-	case "agentCLI_default_timeout":
-		return setIntValue(&cfg.AgentCLI.DefaultTimeoutSeconds, value, fieldKey)
-	case "agentCLI_max_timeout":
-		return setIntValue(&cfg.AgentCLI.MaxTimeoutSeconds, value, fieldKey)
-	case "agentCLI_disabled_runners":
-		cfg.AgentCLI.DisabledRunners = splitAndCompact(value)
+	case "runners_max_concurrent":
+		return setIntValue(&cfg.Runners.MaxConcurrent, value, fieldKey)
+	case "runners_max_queued":
+		return setIntValue(&cfg.Runners.MaxQueued, value, fieldKey)
+	case "runners_default_timeout":
+		return setIntValue(&cfg.Runners.DefaultTimeoutSeconds, value, fieldKey)
+	case "runners_max_timeout":
+		return setIntValue(&cfg.Runners.MaxTimeoutSeconds, value, fieldKey)
+	case "runners_disabled_runners":
+		cfg.Runners.Disabled = splitAndCompact(value)
 		return true, nil
-	case "agentCLI_default_runner":
-		cfg.AgentCLI.DefaultRunner = strings.ToLower(strings.TrimSpace(value))
+	case "runners_default":
+		cfg.Runners.Default = strings.ToLower(strings.TrimSpace(value))
 		return true, nil
-	case "agentCLI_enabled":
-		cfg.AgentCLI.Enabled = value == "true" || value == "on" || value == "1"
-		return true, nil
-	case "agentCLI_allow_sandbox_auto":
-		cfg.AgentCLI.AllowSandboxAuto = value == "true" || value == "on" || value == "1"
+	case "runners_allow_sandbox_auto":
+		cfg.Runners.AllowSandboxAuto = value == "true" || value == "on" || value == "1"
 		return true, nil
 	default:
 		return false, nil
@@ -1230,11 +1095,9 @@ func applyAgentAccessRuntimeRequirements(cfg *config.Config, level string) {
 		cfg.Service.MaxCapability = "privileged"
 		cfg.Hardening.GuardedTools = true
 		cfg.Hardening.PrivilegedTools = true
-		cfg.Tools.EnableExec = true
 	case config.AccessLevelOperator:
 		cfg.Service.MaxCapability = "guarded"
 		cfg.Hardening.GuardedTools = true
-		cfg.Tools.EnableExec = true
 	}
 }
 

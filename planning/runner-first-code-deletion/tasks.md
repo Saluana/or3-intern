@@ -89,7 +89,9 @@ Temporary migration checklist:
 - [x] Register Telegram bot commands with `setMyCommands` for command-name autocomplete/discoverability, while using inline keyboards, reply keyboards, or follow-up prompts for runner/model option selection. (Requirements: 2b)
 - [x] Add tests for command interception, approval priority, Telegram command registration, preference persistence, metadata injection, and stale preference guidance. (Requirements: 2b, 10)
 
-## 9. Delete model-callable tool implementations
+## 9. Delete model-callable tool implementations (completed)
+
+All model-callable tool implementations have been removed. Files deleted include `files.go`, `exec.go`, `web.go`, `web_markdown.go`, `html_converter.go`, `internal/tools/memory.go` (as a model-callable tool), `artifact.go`, `cron.go`, `message.go`, and related skill read/run tools, along with their tests. Service file APIs now use direct safe filesystem helpers, terminal/exec is explicit service code, cron/channel management is direct service/admin API only, and memory access goes through the runner memory bridge plus the typed memory service package.
 
 - [x] Delete file tools: `files.go`, file tool tests, and model-callable read/write/edit/list/search constants. Keep service file APIs using direct safe filesystem helpers. (Requirements: 5, 6)
 - [x] Delete exec tools: `exec.go`, sandbox/tool exec tests, and approval subjects that only apply to model tool execution. Keep terminal/service command execution as explicit service code if still supported. (Requirements: 5, 6)
@@ -109,7 +111,9 @@ Temporary migration checklist:
 - [x] Confirm `internal/agent` directory is either gone or contains no production code after extractions. (Requirements: 1, 3, 9)
 - [x] Remove channel worker `rt.Handle` fallback and dead `channelWorkerRuntime` clone helper from `main.go`. (Requirements: 1, 2)
 
-## 11. Simplify service/controlplane API surface
+## 11. Simplify service/controlplane API surface (completed)
+
+Legacy service APIs and the app's direct-turn fallbacks have been removed. `internal/controlplane` no longer depends on `tools.Registry` or `agent.Runtime`, direct-turn validation against allowed tool names/capability ceilings is gone, and the tool catalog/capabilities endpoints that advertised OR3 model-callable tools have been deleted. `or3-app` no longer calls `/internal/v1/turns`, `/internal/v1/subagents`, or any direct-turn/subagent/replay-tool path — all chat execution goes through runner chat.
 
 - [x] Remove `tools.Registry` and `agent.Runtime` dependencies from `internal/controlplane`. (Requirements: 1, 5, 6)
 - [x] Remove service request validation based on allowed tool names/capability ceilings for direct turns. (Requirements: 5, 7)
@@ -163,3 +167,4 @@ Temporary migration checklist:
 - Building a new plugin/tool framework for runners.
 - Preserving compatibility for external clients of old direct-turn or subagent endpoints.
 - Recreating runner-native shell/file/web behavior inside OR3.
+- Reintroducing a live runner-first mode switch. During cleanup, `agentCLI.enabled` (the toggle that gated runner-first vs. built-in runtime mode) was collapsed into a hardcoded always-on constant; the legacy off-mode path is no longer reachable.

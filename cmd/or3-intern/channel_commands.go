@@ -9,18 +9,18 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/channels/cli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 type channelCommandHandler struct {
 	Config          config.Config
 	DB              *db.DB
-	AgentCLIManager *agentcli.Manager
+	AgentCLIManager *runners.Manager
 	Channels        *rootchannels.Manager
 	CLI             *cli.Deliverer
 }
@@ -95,12 +95,12 @@ func (h *channelCommandHandler) settingsText(ctx context.Context, sessionKey str
 	meta, _ := h.sessionMeta(ctx, sessionKey)
 	runnerID := strings.TrimSpace(meta.RunnerID)
 	if runnerID == "" {
-		runnerID = string(agentcli.ResolveDefaultRunner(h.Config)) + " (default)"
+		runnerID = string(runners.ResolveDefaultRunner(h.Config)) + " (default)"
 	}
 	model := strings.TrimSpace(meta.RunnerModel)
 	if model == "" {
 		defaultRunner := strings.TrimSuffix(runnerID, " (default)")
-		model = strings.TrimSpace(h.Config.AgentCLI.DefaultModels[defaultRunner])
+		model = strings.TrimSpace(h.Config.Runners.DefaultModels[defaultRunner])
 		if model == "" {
 			model = "runner default"
 		} else {
@@ -111,11 +111,11 @@ func (h *channelCommandHandler) settingsText(ctx context.Context, sessionKey str
 }
 
 func (h *channelCommandHandler) runnersText() string {
-	specs := agentcli.SelectableRunners()
+	specs := runners.SelectableRunners()
 	if len(specs) == 0 {
 		return "No selectable runners are registered."
 	}
-	defaultRunner := string(agentcli.ResolveDefaultRunner(h.Config))
+	defaultRunner := string(runners.ResolveDefaultRunner(h.Config))
 	lines := []string{"Selectable runners:"}
 	for _, spec := range specs {
 		label := string(spec.ID)
@@ -125,7 +125,7 @@ func (h *channelCommandHandler) runnersText() string {
 		if string(spec.ID) == defaultRunner {
 			label += " (default)"
 		}
-		if agentcli.IsRunnerDisabledByConfig(h.Config, spec.ID) {
+		if runners.IsRunnerDisabledByConfig(h.Config, spec.ID) {
 			label += " (disabled)"
 		}
 		lines = append(lines, "- "+label)
@@ -140,7 +140,7 @@ func (h *channelCommandHandler) handleRunnerCommand(ctx context.Context, ev bus.
 		return
 	}
 	runnerID := strings.ToLower(strings.TrimSpace(args[0]))
-	if err := agentcli.ValidateSelectableRunner(h.Config, agentcli.RunnerID(runnerID)); err != nil {
+	if err := runners.ValidateSelectableRunner(h.Config, runners.RunnerID(runnerID)); err != nil {
 		h.deliver(ctx, ev, "I couldn't use that runner: "+err.Error()+"\n\n"+h.runnersText())
 		return
 	}
@@ -169,15 +169,15 @@ func (h *channelCommandHandler) handleModelsCommand(ctx context.Context, ev bus.
 		runnerID = strings.TrimSpace(meta.RunnerID)
 	}
 	if runnerID == "" {
-		runnerID = string(agentcli.ResolveDefaultRunner(h.Config))
+		runnerID = string(runners.ResolveDefaultRunner(h.Config))
 	}
-	if err := agentcli.ValidateSelectableRunner(h.Config, agentcli.RunnerID(runnerID)); err != nil {
+	if err := runners.ValidateSelectableRunner(h.Config, runners.RunnerID(runnerID)); err != nil {
 		h.deliver(ctx, ev, "I couldn't list models for that runner: "+err.Error())
 		return
 	}
 	models := h.runnerModels(ctx, runnerID)
 	if len(models) == 0 {
-		defaultModel := strings.TrimSpace(h.Config.AgentCLI.DefaultModels[runnerID])
+		defaultModel := strings.TrimSpace(h.Config.Runners.DefaultModels[runnerID])
 		if defaultModel != "" {
 			h.deliver(ctx, ev, fmt.Sprintf("No live model list is available for %s. Current configured default: %s. Use /model <name> to set a known runner-supported model.", runnerID, defaultModel))
 			return
@@ -212,9 +212,9 @@ func (h *channelCommandHandler) handleModelCommand(ctx context.Context, ev bus.E
 	meta, _ := h.sessionMeta(ctx, ev.SessionKey)
 	runnerID := strings.TrimSpace(meta.RunnerID)
 	if runnerID == "" {
-		runnerID = string(agentcli.ResolveDefaultRunner(h.Config))
+		runnerID = string(runners.ResolveDefaultRunner(h.Config))
 	}
-	if err := agentcli.ValidateSelectableRunner(h.Config, agentcli.RunnerID(runnerID)); err != nil {
+	if err := runners.ValidateSelectableRunner(h.Config, runners.RunnerID(runnerID)); err != nil {
 		h.deliver(ctx, ev, "Choose a runner before setting a model: "+err.Error())
 		return
 	}
@@ -250,14 +250,14 @@ func (h *channelCommandHandler) applyPreferences(ctx context.Context, ev bus.Eve
 	savedRunnerID := strings.TrimSpace(meta.RunnerID)
 	model := strings.TrimSpace(meta.RunnerModel)
 	if savedRunnerID != "" {
-		if err := agentcli.ValidateSelectableRunner(h.Config, agentcli.RunnerID(savedRunnerID)); err != nil {
+		if err := runners.ValidateSelectableRunner(h.Config, runners.RunnerID(savedRunnerID)); err != nil {
 			h.deliver(ctx, ev, "The saved runner for this channel is no longer available: "+err.Error()+"\nUse /runner <id> to choose a new runner or /reset to use defaults.")
 			return ev, true, err
 		}
 	}
 	runnerID := savedRunnerID
 	if runnerID == "" {
-		runnerID = string(agentcli.ResolveDefaultRunner(h.Config))
+		runnerID = string(runners.ResolveDefaultRunner(h.Config))
 	}
 	if model != "" {
 		if err := h.validateModel(ctx, runnerID, model); err != nil {
@@ -296,7 +296,7 @@ func (h *channelCommandHandler) sessionMeta(ctx context.Context, sessionKey stri
 }
 
 func (h *channelCommandHandler) runnerLabel(runnerID string) string {
-	for _, spec := range agentcli.SelectableRunners() {
+	for _, spec := range runners.SelectableRunners() {
 		if strings.EqualFold(string(spec.ID), runnerID) {
 			if strings.TrimSpace(spec.DisplayName) != "" {
 				return strings.TrimSpace(spec.DisplayName)
@@ -307,29 +307,29 @@ func (h *channelCommandHandler) runnerLabel(runnerID string) string {
 	return runnerID
 }
 
-func (h *channelCommandHandler) runnerModels(ctx context.Context, runnerID string) []agentcli.RunnerModelInfo {
+func (h *channelCommandHandler) runnerModels(ctx context.Context, runnerID string) []runners.RunnerModelInfo {
 	if h == nil || h.AgentCLIManager == nil || h.AgentCLIManager.Registry == nil {
 		return nil
 	}
-	runner := agentcli.RunnerID(strings.TrimSpace(runnerID))
+	runner := runners.RunnerID(strings.TrimSpace(runnerID))
 	if info, ok := h.AgentCLIManager.Registry.DetectCached(runner, 5*time.Minute); ok {
 		return sortedRunnerModels(info.Runtime.Models)
 	}
-	info := agentcli.Detect(ctx, runnerSpecForID(runner), h.AgentCLIManager.DetectOptions())
+	info := runners.Detect(ctx, runnerSpecForID(runner), h.AgentCLIManager.DetectOptions())
 	return sortedRunnerModels(info.Runtime.Models)
 }
 
-func runnerSpecForID(runnerID agentcli.RunnerID) agentcli.RunnerSpec {
-	for _, spec := range agentcli.SelectableRunners() {
+func runnerSpecForID(runnerID runners.RunnerID) runners.RunnerSpec {
+	for _, spec := range runners.SelectableRunners() {
 		if spec.ID == runnerID {
 			return spec
 		}
 	}
-	return agentcli.RunnerSpec{ID: runnerID}
+	return runners.RunnerSpec{ID: runnerID}
 }
 
-func sortedRunnerModels(models []agentcli.RunnerModelInfo) []agentcli.RunnerModelInfo {
-	out := append([]agentcli.RunnerModelInfo{}, models...)
+func sortedRunnerModels(models []runners.RunnerModelInfo) []runners.RunnerModelInfo {
+	out := append([]runners.RunnerModelInfo{}, models...)
 	sort.Slice(out, func(left, right int) bool {
 		if out[left].Default != out[right].Default {
 			return out[left].Default

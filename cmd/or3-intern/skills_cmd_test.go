@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -291,48 +290,6 @@ func TestBuildSkillsInventory_HostedProfilesForceQuarantineByDefault(t *testing.
 	}
 	if skill.PermissionState != "quarantined" {
 		t.Fatalf("expected hosted profile to quarantine runnable skill by default, got %#v", skill)
-	}
-}
-
-func TestBuildSkillsInventory_AppendsConfiguredPathForBinaryChecks(t *testing.T) {
-	cfg := config.Default()
-	cfg.WorkspaceDir = t.TempDir()
-	binDir := t.TempDir()
-	cfg.Tools.PathAppend = binDir
-	t.Setenv("PATH", "/usr/bin:/bin")
-
-	skillDir := filepath.Join(cfg.WorkspaceDir, "skills", "needs-bin")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
-name: needs-bin
-metadata:
-  openclaw:
-    requires:
-      bins: ["skill-bin"]
----
-# Needs Bin
-`), 0o644); err != nil {
-		t.Fatalf("WriteFile skill: %v", err)
-	}
-	binName := "skill-bin"
-	script := "#!/bin/sh\nexit 0\n"
-	if runtime.GOOS == "windows" {
-		binName += ".cmd"
-		script = "@echo off\r\nexit /b 0\r\n"
-	}
-	if err := os.WriteFile(filepath.Join(binDir, binName), []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile bin: %v", err)
-	}
-
-	inv := buildSkillsInventory(cfg, "", map[string]struct{}{})
-	skill, ok := inv.Get("needs-bin")
-	if !ok {
-		t.Fatal("expected needs-bin skill in inventory")
-	}
-	if !skill.Eligible {
-		t.Fatalf("expected appended PATH to satisfy binary requirement, missing=%v", skill.Missing)
 	}
 }
 

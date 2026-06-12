@@ -521,23 +521,6 @@ func serviceApprovalRequiredPayload(sessionKey string, meta map[string]any, err 
 	return payload
 }
 
-func serviceTurnFallbackText(err error, observer *serviceObserver) (string, bool) {
-	if err == nil || !strings.Contains(err.Error(), "max tool loops exceeded") {
-		return "", false
-	}
-	message := "I couldn't finish that because the tool calls kept failing or looping."
-	if observer != nil {
-		lastToolError := strings.TrimSpace(observer.lastToolError)
-		if lastToolError != "" {
-			if len(lastToolError) > 180 {
-				lastToolError = lastToolError[:180] + "..."
-			}
-			message += " Last tool error: " + lastToolError
-		}
-	}
-	return message, true
-}
-
 func remoteIPKey(raw string) string {
 	addr := strings.TrimSpace(raw)
 	if addr == "" {

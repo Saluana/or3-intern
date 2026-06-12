@@ -13,7 +13,7 @@ import (
 	"or3-intern/internal/turns"
 )
 
-type serviceAgentRunRequest struct {
+type serviceRunnerRunRequest struct {
 	ParentSessionKey string
 	RunnerID         string
 	Task             string
@@ -27,7 +27,7 @@ type serviceAgentRunRequest struct {
 	Warnings         []string
 }
 
-type serviceAgentRunRequestPayload struct {
+type serviceRunnerRunRequestPayload struct {
 	ParentSessionKey      string         `json:"parent_session_key"`
 	ParentSessionKeyCamel string         `json:"parentSessionKey"`
 	RunnerID              string         `json:"runner_id"`
@@ -44,11 +44,11 @@ type serviceAgentRunRequestPayload struct {
 	Meta                  map[string]any `json:"meta"`
 }
 
-func decodeServiceAgentRunRequest(body io.Reader) (serviceAgentRunRequest, error) {
-	var payload serviceAgentRunRequestPayload
+func decodeServiceRunnerRunRequest(body io.Reader) (serviceRunnerRunRequest, error) {
+	var payload serviceRunnerRunRequestPayload
 	fields, err := decodeServiceRequestPayload(body, &payload)
 	if err != nil {
-		return serviceAgentRunRequest{}, err
+		return serviceRunnerRunRequest{}, err
 	}
 	warnings := serviceRequestConflictWarnings(fields,
 		serviceRequestFieldPair{"parent_session_key", "parentSessionKey"},
@@ -59,24 +59,24 @@ func decodeServiceAgentRunRequest(body io.Reader) (serviceAgentRunRequest, error
 
 	parentSessionKey := compat.FirstString(payload.ParentSessionKey, payload.ParentSessionKeyCamel)
 	if parentSessionKey == "" {
-		return serviceAgentRunRequest{}, errors.New("parent_session_key is required")
+		return serviceRunnerRunRequest{}, errors.New("parent_session_key is required")
 	}
 
 	runnerID := compat.FirstString(payload.RunnerID, payload.RunnerIDCamel)
 	if runnerID == "" {
-		return serviceAgentRunRequest{}, errors.New("runner_id is required")
+		return serviceRunnerRunRequest{}, errors.New("runner_id is required")
 	}
 
 	task := strings.TrimSpace(payload.Task)
 	if task == "" {
-		return serviceAgentRunRequest{}, errors.New("task is required")
+		return serviceRunnerRunRequest{}, errors.New("task is required")
 	}
 
 	timeoutSeconds := 0
 	if ts := serviceFirstJSONNumber(payload.TimeoutSeconds, payload.TimeoutSecondsCamel); strings.TrimSpace(ts.String()) != "" {
 		n, err := ts.Int64()
 		if err != nil {
-			return serviceAgentRunRequest{}, fmt.Errorf("invalid timeout_seconds: %w", err)
+			return serviceRunnerRunRequest{}, fmt.Errorf("invalid timeout_seconds: %w", err)
 		}
 		timeoutSeconds = int(n)
 	}
@@ -85,7 +85,7 @@ func decodeServiceAgentRunRequest(body io.Reader) (serviceAgentRunRequest, error
 	if mt := serviceFirstJSONNumber(payload.MaxTurns, payload.MaxTurnsCamel); strings.TrimSpace(mt.String()) != "" {
 		n, err := mt.Int64()
 		if err != nil {
-			return serviceAgentRunRequest{}, fmt.Errorf("invalid max_turns: %w", err)
+			return serviceRunnerRunRequest{}, fmt.Errorf("invalid max_turns: %w", err)
 		}
 		maxTurns = int(n)
 	}
@@ -95,7 +95,7 @@ func decodeServiceAgentRunRequest(body io.Reader) (serviceAgentRunRequest, error
 	mode := strings.TrimSpace(payload.Mode)
 	isolation := strings.TrimSpace(payload.Isolation)
 
-	return serviceAgentRunRequest{
+	return serviceRunnerRunRequest{
 		ParentSessionKey: parentSessionKey,
 		RunnerID:         runnerID,
 		Task:             task,
@@ -167,14 +167,6 @@ func rawJSONEqual(left, right json.RawMessage) bool {
 		return bytes.Equal(bytes.TrimSpace(left), bytes.TrimSpace(right))
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
-}
-
-type serviceReplayToolCallPayload struct {
-	Name               string          `json:"name"`
-	Arguments          json.RawMessage `json:"arguments"`
-	ArgumentsCamel     json.RawMessage `json:"argumentsCamel"`
-	ArgumentsJSON      string          `json:"arguments_json"`
-	ArgumentsJSONCamel string          `json:"argumentsJson"`
 }
 
 func firstNonEmptyString(values ...string) string {

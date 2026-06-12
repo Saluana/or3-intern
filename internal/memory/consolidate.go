@@ -309,7 +309,7 @@ func (c *Consolidator) RunOnce(ctx context.Context, sessionKey string, historyMa
 }
 
 var (
-	errConsolidationParseFailed   = errors.New("consolidation parse failed")
+	errConsolidationParseFailed    = errors.New("consolidation parse failed")
 	errConsolidationNoUsefulMemory = errors.New("consolidation no useful memory")
 )
 

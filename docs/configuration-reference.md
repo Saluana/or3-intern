@@ -32,7 +32,7 @@ Environment overrides are applied after loading `.env` from the current director
 | `runtimeProfile`                                       | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.)                      |
 | `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
 | `subagents`                                            | Legacy compatibility bucket retained for older configs; runner-first builds do not create subagent work |
-| `agentCLI`                                             | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
+| `runners`                                              | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
 | `context`, `contextManager`                            | Memory/retrieval knobs plus legacy prompt/context-manager compatibility settings                     |
 
 ## Minimal shape
@@ -53,7 +53,7 @@ Environment overrides are applied after loading `.env` from the current director
     "contextManager": {},
     "docIndex": {},
     "subagents": {},
-    "agentCLI": {},
+    "runners": {},
     "session": {}
 }
 ```
@@ -371,13 +371,12 @@ when enabled, but it uses the summarization/consolidation path instead.
 - `allowTaskUpdates`
 - `allowStalePropose`
 
-### `agentCLI`
+### `runners`
 
-Controls the external agent CLI delegation subsystem. All fields are under the `agentCLI` key in `config.json`.
+Controls the external agent CLI delegation subsystem. All fields are under the `runners` key in `config.json`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | Feature gate. Must be `true` for chat, channel, and automation turns via external runners. |
 | `defaultRunner` | string | `"opencode"` | Default runner for new chat/automation turns (`opencode`, `codex`, `claude`, `gemini`). |
 | `disabledRunners` | string[] | `[]` | Runner IDs to block from discovery and execution (e.g. `["opencode", "gemini"]`). |
 | `maxConcurrent` | int | `1` | Maximum worker goroutines running external CLIs simultaneously. |
@@ -396,24 +395,22 @@ Environment variable overrides follow the existing `OR3_*` pattern:
 
 | Env var | Maps to |
 |---------|---------|
-| `OR3_AGENT_CLI_ENABLED` | `agentCLI.enabled` (bool) |
-| `OR3_AGENT_CLI_DEFAULT_RUNNER` | `agentCLI.defaultRunner` (string) |
-| `OR3_AGENT_CLI_DISABLED_RUNNERS` | `agentCLI.disabledRunners` (comma-separated string) |
-| `OR3_AGENT_CLI_MAX_CONCURRENT` | `agentCLI.maxConcurrent` (int) |
-| `OR3_AGENT_CLI_MAX_QUEUED` | `agentCLI.maxQueued` (int) |
-| `OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS` | `agentCLI.defaultTimeoutSeconds` (int) |
-| `OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS` | `agentCLI.maxTimeoutSeconds` (int) |
-| `OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO` | `agentCLI.allowSandboxAuto` (bool) |
-| `OR3_AGENT_CLI_DEFAULT_MODE` | `agentCLI.defaultMode` (string) |
-| `OR3_AGENT_CLI_DEFAULT_ISOLATION` | `agentCLI.defaultIsolation` (string) |
+| `OR3_RUNNERS_DEFAULT` | `runners.default` (string) |
+| `OR3_RUNNERS_DISABLED` | `runners.disabledRunners` (comma-separated string) |
+| `OR3_RUNNERS_MAX_CONCURRENT` | `runners.maxConcurrent` (int) |
+| `OR3_RUNNERS_MAX_QUEUED` | `runners.maxQueued` (int) |
+| `OR3_RUNNERS_DEFAULT_TIMEOUT_SECONDS` | `runners.defaultTimeoutSeconds` (int) |
+| `OR3_RUNNERS_MAX_TIMEOUT_SECONDS` | `runners.maxTimeoutSeconds` (int) |
+| `OR3_RUNNERS_ALLOW_SANDBOX_AUTO` | `runners.allowSandboxAuto` (bool) |
+| `OR3_RUNNERS_DEFAULT_MODE` | `runners.defaultMode` (string) |
+| `OR3_RUNNERS_DEFAULT_ISOLATION` | `runners.defaultIsolation` (string) |
 
 Example minimal enablement:
 
 ```json
 {
-  "agentCLI": {
-    "enabled": true,
-    "defaultRunner": "opencode",
+  "runners": {
+    "default": "opencode",
     "maxConcurrent": 2
   }
 }

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/config"
+	"or3-intern/internal/runners"
 )
 
 func TestHandleBusEventWebhookTriggerMetadata(t *testing.T) {
@@ -38,5 +38,5 @@ func TestBootstrapForTriggerReloadsHeartbeat(t *testing.T) {
 	if got := o.bootstrapForTrigger("user_message"); got.HeartbeatTasks != "stale" {
 		t.Fatalf("expected cached bootstrap for user turns")
 	}
-	_ = agentcli.RunnerOpenCode
+	_ = runners.RunnerOpenCode
 }

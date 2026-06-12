@@ -13,14 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agentcli"
-	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
-	"or3-intern/internal/capability"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/streaming"
 	"or3-intern/internal/tools"
@@ -37,129 +35,6 @@ func (s *serviceServer) effectiveServiceProfileName(requested string) string {
 		return profileName
 	}
 	return strings.TrimSpace(s.config.Security.Profiles.Default)
-}
-
-func (s *serviceServer) startApprovedResumeJob(ctx context.Context, issued approval.IssuedApproval, identity serviceAuthIdentity) (string, error) {
-	if s == nil || s.jobs == nil || s.app() == nil {
-		return "", nil
-	}
-	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
-	if sessionKey == "" {
-		return "", nil
-	}
-	switch strings.TrimSpace(issued.Request.Type) {
-	case string(approval.SubjectExec), string(approval.SubjectSkillExec), string(approval.SubjectToolQuota):
-	default:
-		return "", nil
-	}
-	job := s.jobs.Register("turn")
-	meta := map[string]any{
-		"approval_request_id": issued.Request.ID,
-		"approved_resume":     true,
-	}
-	log.Printf("service_approval: resume_registered approval=%d job=%s session=%s", issued.Request.ID, job.ID, sessionKey)
-	s.jobs.Publish(job.ID, "queued", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "queued"}))
-	s.persistServiceJobSummary(context.Background(), job.ID)
-	runCtx, cancel := context.WithCancel(withDetachedContext(ctx))
-	s.jobs.AttachCancel(job.ID, cancel)
-	go s.runApprovedResumeJob(runCtx, job.ID, issued, identity)
-	return job.ID, nil
-}
-
-func (s *serviceServer) runApprovedResumeJob(ctx context.Context, jobID string, issued approval.IssuedApproval, identity serviceAuthIdentity) {
-	defer s.persistServiceJobSummary(context.Background(), jobID)
-	sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID)
-	meta := map[string]any{
-		"approval_request_id": issued.Request.ID,
-		"approved_resume":     true,
-	}
-	log.Printf("service_approval: resume_started approval=%d job=%s session=%s", issued.Request.ID, jobID, sessionKey)
-	s.jobs.Publish(jobID, "started", serviceLifecyclePayload(sessionKey, meta, map[string]any{"status": "running"}))
-	observer := &serviceObserver{ConversationObserver: jobs.ObserverForRegistry(s.jobs, jobID)}
-	finalText, err := s.app().ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
-		IssuedApproval: issued,
-		Capability:     capability.Level(s.config.Service.MaxCapability),
-		Actor:          identity.Actor,
-		Role:           identity.Role,
-		Observer:       observer,
-	})
-	if err != nil {
-		log.Printf("service_approval: resume_error approval=%d job=%s session=%s public_code=%s", issued.Request.ID, jobID, sessionKey, serviceerrors.PublicErrorCode(err))
-		var approvalErr *tools.ApprovalRequiredError
-		if errors.As(err, &approvalErr) && s.deliverApprovedResumeApprovalRequired(ctx, issued.Request, approvalErr) {
-			s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
-			return
-		}
-		s.deliverApprovedResumeCompletion(ctx, issued.Request, approvalResumeFailureMessage(err))
-		s.completeTurnJobWithError(ctx, jobID, err, observer, sessionKey, meta)
-		return
-	}
-	if strings.TrimSpace(observer.finalText) == "" {
-		observer.finalText = strings.TrimSpace(finalText)
-	}
-	completionText, recoveredEmpty := observer.finalTextForCompletion("The approval was accepted, but or3-intern did not return a final response after the resume job. Please retry the command if it still matters.")
-	if recoveredEmpty {
-		log.Printf("service_approval: resume_completed_empty_final approval=%d job=%s session=%s saw_tool=%t last_tool=%s last_tool_status=%s", issued.Request.ID, jobID, sessionKey, observer.sawToolActivity(), observer.lastToolName, observer.lastToolStatus)
-	}
-	payload := map[string]any{"final_text": completionText}
-	if recoveredEmpty {
-		payload["degraded"] = true
-		payload["empty_final_text_recovered"] = true
-	}
-	s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, payload))
-	s.deliverApprovedResumeCompletion(ctx, issued.Request, completionText)
-	log.Printf("service_approval: resume_completed approval=%d job=%s session=%s recovered_empty=%t final_preview=%q", issued.Request.ID, jobID, sessionKey, recoveredEmpty, boundedServiceLogPreview(completionText, 160))
-}
-
-func (s *serviceServer) deliverApprovedResumeApprovalRequired(ctx context.Context, fallbackReq db.ApprovalRequestRecord, approvalErr *tools.ApprovalRequiredError) bool {
-	if s == nil || s.channelDeliverer == nil || approvalErr == nil {
-		return false
-	}
-	req, text := approvalRequiredContinuationPrompt(ctx, s.broker, fallbackReq, approvalErr)
-	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
-	if !isApprovalExternalChannel(requester.Channel) {
-		return false
-	}
-	to := strings.TrimSpace(requester.ReplyTarget)
-	if to == "" {
-		to = strings.TrimSpace(requester.From)
-	}
-	if to == "" || strings.TrimSpace(text) == "" {
-		return false
-	}
-	if err := s.channelDeliverer.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)); err != nil {
-		log.Printf("service_approval: channel_delivery_failed approval=%d channel=%s err=%v", approvalErr.RequestID, requester.Channel, err)
-		return false
-	}
-	return true
-}
-
-func (s *serviceServer) deliverApprovedResumeCompletion(ctx context.Context, req db.ApprovalRequestRecord, text string) {
-	if s == nil || s.channelDeliverer == nil || strings.TrimSpace(text) == "" {
-		return
-	}
-	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
-	if !isApprovalExternalChannel(requester.Channel) {
-		return
-	}
-	to := strings.TrimSpace(requester.ReplyTarget)
-	if to == "" {
-		to = strings.TrimSpace(requester.From)
-	}
-	if to == "" {
-		return
-	}
-	if err := s.channelDeliverer.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)); err != nil {
-		log.Printf("service_approval: channel_delivery_failed approval=%d channel=%s err=%v", req.ID, requester.Channel, err)
-	}
-}
-
-func approvalResumeFailureMessage(err error) string {
-	code := serviceerrors.PublicErrorCode(err)
-	if code == "" {
-		code = serviceerrors.PublicErrorUnknown
-	}
-	return "Approval was accepted, but continuing the request failed (" + code + "). Please retry or review it in the OR3 app."
 }
 
 func isApprovalExternalChannel(channel string) bool {
@@ -190,36 +65,6 @@ func approvalDeliveryMeta(requester approval.RequesterContext) map[string]any {
 		return nil
 	}
 	return meta
-}
-
-func (s *serviceServer) completeTurnJobWithError(ctx context.Context, jobID string, err error, observer *serviceObserver, sessionKey string, meta map[string]any) {
-	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-		s.jobs.Complete(jobID, "aborted", serviceLifecyclePayload(sessionKey, meta, map[string]any{"message": "job aborted"}))
-		return
-	}
-	var approvalErr *tools.ApprovalRequiredError
-	if errors.As(err, &approvalErr) {
-		log.Printf("service_turn: approval_required job=%s session=%s approval=%d trace=%s", jobID, sessionKey, approvalErr.RequestID, serviceMetaText(meta, "trace_id"))
-		s.jobs.Complete(jobID, "approval_required", serviceApprovalRequiredPayload(sessionKey, meta, approvalErr))
-		return
-	}
-	if fallback, ok := serviceTurnFallbackText(err, observer); ok {
-		observer.finalText = fallback
-		s.jobs.Complete(jobID, "completed", serviceLifecyclePayload(sessionKey, meta, map[string]any{"final_text": fallback, "degraded": true}))
-		return
-	}
-	s.jobs.Fail(jobID, servicePublicJobError(err), serviceLifecyclePayload(sessionKey, meta, nil))
-}
-
-func approvalResumeWarning(err error) string {
-	if err == nil {
-		return ""
-	}
-	message := strings.TrimSpace(err.Error())
-	if message == "" {
-		return "Approved, but the automatic resume did not start."
-	}
-	return fmt.Sprintf("Approved, but the automatic resume did not start: %s", message)
 }
 
 func limitServiceRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
@@ -363,33 +208,33 @@ func (s *serviceServer) handleArtifactUpload(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (s *serviceServer) writePersistedAgentCLIRunSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
+func (s *serviceServer) writePersistedRunnerRunSnapshot(w http.ResponseWriter, r *http.Request, jobID string) bool {
 	store := s.control().DB
 	if store == nil {
 		return false
 	}
-	run, ok, err := store.GetAgentCLIRun(r.Context(), jobID)
+	run, ok, err := store.GetRunnerRun(r.Context(), jobID)
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "agent CLI run history unavailable", err)
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner run history unavailable", err)
 		return true
 	}
 	if !ok {
 		return false
 	}
-	response := controlplane.BuildAgentCLIRunResponse(run)
+	response := controlplane.BuildRunnerRunResponse(run)
 	if requestedAt, ok := response["requested_at"]; ok {
 		response["created_at"] = requestedAt
 	}
-	events, err := store.ListAgentCLIEvents(r.Context(), run.JobID, 0, 100)
+	events, err := store.ListRunnerRunEvents(r.Context(), run.JobID, 0, 100)
 	if err != nil {
-		log.Printf("load persisted agent CLI events failed: job=%s err=%v", run.JobID, err)
+		log.Printf("load persisted runner run events failed: job=%s err=%v", run.JobID, err)
 	}
-	response["events"] = s.agentCLIEventsToJobEvents(events)
+	response["events"] = s.runnerRunEventsToJobEvents(events)
 	writeServiceValue(w, http.StatusOK, response)
 	return true
 }
 
-func (s *serviceServer) agentCLIEventsToJobEvents(events []db.AgentCLIEvent) []jobs.Event {
+func (s *serviceServer) runnerRunEventsToJobEvents(events []db.RunnerRunEvent) []jobs.Event {
 	out := make([]jobs.Event, 0, len(events))
 	for _, e := range events {
 		payload := map[string]any{
@@ -690,7 +535,7 @@ func (s *serviceServer) handleAgentRunners(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	appSvc := s.app()
-	detected, err := appSvc.DetectAgentCLIRunners(r.Context())
+	detected, err := appSvc.DetectRunnerRunners(r.Context())
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runner detection unavailable", err)
 		return
@@ -698,19 +543,19 @@ func (s *serviceServer) handleAgentRunners(w http.ResponseWriter, r *http.Reques
 	writeServiceValue(w, http.StatusOK, map[string]any{"runners": detected})
 }
 
-func (s *serviceServer) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/internal/v1/agent-runs" || r.URL.Path == "/internal/v1/agent-runs/" {
+func (s *serviceServer) handleRunnerRuns(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/internal/v1/runner-runs" || r.URL.Path == "/internal/v1/runner-runs/" {
 		switch r.Method {
 		case http.MethodGet:
-			s.handleAgentRunsList(w, r)
+			s.handleRunnerRunsList(w, r)
 		case http.MethodPost:
-			s.handleAgentRunsStart(w, r)
+			s.handleRunnerRunsStart(w, r)
 		default:
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		}
 		return
 	}
-	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/agent-runs/")
+	relative := strings.TrimPrefix(r.URL.Path, "/internal/v1/runner-runs/")
 	parts := strings.SplitN(strings.Trim(relative, "/"), "/", 2)
 	runID := strings.TrimSpace(parts[0])
 	if runID == "" {
@@ -718,17 +563,17 @@ func (s *serviceServer) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(parts) == 2 && parts[1] == "events" {
-		s.handleAgentRunEvents(w, r, runID)
+		s.handleRunnerRunEvents(w, r, runID)
 		return
 	}
 	if r.Method != http.MethodGet {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	s.handleAgentRunRead(w, r, runID)
+	s.handleRunnerRunRead(w, r, runID)
 }
 
-func (s *serviceServer) handleAgentRunsList(w http.ResponseWriter, r *http.Request) {
+func (s *serviceServer) handleRunnerRunsList(w http.ResponseWriter, r *http.Request) {
 	store := s.control().DB
 	if store == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
@@ -743,27 +588,27 @@ func (s *serviceServer) handleAgentRunsList(w http.ResponseWriter, r *http.Reque
 		}
 		limit = n
 	}
-	runs, err := store.ListAgentCLIRuns(r.Context(), db.AgentCLIRunFilter{
+	runs, err := store.ListRunnerRuns(r.Context(), db.RunnerRunFilter{
 		Status:           strings.TrimSpace(r.URL.Query().Get("status")),
 		ParentSessionKey: strings.TrimSpace(r.URL.Query().Get("parent_session_key")),
 		Limit:            limit,
 	})
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runs list unavailable", err)
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner runs list unavailable", err)
 		return
 	}
-	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIRunListResponse(runs))
+	writeServiceValue(w, http.StatusOK, controlplane.BuildRunnerRunListResponse(runs))
 }
 
-func (s *serviceServer) handleAgentRunsStart(w http.ResponseWriter, r *http.Request) {
-	limitServiceRequestBody(w, r, serviceAgentRunsBodyLimit)
-	req, err := decodeServiceAgentRunRequest(r.Body)
+func (s *serviceServer) handleRunnerRunsStart(w http.ResponseWriter, r *http.Request) {
+	limitServiceRequestBody(w, r, serviceRunnerRunsBodyLimit)
+	req, err := decodeServiceRunnerRunRequest(r.Body)
 	if err != nil {
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
 	writeServiceRequestWarnings(w, req.Warnings)
-	agentReq := agentcli.AgentRunRequest{
+	runReq := runners.RunnerRunRequest{
 		ParentSessionKey: req.ParentSessionKey,
 		RunnerID:         req.RunnerID,
 		Task:             req.Task,
@@ -775,9 +620,9 @@ func (s *serviceServer) handleAgentRunsStart(w http.ResponseWriter, r *http.Requ
 		MaxTurns:         req.MaxTurns,
 		Meta:             req.Meta,
 	}
-	run, err := s.app().StartAgentCLIRun(r.Context(), agentReq)
+	run, err := s.app().StartRunnerRun(r.Context(), runReq)
 	if err != nil {
-		writeServiceError(w, r, http.StatusBadRequest, "agent run rejected", err)
+		writeServiceError(w, r, http.StatusBadRequest, "runner run rejected", err)
 		return
 	}
 	writeServiceJSON(w, http.StatusAccepted, map[string]any{
@@ -787,25 +632,25 @@ func (s *serviceServer) handleAgentRunsStart(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (s *serviceServer) handleAgentRunRead(w http.ResponseWriter, r *http.Request, id string) {
+func (s *serviceServer) handleRunnerRunRead(w http.ResponseWriter, r *http.Request, id string) {
 	store := s.control().DB
 	if store == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
 		return
 	}
-	run, ok, err := store.GetAgentCLIRun(r.Context(), id)
+	run, ok, err := store.GetRunnerRun(r.Context(), id)
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "agent run lookup unavailable", err)
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner run lookup unavailable", err)
 		return
 	}
 	if !ok {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "run not found"})
 		return
 	}
-	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIRunResponse(run))
+	writeServiceValue(w, http.StatusOK, controlplane.BuildRunnerRunResponse(run))
 }
 
-func (s *serviceServer) handleAgentRunEvents(w http.ResponseWriter, r *http.Request, runID string) {
+func (s *serviceServer) handleRunnerRunEvents(w http.ResponseWriter, r *http.Request, runID string) {
 	afterSeq := int64(0)
 	if afterStr := r.URL.Query().Get("after_seq"); afterStr != "" {
 		if n, err := strconv.ParseInt(afterStr, 10, 64); err == nil {
@@ -817,19 +662,19 @@ func (s *serviceServer) handleAgentRunEvents(w http.ResponseWriter, r *http.Requ
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
 		return
 	}
-	run, ok, err := store.GetAgentCLIRun(r.Context(), runID)
+	run, ok, err := store.GetRunnerRun(r.Context(), runID)
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "agent run lookup unavailable", err)
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner run lookup unavailable", err)
 		return
 	}
 	if !ok {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "run not found"})
 		return
 	}
-	events, err := store.ListAgentCLIEvents(r.Context(), run.JobID, afterSeq, 200)
+	events, err := store.ListRunnerRunEvents(r.Context(), run.JobID, afterSeq, 200)
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "agent events unavailable", err)
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner run events unavailable", err)
 		return
 	}
-	writeServiceValue(w, http.StatusOK, controlplane.BuildAgentCLIEventListResponse(events))
+	writeServiceValue(w, http.StatusOK, controlplane.BuildRunnerRunEventListResponse(events))
 }

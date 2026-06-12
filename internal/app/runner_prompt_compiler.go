@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
+	"or3-intern/internal/runners"
 )
 
 const (
@@ -100,7 +100,7 @@ func (c *RunnerPromptCompiler) Compile(ctx context.Context, in RunnerPromptCompi
 			volatile = append(volatile, block)
 		}
 	}
-	compiled := agentcli.BuildRunnerPrompt(agentcli.RunnerPromptContext{
+	compiled := runners.BuildRunnerPrompt(runners.RunnerPromptContext{
 		TrustedSystemInstructions: stable,
 		ContextBlocks:             volatile,
 		UserMessage:               userTask,
@@ -118,8 +118,8 @@ func (c *RunnerPromptCompiler) Compile(ctx context.Context, in RunnerPromptCompi
 	}
 }
 
-// PrepareAgentRunRequest applies OR3 prompt compilation to background runner jobs.
-func (c *RunnerPromptCompiler) PrepareAgentRunRequest(ctx context.Context, req agentcli.AgentRunRequest) agentcli.AgentRunRequest {
+// PrepareRunnerRunRequest applies OR3 prompt compilation to background runner jobs.
+func (c *RunnerPromptCompiler) PrepareRunnerRunRequest(ctx context.Context, req runners.RunnerRunRequest) runners.RunnerRunRequest {
 	if c == nil {
 		return req
 	}

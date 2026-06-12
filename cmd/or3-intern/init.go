@@ -60,7 +60,6 @@ func initDefaults(cwd string) config.Config {
 	cwd = strings.TrimSpace(cwd)
 	if cwd != "" {
 		cfg.WorkspaceDir = cwd
-		cfg.Tools.RestrictToWorkspace = true
 	}
 	return cfg
 }

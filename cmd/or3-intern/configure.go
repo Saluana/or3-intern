@@ -26,8 +26,6 @@ var configureSections = []struct {
 	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, and consolidation"},
 	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, dynamic tools, task card, and context manager"},
 	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
-	{Key: "tools", Label: "Tools", Description: "Search, proxy, exec timeout, and PATH settings"},
-	{Key: "mcp", Label: "MCP Servers", Description: "Model Context Protocol server connections and tool registration"},
 	{Key: "docindex", Label: "Doc Index", Description: "Workspace indexing and retrieval controls"},
 	{Key: "skills", Label: "Skills", Description: "Managed skills, trust policy, watch settings, and ClawHub"},
 	{Key: "auth", Label: "Auth", Description: "Passkeys, WebAuthn origins, sessions, step-up, and fallback policy"},
@@ -37,7 +35,7 @@ var configureSections = []struct {
 	{Key: "automation", Label: "Automation", Description: "Cron, heartbeat, webhook, and file-watch triggers"},
 	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email delivery"},
 	{Key: "service", Label: "Service", Description: "Internal authenticated HTTP API listener"},
-	{Key: "agentCLI", Label: "Runners", Description: "External runner selection, OpenCode defaults, queue limits, and sandbox controls"},
+	{Key: "runners", Label: "Runners", Description: "External runner selection, OpenCode defaults, queue limits, and sandbox controls"},
 }
 
 type configureArgs struct {
@@ -280,9 +278,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "mcp":
-		return configureMCPSection(out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service", "agentcli":
+	case "provider", "storage", "runtime", "context", "workspace", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service", "runners":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
@@ -297,25 +293,9 @@ func sectionHasEditableFields(cfg config.Config, section, cwd string) bool {
 	switch section {
 	case "channels":
 		return true
-	case "mcp":
-		return true
 	}
 	fields := buildSectionFields(cfg, section, cwd)
 	return len(fields) > 0
-}
-
-func configureMCPSection(out io.Writer, cfg *config.Config) error {
-	fmt.Fprintln(out, "MCP Servers configuration")
-	if cfg == nil || len(cfg.Tools.MCPServers) == 0 {
-		fmt.Fprintln(out, "No MCP servers configured. Run this command in an interactive terminal to add one.")
-		return nil
-	}
-	for _, name := range sortedMCPServerNames(cfg.Tools.MCPServers) {
-		server := cfg.Tools.MCPServers[name]
-		fmt.Fprintf(out, "- %s: %s, enabled=%t\n", name, server.Transport, server.Enabled)
-	}
-	fmt.Fprintln(out, "Run this command in an interactive terminal to add, edit, remove, or test MCP servers.")
-	return nil
 }
 
 func configureGenericSection(reader *bufio.Reader, out io.Writer, cfg *config.Config, section, cwd string) error {
@@ -325,7 +305,10 @@ func configureGenericSection(reader *bufio.Reader, out io.Writer, cfg *config.Co
 		fields = fields[:9]
 	}
 	if len(fields) == 0 {
-		return fmt.Errorf("section %q has no editable fields", section)
+		if meta.Label != "" {
+			fmt.Fprintf(out, "%s has no editable fields in this build.\n", meta.Label)
+		}
+		return nil
 	}
 	if meta.Label != "" {
 		fmt.Fprintf(out, "%s configuration\n", meta.Label)
@@ -651,9 +634,8 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 	fmt.Fprintf(out, "  Provider: %s (%s)\n", providerLabel, providerSummary)
 	fmt.Fprintf(out, "  Storage: db=%s artifacts=%s\n", cfg.DBPath, cfg.ArtifactsDir)
 	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t model=%s\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled, emptyAsNone(cfg.ConsolidationModel))
-	fmt.Fprintf(out, "  Context: mode=%s maxInput=%d dynamicTools=%t taskCard=%t\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose, cfg.Context.TaskCard.Enabled)
-	fmt.Fprintf(out, "  Workspace: restrict=%t fullRead=%t dir=%s\n", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, workspaceSummary)
-	fmt.Fprintf(out, "  Tools: Brave key configured=%t execTimeout=%ds proxy=%s\n", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy))
+	fmt.Fprintf(out, "  Context: mode=%s maxInput=%d taskCard=%t\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.TaskCard.Enabled)
+	fmt.Fprintf(out, "  Workspace: dir=%s\n", workspaceSummary)
 	fmt.Fprintf(out, "  Skills: exec=%t watch=%t dir=%s\n", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, emptyAsNone(cfg.Skills.ManagedDir))
 	fmt.Fprintf(out, "  Auth: enabled=%t mode=%s stepUp=%ds fallback=%s\n", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, cfg.Auth.StepUpTTLSeconds, emptyAsNone(cfg.Auth.FallbackPolicy))
 	fmt.Fprintf(out, "  Security: secrets=%t audit=%t approvals=%t guardedTools=%t\n", cfg.Security.SecretStore.Enabled, cfg.Security.Audit.Enabled, cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools)

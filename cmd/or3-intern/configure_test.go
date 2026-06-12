@@ -28,11 +28,11 @@ func clearConfigEnvForTest(t *testing.T) {
 }
 
 func TestParseConfigureArgs(t *testing.T) {
-	parsed, err := parseConfigureArgs([]string{"--section", "provider", "--section", "web", "--section", "provider"})
+	parsed, err := parseConfigureArgs([]string{"--section", "provider", "--section", "docindex", "--section", "provider"})
 	if err != nil {
 		t.Fatalf("parseConfigureArgs: %v", err)
 	}
-	if len(parsed.Sections) != 2 || parsed.Sections[0] != "provider" || parsed.Sections[1] != "tools" {
+	if len(parsed.Sections) != 2 || parsed.Sections[0] != "provider" || parsed.Sections[1] != "docindex" {
 		t.Fatalf("unexpected sections: %#v", parsed.Sections)
 	}
 	if _, err := parseConfigureArgs([]string{"--section", "nope"}); err == nil {
@@ -79,10 +79,9 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 	}, "\n"))
 	var out strings.Builder
 
-	// In runner-first mode, the `tools` section drops legacy agent
-	// exec/web-tool fields but keeps still-active workspace/network helpers.
-	// Targeting just `provider` and `tools` should still complete.
-	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "tools"}); err != nil {
+	// In runner-first mode, the `tools` section is gone. Targeting just
+	// `provider` and `docindex` should still complete.
+	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "docindex"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
 	}
 
@@ -102,11 +101,7 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 	// Exec / PATH / exec-allowed-programs are hidden in runner-first mode.
 	// The defaults are still on disk but no TUI input should have written
 	// to them; the input stream was sized for the active fields, so
-	// anything beyond provider would have failed. Path append was always
-	// empty in defaults, so the empty default is the correct assertion.
-	if cfg.Tools.PathAppend != "" {
-		t.Fatalf("path append should remain empty in runner-first, got %q", cfg.Tools.PathAppend)
-	}
+	// anything beyond provider would have failed.
 	if !strings.Contains(out.String(), "Configuration complete.") {
 		t.Fatalf("expected completion output, got %q", out.String())
 	}
@@ -330,10 +325,9 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	sections := map[string][]string{
 		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled", "runtime_consolidation_model"},
 		"context":    {"context_mode", "context_retrieval_multiplier", "context_task_card_enabled"},
-		"tools":      {"tools_web_proxy"},
 		"skills":     {"skills_quarantine", "skills_global_dir", "skills_clawhub_registry"},
 		"security":   {"security_secret_store_enabled", "security_network_allowed_hosts"},
-		"hardening":  {"hardening_sandbox_enabled", "hardening_quota_exceeded_action", "hardening_max_tool_calls", "hardening_max_session_tool_calls"},
+		"hardening":  {"hardening_sandbox_enabled", "hardening_sandbox_bwrap"},
 		"automation": {"automation_cron_enabled", "automation_webhook_enabled", "automation_filewatch_paths"},
 	}
 	for section, wantKeys := range sections {
@@ -371,11 +365,11 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 		"service_max_capability",
 		"docindex_enabled", "docindex_max_files", "docindex_max_chunks",
 		"docindex_refresh_seconds", "docindex_retrieve_limit",
-		"agentcli_enabled", "agentcli_default_runner", "agentcli_max_concurrent",
-		"agentcli_max_queued", "agentcli_allow_sandbox_auto", "agentcli_disabled_runners",
+		"runners_enabled", "runners_default", "runners_max_concurrent",
+		"runners_max_queued", "runners_allow_sandbox_auto", "runners_disabled_runners",
 	}
 	for _, section := range []string{
-		"provider", "tools", "skills", "security", "hardening", "service", "automation", "context", "workspace", "docindex", "agentcli",
+		"provider", "tools", "skills", "security", "hardening", "service", "automation", "context", "workspace", "docindex", "runners",
 	} {
 		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
 			for _, h := range hidden {

@@ -6,14 +6,12 @@ import (
 	"strconv"
 	"strings"
 
-	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
-	"or3-intern/internal/tools"
 )
 
 type channelApprovalHandler struct {
@@ -104,29 +102,10 @@ func (h *channelApprovalHandler) resumeApprovedRequest(ctx context.Context, issu
 		return
 	}
 	requester := approval.RequesterContextFromJSON(issued.Request.RequesterContextJSON)
-	text := app.ErrLegacyToolReplayDisabled.Error()
+	text := "Built-in tool execution resume is no longer supported in runner-first mode. Retry the turn or use a dedicated runner."
 	if h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
 		_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, text, approvalDeliveryMeta(requester))
 	}
-}
-
-func (h *channelApprovalHandler) deliverResumeApprovalRequired(ctx context.Context, fallbackReq db.ApprovalRequestRecord, approvalErr *tools.ApprovalRequiredError) bool {
-	if h == nil || h.Channels == nil || approvalErr == nil {
-		return false
-	}
-	req, text := approvalRequiredContinuationPrompt(ctx, h.Broker, fallbackReq, approvalErr)
-	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
-	if !isApprovalExternalChannel(requester.Channel) {
-		return false
-	}
-	to := strings.TrimSpace(requester.ReplyTarget)
-	if to == "" {
-		to = strings.TrimSpace(requester.From)
-	}
-	if to == "" || strings.TrimSpace(text) == "" {
-		return false
-	}
-	return h.Channels.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)) == nil
 }
 
 func parseChannelApprovalCommand(message string) (parsedApprovalCommand, bool) {

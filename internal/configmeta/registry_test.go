@@ -204,7 +204,6 @@ func TestRegisterFirstSliceFields(t *testing.T) {
 		{"provider", "api_base", "provider.apiBase"},
 		{"provider", "api_key", "provider.apiKey"},
 		{"provider", "openai_api_key", "providers.profiles.openai.apiKey"},
-		{"tools", "enable_exec", "tools.enableExec"},
 		{"service", "enabled", "service.enabled"},
 		{"skills", "trust_policy", "skills.trustPolicy"},
 		{"skills_entry", "enabled", "skills.entries.*.enabled"},
@@ -254,20 +253,6 @@ func TestRegisterFirstSliceFields(t *testing.T) {
 		}
 		if !meta.Secret {
 			t.Error("API key should be marked as secret")
-		}
-	})
-
-	t.Run("Enable exec is danger risk", func(t *testing.T) {
-		meta, ok := Get("tools", "enable_exec")
-		if !ok {
-			t.Error("Get(tools, enable_exec) returned false")
-			return
-		}
-		if meta.Risk != RiskDanger {
-			t.Errorf("Enable exec risk = %v, want %v", meta.Risk, RiskDanger)
-		}
-		if !meta.RestartRequired {
-			t.Error("Enable exec should require restart")
 		}
 	})
 

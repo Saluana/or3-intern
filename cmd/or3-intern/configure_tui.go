@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -19,7 +17,6 @@ import (
 
 	"or3-intern/internal/config"
 	"or3-intern/internal/configedit"
-	"or3-intern/internal/mcp"
 )
 
 type configureTUIOptions struct {
@@ -39,10 +36,6 @@ const (
 	configureScreenReview
 	configureScreenSuccess
 	configureScreenQuitConfirm
-	configureScreenMCPServerList
-	configureScreenMCPNameInput
-	configureScreenMCPForm
-	configureScreenMCPDeleteConfirm
 )
 
 type configureFieldKind int
@@ -78,8 +71,6 @@ type configureListItem struct {
 func (i configureListItem) FilterValue() string { return i.title + " " + i.description + " " + i.key }
 func (i configureListItem) Title() string       { return i.title }
 func (i configureListItem) Description() string { return i.description }
-
-var configureMCPTestManagerFactory serviceMCPTestManagerFactory
 
 type configureKeyMap struct {
 	Up     key.Binding
@@ -185,37 +176,33 @@ func newConfigureStyles() configureStyles {
 }
 
 type configureTUIModel struct {
-	options              configureTUIOptions
-	styles               configureStyles
-	keys                 configureKeyMap
-	help                 help.Model
-	sectionList          list.Model
-	channelList          list.Model
-	mcpList              list.Model
-	textInput            textinput.Model
-	width                int
-	height               int
-	screen               configureScreen
-	cfgPath              string
-	cwd                  string
-	cfg                  config.Config
-	original             config.Config
-	existed              bool
-	loadWarning          string
-	currentSection       string
-	currentChannel       string
-	currentMCPServerName string
-	fieldCursor          int
-	formScroll           int
-	editingFieldKey      string
-	editing              bool
-	dirty                bool
-	errorMessage         string
-	successMessage       string
-	mcpTestMessage       string
-	mcpRestartReminder   bool
-	quitting             bool
-	lastSection          string
+	options         configureTUIOptions
+	styles          configureStyles
+	keys            configureKeyMap
+	help            help.Model
+	sectionList     list.Model
+	channelList     list.Model
+	textInput       textinput.Model
+	width           int
+	height          int
+	screen          configureScreen
+	cfgPath         string
+	cwd             string
+	cfg             config.Config
+	original        config.Config
+	existed         bool
+	loadWarning     string
+	currentSection  string
+	currentChannel  string
+	fieldCursor     int
+	formScroll      int
+	editingFieldKey string
+	editing         bool
+	dirty           bool
+	errorMessage    string
+	successMessage  string
+	quitting        bool
+	lastSection     string
 }
 
 func runConfigureWithTUI(cfgPath, cwd string, args []string, options configureTUIOptions) error {
@@ -266,13 +253,6 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	channelList.SetShowHelp(false)
 	channelList.SetShowPagination(false)
 
-	mcpList := list.New(buildMCPServerItems(cfg, ""), delegate, 36, 16)
-	mcpList.Title = "MCP Servers"
-	mcpList.SetShowStatusBar(false)
-	mcpList.SetFilteringEnabled(false)
-	mcpList.SetShowHelp(false)
-	mcpList.SetShowPagination(false)
-
 	input := textinput.New()
 	input.Prompt = "» "
 	input.CharLimit = 512
@@ -285,7 +265,6 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 		help:        help.New(),
 		sectionList: sectionList,
 		channelList: channelList,
-		mcpList:     mcpList,
 		textInput:   input,
 		screen:      configureScreenSections,
 		cfgPath:     cfgPath,
@@ -300,11 +279,7 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	}
 	if len(model.options.Restricted) == 1 {
 		model.currentSection = model.options.Restricted[0]
-		if model.currentSection == "mcp" {
-			model.screen = configureScreenMCPServerList
-		} else {
-			model.screen = configureScreenForm
-		}
+		model.screen = configureScreenForm
 	}
 	return model
 }
@@ -319,7 +294,6 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		layout := deriveConfigureLayout(msg.Width, msg.Height)
 		m.sectionList.SetSize(layout.navWidth, layout.listHeight)
 		m.channelList.SetSize(layout.navWidth, layout.listHeight)
-		m.mcpList.SetSize(layout.navWidth, layout.listHeight)
 		m.textInput.Width = maxInt(20, layout.contentWidth-8)
 		m.ensureFieldCursorVisible(len(m.activeFields()))
 		return m, nil
@@ -374,9 +348,6 @@ func (m configureTUIModel) updateSectionPicker(msg tea.KeyMsg) (tea.Model, tea.C
 			if item.key == "channels" {
 				m.screen = configureScreenChannels
 				m.channelList.Select(0)
-			} else if item.key == "mcp" {
-				m.screen = configureScreenMCPServerList
-				m.mcpTestMessage = ""
 			} else {
 				m.fieldCursor = 0
 				m.formScroll = 0
@@ -410,168 +381,6 @@ func (m configureTUIModel) updateChannelPicker(msg tea.KeyMsg) (tea.Model, tea.C
 	return m, cmd
 }
 
-func (m configureTUIModel) updateMCPServerList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		if len(m.options.Restricted) == 1 && m.options.Restricted[0] == "mcp" {
-			m.quitting = true
-			return m, tea.Quit
-		}
-		m.screen = configureScreenSections
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Add) {
-		return m.startMCPNameInput()
-	}
-	if key.Matches(msg, m.keys.Delete) {
-		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
-			m.currentMCPServerName = item.key
-			m.screen = configureScreenMCPDeleteConfirm
-		}
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Test) {
-		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
-			m.currentMCPServerName = item.key
-			m.testMCPServer(item.key)
-		}
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Select) {
-		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok {
-			if item.key == "__add__" {
-				return m.startMCPNameInput()
-			}
-			m.currentMCPServerName = item.key
-			m.currentSection = "mcp"
-			m.fieldCursor = 0
-			m.formScroll = 0
-			m.mcpTestMessage = ""
-			m.screen = configureScreenMCPForm
-		}
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.mcpList, cmd = m.mcpList.Update(msg)
-	return m, cmd
-}
-
-func (m configureTUIModel) startMCPNameInput() (tea.Model, tea.Cmd) {
-	m.currentSection = "mcp"
-	m.currentMCPServerName = ""
-	m.errorMessage = ""
-	m.textInput.Reset()
-	m.textInput.Focus()
-	m.textInput.EchoMode = textinput.EchoNormal
-	m.textInput.Prompt = "Name » "
-	m.textInput.Placeholder = "filesystem"
-	m.screen = configureScreenMCPNameInput
-	return m, textinput.Blink
-}
-
-func (m configureTUIModel) updateMCPNameInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		m.textInput.Blur()
-		m.screen = configureScreenMCPServerList
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Select) {
-		name := strings.TrimSpace(m.textInput.Value())
-		if name == "" {
-			m.errorMessage = "MCP server name is required."
-			return m, nil
-		}
-		if m.cfg.Tools.MCPServers == nil {
-			m.cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
-		}
-		if _, exists := m.cfg.Tools.MCPServers[name]; exists {
-			m.errorMessage = "MCP server name already exists."
-			return m, nil
-		}
-		m.cfg.Tools.MCPServers[name] = config.MCPServerConfig{Enabled: true, Transport: "stdio"}
-		m.currentMCPServerName = name
-		m.currentSection = "mcp"
-		m.fieldCursor = 0
-		m.formScroll = 0
-		m.dirty = true
-		m.lastSection = "mcp"
-		m.mcpRestartReminder = true
-		m.errorMessage = ""
-		m.textInput.Blur()
-		m.refreshLists()
-		m.screen = configureScreenMCPForm
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
-}
-
-func (m configureTUIModel) updateMCPDeleteConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y":
-		if m.cfg.Tools.MCPServers != nil {
-			delete(m.cfg.Tools.MCPServers, m.currentMCPServerName)
-		}
-		m.dirty = true
-		m.lastSection = "mcp"
-		m.mcpRestartReminder = true
-		m.currentMCPServerName = ""
-		m.refreshLists()
-		m.screen = configureScreenMCPServerList
-	case "n", "N", "esc":
-		m.screen = configureScreenMCPServerList
-	}
-	return m, nil
-}
-
-func (m *configureTUIModel) testMCPServer(name string) {
-	server, ok := m.cfg.Tools.MCPServers[name]
-	if !ok {
-		m.errorMessage = "MCP server not found."
-		return
-	}
-	factory := configureMCPTestManagerFactory
-	if factory == nil {
-		factory = func(servers map[string]config.MCPServerConfig) serviceMCPTestManager {
-			return mcp.NewManager(servers)
-		}
-	}
-	manager := factory(map[string]config.MCPServerConfig{name: server})
-	if manager == nil {
-		m.errorMessage = "MCP test manager is unavailable."
-		return
-	}
-	defer manager.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := manager.Connect(ctx); err != nil {
-		m.mcpTestMessage = "test failed: " + boundServiceMCPError(err)
-		m.errorMessage = m.mcpTestMessage
-		m.refreshLists()
-		return
-	}
-	statuses := manager.ServerStatus()
-	for statusName, status := range statuses {
-		if statusName == name {
-			if status.Connected {
-				m.mcpTestMessage = fmt.Sprintf("test ok: %d tools", status.ToolCount)
-				m.errorMessage = ""
-			} else if strings.TrimSpace(status.LastError) != "" {
-				m.mcpTestMessage = "test failed: " + status.LastError
-				m.errorMessage = m.mcpTestMessage
-			} else {
-				m.mcpTestMessage = "test failed: not connected"
-				m.errorMessage = m.mcpTestMessage
-			}
-			m.refreshLists()
-			return
-		}
-	}
-	m.mcpTestMessage = "test failed: status unavailable"
-	m.errorMessage = m.mcpTestMessage
-	m.refreshLists()
-}
-
 func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := m.activeFields()
 	if len(fields) == 0 {
@@ -581,11 +390,6 @@ func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if key.Matches(msg, m.keys.Back) {
 		if m.currentSection == "channels" {
 			m.screen = configureScreenChannels
-			return m, nil
-		}
-		if m.currentSection == "mcp" {
-			m.screen = configureScreenMCPServerList
-			m.mcpTestMessage = ""
 			return m, nil
 		}
 		m.screen = configureScreenSections
@@ -632,10 +436,6 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = configureScreenChannels
 			return m, nil
 		}
-		if m.lastSection == "mcp" || m.currentSection == "mcp" {
-			m.screen = configureScreenMCPServerList
-			return m, nil
-		}
 		if m.currentSection != "" {
 			m.screen = configureScreenForm
 			return m, nil
@@ -644,10 +444,6 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(msg, m.keys.Select, m.keys.Save) {
-		if err := config.ValidateMCPServers(m.cfg.Tools.MCPServers); err != nil {
-			m.errorMessage = err.Error()
-			return m, nil
-		}
 		if err := config.Save(m.cfgPath, m.cfg); err != nil {
 			m.errorMessage = err.Error()
 			return m, nil
@@ -655,9 +451,6 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.original = m.cfg
 		m.dirty = false
 		m.successMessage = "Configuration saved successfully."
-		if m.mcpRestartReminder {
-			m.successMessage += " Restart the service to apply MCP server changes."
-		}
 		m.screen = configureScreenSuccess
 		return m, nil
 	}
@@ -678,16 +471,12 @@ func (m configureTUIModel) updateQuitConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 func (m *configureTUIModel) refreshLists() {
 	m.sectionList.SetItems(buildConfigureSectionItems(m.cfg, m.options.Restricted))
 	m.channelList.SetItems(buildChannelItems(m.cfg))
-	m.mcpList.SetItems(buildMCPServerItems(m.cfg, m.mcpTestMessage))
 	m.ensureFieldCursorVisible(len(m.activeFields()))
 	if m.sectionList.Index() >= len(m.sectionList.Items()) && len(m.sectionList.Items()) > 0 {
 		m.sectionList.Select(len(m.sectionList.Items()) - 1)
 	}
 	if m.channelList.Index() >= len(m.channelList.Items()) && len(m.channelList.Items()) > 0 {
 		m.channelList.Select(len(m.channelList.Items()) - 1)
-	}
-	if m.mcpList.Index() >= len(m.mcpList.Items()) && len(m.mcpList.Items()) > 0 {
-		m.mcpList.Select(len(m.mcpList.Items()) - 1)
 	}
 }
 
@@ -743,9 +532,6 @@ func (m *configureTUIModel) startEditingField(field configureField) {
 
 func (m *configureTUIModel) applyEditedValue(value string) {
 	contextKey := m.currentChannel
-	if m.currentSection == "mcp" {
-		contextKey = m.currentMCPServerName
-	}
 	changed, err := applyFieldValue(&m.cfg, m.currentSection, contextKey, m.editingFieldKey, value)
 	if err != nil {
 		m.errorMessage = err.Error()
@@ -755,9 +541,6 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 	if changed {
 		m.dirty = true
 		m.lastSection = m.currentSection
-		if m.currentSection == "mcp" {
-			m.mcpRestartReminder = true
-		}
 	}
 	if m.currentSection == "channels" {
 		m.lastSection = "channels"
@@ -775,29 +558,17 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 
 func (m *configureTUIModel) toggleField(fieldKey string) {
 	contextKey := m.currentChannel
-	if m.currentSection == "mcp" {
-		contextKey = m.currentMCPServerName
-	}
 	if toggleFieldValue(&m.cfg, m.currentSection, contextKey, fieldKey) {
 		m.dirty = true
 		m.lastSection = m.currentSection
-		if m.currentSection == "mcp" {
-			m.mcpRestartReminder = true
-		}
 	}
 }
 
 func (m *configureTUIModel) cycleChoice(fieldKey string, delta int) {
 	contextKey := m.currentChannel
-	if m.currentSection == "mcp" {
-		contextKey = m.currentMCPServerName
-	}
 	if cycleChoiceValue(&m.cfg, m.currentSection, contextKey, fieldKey, delta) {
 		m.dirty = true
 		m.lastSection = m.currentSection
-		if m.currentSection == "mcp" {
-			m.mcpRestartReminder = true
-		}
 	}
 }
 
@@ -854,9 +625,6 @@ func renderFormScreen(m configureTUIModel) string {
 	if m.currentSection == "channels" && strings.TrimSpace(m.currentChannel) != "" {
 		sectionLabel = sectionLabel + " · " + strings.Title(m.currentChannel)
 	}
-	if m.currentSection == "mcp" && strings.TrimSpace(m.currentMCPServerName) != "" {
-		sectionLabel = "MCP Servers · " + m.currentMCPServerName
-	}
 
 	rows := make([]string, 0, len(visibleFields)+4)
 	rows = append(rows, m.styles.section.Render(fmt.Sprintf("%s Field %d/%d", sectionLabel, m.fieldCursor+1, len(fields))))
@@ -875,9 +643,6 @@ func renderFormScreen(m configureTUIModel) string {
 	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n"))
 
 	hint := formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields))
-	if m.currentSection == "mcp" {
-		hint = fmt.Sprintf("Editing %s. Save and restart the service to apply MCP server changes.", m.currentMCPServerName)
-	}
 	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, hint, layout.compact)}
 	if m.editing {
 		rightSections = append(rightSections, m.styles.section.Render("Editing")+"\n"+m.textInput.View()+"\n"+m.styles.muted.Render("Enter to apply • esc to cancel"))
@@ -887,52 +652,6 @@ func renderFormScreen(m configureTUIModel) string {
 	}
 	right := m.styles.panel.Width(layout.detailWidth).Render(strings.Join(rightSections, "\n\n"))
 	return renderConfigureSplitPanels(layout, left, right)
-}
-
-func renderMCPPanel(m configureTUIModel) string {
-	lines := []string{
-		m.styles.section.Render("MCP add-ons"),
-		fmt.Sprintf("%s %s", m.styles.label.Render("Configured:"), m.styles.value.Render(fmt.Sprintf("%d servers", len(m.cfg.Tools.MCPServers)))),
-		fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%d servers", enabledMCPServerCount(m.cfg)))),
-		"",
-		m.styles.muted.Render("Enter edits the selected server. Press a to add, d to delete, t to test, s to review and save."),
-	}
-	if m.mcpRestartReminder {
-		lines = append(lines, "", m.styles.badgeWarn.Render("restart required")+" "+m.styles.muted.Render("MCP changes apply after restarting the service."))
-	}
-	if strings.TrimSpace(m.mcpTestMessage) != "" {
-		style := m.styles.success
-		if strings.Contains(m.mcpTestMessage, "failed") {
-			style = m.styles.error
-		}
-		lines = append(lines, "", style.Render(m.mcpTestMessage))
-	}
-	if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
-		server := m.cfg.Tools.MCPServers[item.key]
-		lines = append(lines, "",
-			m.styles.section.Render("Selected"),
-			fmt.Sprintf("%s %s", m.styles.label.Render("Name:"), m.styles.value.Render(item.key)),
-			fmt.Sprintf("%s %s", m.styles.label.Render("Transport:"), m.styles.value.Render(server.Transport)),
-			fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%t", server.Enabled))),
-		)
-		if server.Transport == "stdio" {
-			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("Command:"), m.styles.value.Render(emptyAsNone(server.Command))))
-		} else {
-			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("URL:"), m.styles.value.Render(emptyAsNone(server.URL))))
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderMCPNameInput(m configureTUIModel) string {
-	return strings.Join([]string{
-		m.styles.section.Render("Add MCP server"),
-		m.styles.muted.Render("Choose a unique config name. You can edit transport details on the next screen."),
-		"",
-		m.textInput.View(),
-		"",
-		m.styles.muted.Render("Enter to create • esc to cancel"),
-	}, "\n")
 }
 
 func renderSelectedFieldPanel(styles configureStyles, field configureField, width int) string {
@@ -1186,8 +905,7 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 		fmt.Sprintf("%s %s", styles.label.Render("Storage:"), styles.value.Render(cfg.DBPath+" · "+cfg.ArtifactsDir)),
 		fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d · history=%d", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax))),
-		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir)))),
-		fmt.Sprintf("%s %s", styles.label.Render("Tools:"), styles.value.Render(fmt.Sprintf("Brave=%t · exec=%ds · proxy=%s", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy)))),
+		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(emptyAsNone(cfg.WorkspaceDir))),
 		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools, cfg.Security.Network.Enabled))),
 		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
 		fmt.Sprintf("%s %s", styles.label.Render("Automation:"), styles.value.Render(fmt.Sprintf("cron=%t · heartbeat=%t · webhook=%t", cfg.Cron.Enabled, cfg.Heartbeat.Enabled, cfg.Triggers.Webhook.Enabled))),
@@ -1250,69 +968,6 @@ func buildChannelItems(cfg config.Config) []list.Item {
 	return items
 }
 
-func buildMCPServerItems(cfg config.Config, testMessage string) []list.Item {
-	names := sortedMCPServerNames(cfg.Tools.MCPServers)
-	items := make([]list.Item, 0, len(names)+1)
-	items = append(items, configureListItem{key: "__add__", title: "+ Add MCP server", description: "Create a stdio, SSE, or streamable-http server"})
-	for _, name := range names {
-		server := cfg.Tools.MCPServers[name]
-		status := "disabled"
-		if server.Enabled {
-			status = "enabled"
-		}
-		description := fmt.Sprintf("%s · %s", status, server.Transport)
-		if strings.TrimSpace(testMessage) != "" {
-			description += " · " + testMessage
-		}
-		items = append(items, configureListItem{key: name, title: name, description: description})
-	}
-	return items
-}
-
-func enabledMCPServerCount(cfg config.Config) int {
-	count := 0
-	for _, server := range cfg.Tools.MCPServers {
-		if server.Enabled {
-			count++
-		}
-	}
-	return count
-}
-
-func buildMCPFields(cfg config.Config, name string) []configureField {
-	server := cfg.Tools.MCPServers[name]
-	transportChoices := []string{"stdio", "sse", "streamable-http"}
-	fields := []configureField{
-		{Key: "mcp_enabled", Label: "Enabled", Description: "Expose this MCP server's tools after the service restarts.", Kind: configureFieldToggle, Value: onOff(server.Enabled)},
-		{Key: "mcp_transport", Label: "Transport", Description: "How or3-intern connects to the MCP server.", Kind: configureFieldChoice, Value: server.Transport, Choices: transportChoices, ChoiceIndex: indexOfChoice(transportChoices, server.Transport)},
-	}
-	switch server.Transport {
-	case "stdio":
-		fields = append(fields,
-			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start the MCP server.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
-			configureField{Key: "mcp_args", Label: "Arguments", Description: "Command arguments passed to the MCP server command.", Kind: configureFieldText, Value: strings.Join(server.Args, " "), EmptyHint: "-y @modelcontextprotocol/server-filesystem ."},
-			configureField{Key: "mcp_child_env_allowlist", Label: "Child env allowlist", Description: "Comma-separated inherited environment variable names for the child process.", Kind: configureFieldText, Value: strings.Join(server.ChildEnvAllowlist, ","), EmptyHint: "PATH,HOME"},
-		)
-	case "sse", "streamable-http":
-		fields = append(fields,
-			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
-			configureField{Key: "mcp_allow_insecure_http", Label: "Allow insecure HTTP", Description: "Allow plain HTTP only for loopback or localhost endpoints.", Kind: configureFieldToggle, Value: onOff(server.AllowInsecureHTTP)},
-		)
-	default:
-		fields = append(fields,
-			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start stdio MCP servers.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
-			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
-		)
-	}
-	fields = append(fields,
-		configureField{Key: "mcp_headers", Label: "Headers", Description: "Comma-separated HTTP headers as Name=Value. Used only for remote transports.", Kind: configureFieldText, Value: formatStringMap(server.Headers), EmptyHint: "Authorization=Bearer ..."},
-		configureField{Key: "mcp_env", Label: "Environment", Description: "Comma-separated environment variables as NAME=VALUE for stdio servers.", Kind: configureFieldText, Value: formatStringMap(server.Env), EmptyHint: "TOKEN=..."},
-		configureField{Key: "mcp_connect_timeout", Label: "Connect timeout seconds", Description: "How long to wait while connecting to this MCP server.", Kind: configureFieldText, Value: formatInt(server.ConnectTimeoutSeconds), EmptyHint: "10"},
-		configureField{Key: "mcp_tool_timeout", Label: "Tool timeout seconds", Description: "Maximum runtime for each tool call from this MCP server.", Kind: configureFieldText, Value: formatInt(server.ToolTimeoutSeconds), EmptyHint: "30"},
-	)
-	return withHelpfulFieldDescriptions("mcp", name, fields)
-}
-
 func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAllowlist bool) string {
 	if !enabled {
 		return "disabled"
@@ -1333,13 +988,9 @@ func sectionStatus(cfg config.Config, section string) string {
 	case "runtime":
 		return fmt.Sprintf("session=%s · workers=%d · consolidation=%t", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.ConsolidationEnabled)
 	case "context":
-		return fmt.Sprintf("mode=%s · maxInput=%d · dynamicTools=%t", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose)
+		return fmt.Sprintf("mode=%s · maxInput=%d", cfg.Context.Mode, cfg.Context.MaxInputTokens)
 	case "workspace":
-		return fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir))
-	case "tools":
-		return fmt.Sprintf("Brave=%t · exec=%ds", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds)
-	case "mcp":
-		return fmt.Sprintf("%d configured · %d enabled", len(cfg.Tools.MCPServers), enabledMCPServerCount(cfg))
+		return fmt.Sprintf("%s", emptyAsNone(cfg.WorkspaceDir))
 	case "docindex":
 		return fmt.Sprintf("enabled=%t · roots=%d · retrieve=%d", cfg.DocIndex.Enabled, len(cfg.DocIndex.Roots), cfg.DocIndex.RetrieveLimit)
 	case "skills":
@@ -1361,8 +1012,8 @@ func sectionStatus(cfg config.Config, section string) string {
 		return strings.Join(enabledChannelNames(cfg), ", ")
 	case "service":
 		return serviceSummary(cfg)
-	case "agentcli":
-		return fmt.Sprintf("enabled=%t · default=%s · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", cfg.AgentCLI.Enabled, emptyAsNone(cfg.AgentCLI.DefaultRunner), cfg.AgentCLI.MaxConcurrent, cfg.AgentCLI.MaxQueued, cfg.AgentCLI.DefaultTimeoutSeconds, cfg.AgentCLI.AllowSandboxAuto)
+	case "runners":
+		return fmt.Sprintf("default=%s · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", emptyAsNone(cfg.Runners.Default), cfg.Runners.MaxConcurrent, cfg.Runners.MaxQueued, cfg.Runners.DefaultTimeoutSeconds, cfg.Runners.AllowSandboxAuto)
 	default:
 		return ""
 	}
@@ -1378,9 +1029,6 @@ func serviceSummary(cfg config.Config) string {
 func (m configureTUIModel) activeFields() []configureField {
 	if m.currentSection == "channels" {
 		return buildChannelFields(m.cfg, m.currentChannel)
-	}
-	if m.currentSection == "mcp" {
-		return buildMCPFields(m.cfg, m.currentMCPServerName)
 	}
 	return buildSectionFields(m.cfg, m.currentSection, m.cwd)
 }
@@ -1472,7 +1120,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "context_max_input_tokens", Label: "Max input tokens", Description: "Approximate total input-token budget for prompt packets.", Kind: configureFieldText, Value: formatInt(cfg.Context.MaxInputTokens), EmptyHint: "16000"},
 			{Key: "context_output_reserve", Label: "Output reserve tokens", Description: "Tokens reserved for model output before packing input sections.", Kind: configureFieldText, Value: formatInt(cfg.Context.OutputReserveTokens), EmptyHint: "1200"},
 			{Key: "context_safety_margin", Label: "Safety margin tokens", Description: "Extra buffer retained below the configured model input budget.", Kind: configureFieldText, Value: formatInt(cfg.Context.SafetyMarginTokens), EmptyHint: "400"},
-			{Key: "context_dynamic_tools", Label: "Dynamic tool schemas", Description: "Expose only likely tool schemas each turn while runtime guards still enforce policy.", Kind: configureFieldToggle, Value: onOff(cfg.Context.Tools.DynamicExpose)},
 			{Key: "context_retrieval_multiplier", Label: "Candidate multiplier", Description: "How many retrieval candidates to consider before budgeted packing.", Kind: configureFieldText, Value: formatInt(cfg.Context.Retrieval.CandidateMultiplier), EmptyHint: "3"},
 			{Key: "context_retrieval_min_score", Label: "Minimum retrieval score", Description: "Minimum score for memory/document candidates before packing.", Kind: configureFieldText, Value: formatFloat(cfg.Context.Retrieval.MinScore), EmptyHint: "0.03"},
 			{Key: "context_pressure_warning", Label: "Pressure warning percent", Description: "Context utilization level that starts soft pressure warnings.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.WarningPercent), EmptyHint: "70"},
@@ -1480,16 +1127,13 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "context_pressure_emergency", Label: "Pressure emergency percent", Description: "Context utilization level that triggers emergency pruning.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.EmergencyPercent), EmptyHint: "95"},
 			{Key: "context_section_system_core", Label: "System core budget", Description: "Section budget for core system instructions.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SystemCore), EmptyHint: "1200"},
 			{Key: "context_section_soul_identity", Label: "Soul identity budget", Description: "Section budget for identity and soul bootstrap material.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SoulIdentity), EmptyHint: "1200"},
-			{Key: "context_section_tool_policy", Label: "Tool policy budget", Description: "Section budget for tool policy and safety guidance.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolPolicy), EmptyHint: "900"},
 			{Key: "context_section_active_task_card", Label: "Active task card budget", Description: "Section budget for current goal, plan, decisions, refs, and active files.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ActiveTaskCard), EmptyHint: "800"},
 			{Key: "context_section_pinned_memory", Label: "Pinned memory budget", Description: "Section budget for pinned durable memory.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.PinnedMemory), EmptyHint: "900"},
 			{Key: "context_section_recent_history", Label: "Recent history budget", Description: "Section budget for recent conversation history.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RecentHistory), EmptyHint: "2200"},
 			{Key: "context_section_retrieved_memory", Label: "Retrieved memory budget", Description: "Section budget for retrieved memory snippets.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RetrievedMemory), EmptyHint: "1500"},
 			{Key: "context_section_memory_digest", Label: "Memory digest budget", Description: "Section budget for durable memory digest lines.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.MemoryDigest), EmptyHint: "900"},
 			{Key: "context_section_workspace", Label: "Workspace context budget", Description: "Section budget for workspace context and indexed docs.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.WorkspaceContext), EmptyHint: "1200"},
-			{Key: "context_section_tool_schemas", Label: "Tool schema budget", Description: "Section budget for exposed tool schemas.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolSchemas), EmptyHint: "1400"},
 			{Key: "context_task_card_enabled", Label: "Task card", Description: "Track current goal, plan, decisions, refs, and active files across turns.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.Enabled)},
-			{Key: "context_task_card_enforce_plan", Label: "Require plan before writes", Description: "Block write, exec, and web tools until create_plan establishes an active task plan. Best for untrusted or multi-step workflows; leave off for simple local use.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.EnforcePlan)},
 			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
 			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
 			{Key: "context_artifact_summary_chars", Label: "Artifact summary chars", Description: "Bounded artifact/tool-output summary size stored for retrieval.", Kind: configureFieldText, Value: formatInt(cfg.Context.Artifacts.SummaryMaxChars), EmptyHint: "500"},
@@ -1509,18 +1153,8 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			workspace = cwd
 		}
 		return []configureField{
-			{Key: "workspace_restrict", Label: "Restrict file tools", Description: "Keep file tools inside the selected workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.RestrictToWorkspace)},
-			{Key: "workspace_allow_full_read", Label: "Read outside workspace", Description: "Allow read/list/search across the computer while writes stay in the workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.AllowFullFileRead)},
 			{Key: "workspace_dir", Label: "Workspace directory", Description: "Project root for workspace-restricted file tools.", Kind: configureFieldText, Value: workspace, EmptyHint: cwd},
 			{Key: "workspace_allowed_dir", Label: "Allowed directory", Description: "Optional additional allowed root used by some flows and integrations.", Kind: configureFieldText, Value: cfg.AllowedDir, EmptyHint: cwd},
-		}
-	case "tools":
-		return []configureField{
-			{Key: "tools_brave", Label: "Brave Search key", Description: "Hidden secret for Brave web search. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Tools.BraveAPIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
-			{Key: "tools_web_proxy", Label: "Web proxy", Description: "Optional outbound proxy URL for web access.", Kind: configureFieldText, Value: cfg.Tools.WebProxy, EmptyHint: "http://proxy.internal:8080"},
-			{Key: "tools_enable_exec", Label: "Enable exec tool", Description: "Register the built-in exec tool so approved local programs can run.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.EnableExec)},
-			{Key: "tools_exec_timeout", Label: "Exec timeout seconds", Description: "Default timeout for built-in exec-capable tools.", Kind: configureFieldText, Value: formatInt(cfg.Tools.ExecTimeoutSeconds), EmptyHint: "60"},
-			{Key: "tools_path_append", Label: "PATH append", Description: "Extra PATH entries appended for child process execution.", Kind: configureFieldText, Value: cfg.Tools.PathAppend, EmptyHint: "/opt/homebrew/bin"},
 		}
 	case "docindex":
 		return []configureField{
@@ -1613,14 +1247,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "hardening_sandbox_bwrap", Label: "Bubblewrap path", Description: "Path to the bubblewrap executable.", Kind: configureFieldText, Value: cfg.Hardening.Sandbox.BubblewrapPath, EmptyHint: "bwrap"},
 			{Key: "hardening_sandbox_allow_network", Label: "Sandbox allow network", Description: "Permit outbound networking from inside the sandbox.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Sandbox.AllowNetwork)},
 			{Key: "hardening_sandbox_writable_paths", Label: "Sandbox writable paths", Description: "Comma-separated writable paths made available inside the sandbox.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.Sandbox.WritablePaths, ","), EmptyHint: "/tmp,/var/tmp"},
-			{Key: "hardening_quotas_enabled", Label: "Enable hardening quotas", Description: "Enforce per-message and per-session quotas on sensitive tool categories.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Quotas.Enabled)},
-			{Key: "hardening_quota_exceeded_action", Label: "Quota exceeded action", Description: "What to do when a quota is reached: ask or fail.", Kind: configureFieldText, Value: string(cfg.Hardening.Quotas.ExceededAction), EmptyHint: "ask"},
-			{Key: "hardening_max_tool_calls", Label: "Max tool calls per message", Description: "Total tool-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxToolCalls), EmptyHint: "16"},
-			{Key: "hardening_max_exec_calls", Label: "Max exec calls per message", Description: "Exec-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxExecCalls), EmptyHint: "2"},
-			{Key: "hardening_max_web_calls", Label: "Max web calls per message", Description: "Web-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxWebCalls), EmptyHint: "4"},
-			{Key: "hardening_max_session_tool_calls", Label: "Max tool calls per session", Description: "Total tool-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionToolCalls), EmptyHint: "256"},
-			{Key: "hardening_max_session_exec_calls", Label: "Max exec calls per session", Description: "Exec-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionExecCalls), EmptyHint: "32"},
-			{Key: "hardening_max_session_web_calls", Label: "Max web calls per session", Description: "Web-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionWebCalls), EmptyHint: "64"},
 		}
 	case "session":
 		return []configureField{
@@ -1655,26 +1281,25 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
 			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
 		}
-	case "agentcli":
+	case "runners":
 		modeChoices := []string{"review", "safe_edit", "sandbox_auto"}
 		isolationChoices := []string{"host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous"}
 		runnerChoices := []string{"opencode", "codex", "claude", "gemini"}
-		defaultRunner := strings.TrimSpace(cfg.AgentCLI.DefaultRunner)
+		defaultRunner := strings.TrimSpace(cfg.Runners.Default)
 		if defaultRunner == "" {
 			defaultRunner = "opencode"
 		}
-		disabledRunners := strings.Join(cfg.AgentCLI.DisabledRunners, ",")
+		disabledRunners := strings.Join(cfg.Runners.Disabled, ",")
 		return []configureField{
-			{Key: "agentCLI_enabled", Label: "Enable runners", Description: "Delegate chat, cron, and service turns to external runners (OpenCode, Codex, Claude, Gemini).", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.Enabled)},
-			{Key: "agentCLI_default_runner", Label: "Default runner", Description: "Runner used for new chat sessions and automation when none is selected.", Kind: configureFieldChoice, Value: defaultRunner, Choices: runnerChoices, ChoiceIndex: indexOfChoice(runnerChoices, defaultRunner)},
-			{Key: "agentCLI_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxConcurrent), EmptyHint: "1"},
-			{Key: "agentCLI_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxQueued), EmptyHint: "16"},
-			{Key: "agentCLI_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.DefaultTimeoutSeconds), EmptyHint: "900"},
-			{Key: "agentCLI_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxTimeoutSeconds), EmptyHint: "7200"},
-			{Key: "agentCLI_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.AllowSandboxAuto)},
-			{Key: "agentCLI_default_mode", Label: "Default run mode", Description: "Default permission mode for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.AgentCLI.DefaultMode)},
-			{Key: "agentCLI_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.AgentCLI.DefaultIsolation)},
-			{Key: "agentCLI_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
+			{Key: "runners_default", Label: "Default runner", Description: "Runner used for new chat sessions and automation when none is selected.", Kind: configureFieldChoice, Value: defaultRunner, Choices: runnerChoices, ChoiceIndex: indexOfChoice(runnerChoices, defaultRunner)},
+			{Key: "runners_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxConcurrent), EmptyHint: "1"},
+			{Key: "runners_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxQueued), EmptyHint: "16"},
+			{Key: "runners_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.Runners.DefaultTimeoutSeconds), EmptyHint: "900"},
+			{Key: "runners_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxTimeoutSeconds), EmptyHint: "7200"},
+			{Key: "runners_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.Runners.AllowSandboxAuto)},
+			{Key: "runners_default_mode", Label: "Default run mode", Description: "Default permission mode for external CLI runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.Runners.DefaultMode)},
+			{Key: "runners_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external CLI runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.Runners.DefaultIsolation)},
+			{Key: "runners_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
 		}
 	}
 	return nil
@@ -1804,7 +1429,6 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_max_input_tokens":              "Approximate total room available for instructions, memory, tools, documents, and recent chat before OR3 asks the model to answer. Warning: too high may exceed your model limit and fail.",
 	"context_output_reserve":                "Room saved for the AI's answer. If this is too low, replies may be cut short; if too high, OR3 has less room for context.",
 	"context_safety_margin":                 "Extra empty space kept as a buffer so prompts do not accidentally exceed the model limit. Most users should keep a safety margin.",
-	"context_dynamic_tools":                 "Shows the AI only the tools that seem relevant to the current request, while backend safety rules still apply. This usually makes prompts smaller and less confusing.",
 	"context_retrieval_multiplier":          "How many extra memory candidates OR3 checks before choosing what fits. Higher values may find better memories but can slow searches.",
 	"context_retrieval_min_score":           "How relevant a memory must be before OR3 includes it. Higher values are stricter; too high can make OR3 forget useful context.",
 	"context_pressure_warning":              "Prompt fullness percentage where OR3 starts being careful about space. Lower values make it compress earlier.",
@@ -1812,16 +1436,13 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_pressure_emergency":            "Prompt fullness percentage where OR3 may drop low-priority context to avoid model errors. Warning: setting this too high can cause over-limit failures.",
 	"context_section_system_core":           "Space reserved for core system rules that keep OR3 safe and consistent. Warning: setting this too low can remove important operating instructions.",
 	"context_section_soul_identity":         "Space reserved for identity/personality bootstrap files. Lower this if those files are large and crowd out chat history.",
-	"context_section_tool_policy":           "Space reserved for safety rules about tool use. Warning: too low can remove guidance about when tools are allowed.",
 	"context_section_active_task_card":      "Space reserved for the current goal, plan, decisions, files, and references. This helps OR3 stay oriented across long tasks.",
 	"context_section_pinned_memory":         "Space reserved for high-priority saved memory. Lower values reduce durable recall; higher values leave less room for recent chat.",
 	"context_section_recent_history":        "Space reserved for recent conversation messages. Higher values help continuity; lower values make OR3 rely more on summaries.",
 	"context_section_retrieved_memory":      "Space reserved for memories found by search. Higher values improve recall but can bring in stale or less relevant details.",
 	"context_section_memory_digest":         "Space reserved for compact memory summaries. This gives OR3 a quick overview without loading every memory item.",
 	"context_section_workspace":             "Space reserved for workspace/document snippets. Increase if OR3 needs more project files in context; decrease if prompts feel crowded.",
-	"context_section_tool_schemas":          "Space reserved for tool descriptions shown to the AI. Warning: too low can hide tools; too high crowds out chat and memory.",
 	"context_task_card_enabled":             "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
-	"context_task_card_enforce_plan":        "When on, write, exec, web, MCP, and skill tools stay blocked until create_plan establishes an active plan. Turn off for simple local edits without a planning step.",
 	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
 	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
 	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
@@ -1834,14 +1455,8 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_manager_max_output":            "Maximum output size allowed from the context manager helper. Keep this small so helper suggestions do not become noisy.",
 	"context_manager_allow_task_updates":    "Allows the context manager helper to suggest updates to the active task card. Warning: bad suggestions can make the task summary less accurate.",
 	"context_manager_allow_stale_propose":   "Allows context-manager suggestions even if they may be based on slightly older state. Leave on for responsiveness; turn off if you prefer stricter freshness.",
-	"workspace_restrict":                    "Keeps file tools inside the selected workspace folder. Strongly recommended. Warning: turning this off may let OR3 read or write outside this project when tools allow it.",
-	"workspace_allow_full_read":             "Lets OR3 read, list, and search files outside the workspace while write and edit tools remain restricted to the workspace.",
 	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
 	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
-	"tools_brave":                           "Secret key for Brave web search. Leave blank if you do not use Brave search. Warning: removing it disables that search provider.",
-	"tools_web_proxy":                       "Optional proxy server for web requests. Only set this if your network requires it; a wrong proxy can break web access.",
-	"tools_exec_timeout":                    "How long local command tools may run before they are stopped. Higher values help long builds; lower values prevent stuck commands.",
-	"tools_path_append":                     "Extra folders added to PATH for command tools. Warning: adding untrusted folders can make OR3 run unexpected programs.",
 	"docindex_enabled":                      "Indexes selected workspace files so OR3 can find relevant project docs. This improves answers but uses storage and embedding calls.",
 	"docindex_roots":                        "Folders, relative to the workspace, that OR3 should index. Warning: avoid private or huge folders unless you want them searchable by OR3.",
 	"docindex_max_files":                    "Maximum files indexed per root. Lower values are faster; higher values cover more of a large project.",
@@ -1915,14 +1530,6 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"hardening_sandbox_bwrap":               "Path to the bubblewrap sandbox program. Warning: a wrong path can make sandboxed command execution fail.",
 	"hardening_sandbox_allow_network":       "Allows sandboxed commands to use the network. Warning: leaving this on can let commands download or upload data.",
 	"hardening_sandbox_writable_paths":      "Folders sandboxed commands may write to. Warning: only include folders you are comfortable letting commands modify.",
-	"hardening_quotas_enabled":              "Limits how many sensitive tool calls OR3 can make per message and per session. Recommended to prevent runaway tool use.",
-	"hardening_quota_exceeded_action":       "What happens when a quota is reached. Use ask to create an approval request, or fail to stop immediately.",
-	"hardening_max_tool_calls":              "Maximum total tool calls for one message. Higher values allow bigger jobs but can run longer and cost more.",
-	"hardening_max_exec_calls":              "Maximum command-execution calls for one message. Keep low unless you regularly need multi-step command workflows.",
-	"hardening_max_web_calls":               "Maximum web calls for one message. Higher values allow broader research but can be slower and noisier.",
-	"hardening_max_session_tool_calls":      "Maximum total tool calls across one session before approval or failure.",
-	"hardening_max_session_exec_calls":      "Maximum command-execution calls across one session before approval or failure.",
-	"hardening_max_session_web_calls":       "Maximum web calls across one session before approval or failure.",
 	"session_direct_messages_share_default": "Makes direct messages share the default memory/session scope. Warning: turn off if different people or channels should not share context.",
 	"session_identity_links":                "Maps multiple channel identities to one person or workspace identity. Warning: wrong links can merge separate users' context.",
 	"automation_cron_enabled":               "Enables saved scheduled jobs. Warning: scheduled jobs can cause OR3 to act later without you actively typing a request.",
@@ -2028,35 +1635,8 @@ func toggleFieldValue(cfg *config.Config, section, channel, fieldKey string) boo
 		}
 		return false
 	}
-	if section == "mcp" && fieldKey == "mcp_enabled" {
-		if cfg.Tools.MCPServers == nil {
-			return false
-		}
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false
-		}
-		server.Enabled = !server.Enabled
-		cfg.Tools.MCPServers[channel] = server
-		return true
-	}
-	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
-		if cfg.Tools.MCPServers == nil {
-			return false
-		}
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false
-		}
-		server.AllowInsecureHTTP = !server.AllowInsecureHTTP
-		cfg.Tools.MCPServers[channel] = server
-		return true
-	}
 	current := false
 	fields := buildSectionFields(*cfg, section, "")
-	if section == "mcp" {
-		fields = buildMCPFields(*cfg, channel)
-	}
 	for _, field := range fields {
 		if field.Key == fieldKey {
 			current = field.Value == "on"
@@ -2072,9 +1652,6 @@ func cycleChoiceValue(cfg *config.Config, section, channel, fieldKey string, del
 	}
 	if section != "channels" {
 		fields := buildSectionFields(*cfg, section, "")
-		if section == "mcp" {
-			fields = buildMCPFields(*cfg, channel)
-		}
 		for _, field := range fields {
 			if field.Key == fieldKey && len(field.Choices) > 0 {
 				next := field.Choices[wrapIndex(indexOfChoice(field.Choices, field.Value)+delta, len(field.Choices))]
@@ -2125,8 +1702,6 @@ func currentSecretValue(cfg config.Config, section, fieldKey string) string {
 	switch fieldKey {
 	case "provider_api_key":
 		return cfg.Provider.APIKey
-	case "tools_brave":
-		return cfg.Tools.BraveAPIKey
 	case "automation_webhook_secret":
 		return cfg.Triggers.Webhook.Secret
 	case "service_secret":

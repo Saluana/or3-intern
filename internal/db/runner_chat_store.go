@@ -55,8 +55,8 @@ type RunnerChatTurn struct {
 	UserMessage        string
 	FinalText          string
 	ErrorMessage       string
-	AgentCLIRunID      string
-	AgentCLIJobID      string
+	RunnerRunID        string
+	RunnerJobID        string
 	Model              string
 	Mode               string
 	Isolation          string
@@ -219,11 +219,11 @@ func (d *DB) CreateRunnerChatTurn(ctx context.Context, turn RunnerChatTurn) (Run
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO runner_chat_turns(
 			id, session_id, sequence, status, user_message, final_text, error_message,
-			agent_cli_run_id, agent_cli_job_id, model, mode, isolation, cwd, continuation_mode,
+			runner_run_id, runner_job_id, model, mode, isolation, cwd, continuation_mode,
 			user_message_id, assistant_message_id, requested_at, started_at, completed_at, meta_json
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		turn.ID, turn.SessionID, turn.Sequence, turn.Status, turn.UserMessage, turn.FinalText, turn.ErrorMessage,
-		turn.AgentCLIRunID, turn.AgentCLIJobID, turn.Model, turn.Mode, turn.Isolation, turn.Cwd, turn.ContinuationMode,
+		turn.RunnerRunID, turn.RunnerJobID, turn.Model, turn.Mode, turn.Isolation, turn.Cwd, turn.ContinuationMode,
 		turn.UserMessageID, turn.AssistantMessageID, turn.RequestedAt, turn.StartedAt, turn.CompletedAt, turn.MetaJSON,
 	)
 	if err != nil {
@@ -297,7 +297,7 @@ func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit in
 func (d *DB) MarkRunnerChatTurnStarted(ctx context.Context, id string, runID, jobID string) error {
 	now := NowMS()
 	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE runner_chat_turns SET status='running', started_at=?, agent_cli_run_id=?, agent_cli_job_id=?
+		`UPDATE runner_chat_turns SET status='running', started_at=?, runner_run_id=?, runner_job_id=?
 		 WHERE id=? AND status='queued'`,
 		now, runID, jobID, id)
 	return err
@@ -320,7 +320,7 @@ func (d *DB) FinalizeRunnerChatTurn(ctx context.Context, id string, in RunnerCha
 }
 
 // MarkRunnerChatTurnApprovalResumed transitions an approval_required turn
-// back to running so the manager can resume the underlying agent CLI run
+// back to running so the manager can resume the underlying runner run
 // with a freshly-issued approval token.
 func (d *DB) MarkRunnerChatTurnApprovalResumed(ctx context.Context, id string, resumedAt int64) error {
 	if resumedAt == 0 {
@@ -412,7 +412,7 @@ func (d *DB) ReconcileRunnerChatTurnsOnStartup(ctx context.Context) (int, error)
 }
 
 const runnerChatTurnSelectSQL = `SELECT id, session_id, sequence, status, user_message, final_text, error_message,
-		agent_cli_run_id, agent_cli_job_id, model, mode, isolation, cwd, continuation_mode,
+		runner_run_id, runner_job_id, model, mode, isolation, cwd, continuation_mode,
 		user_message_id, assistant_message_id, requested_at, started_at, completed_at, meta_json
 	FROM runner_chat_turns`
 
@@ -434,7 +434,7 @@ func scanRunnerChatTurn(row rowScanner) (RunnerChatTurn, error) {
 	var t RunnerChatTurn
 	err := row.Scan(
 		&t.ID, &t.SessionID, &t.Sequence, &t.Status, &t.UserMessage, &t.FinalText, &t.ErrorMessage,
-		&t.AgentCLIRunID, &t.AgentCLIJobID, &t.Model, &t.Mode, &t.Isolation, &t.Cwd, &t.ContinuationMode,
+		&t.RunnerRunID, &t.RunnerJobID, &t.Model, &t.Mode, &t.Isolation, &t.Cwd, &t.ContinuationMode,
 		&t.UserMessageID, &t.AssistantMessageID, &t.RequestedAt, &t.StartedAt, &t.CompletedAt, &t.MetaJSON,
 	)
 	return t, err

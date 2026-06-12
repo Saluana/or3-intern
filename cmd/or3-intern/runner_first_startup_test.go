@@ -10,10 +10,9 @@ import (
 
 func TestRunnerFirstRunTurnRequiresOrchestrator(t *testing.T) {
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
 	svc := app.NewServiceAppWithRunnerTurns(cfg, nil, nil, nil, nil)
 	_, err := svc.RunTurn(t.Context(), app.TurnRequest{SessionKey: "s", Message: "hi"})
-	if !errors.Is(err, app.ErrRunnerTurnsDisabled) {
-		t.Fatalf("expected ErrRunnerTurnsDisabled, got %v", err)
+	if !errors.Is(err, app.ErrRunnerRuntimeUnavailable) {
+		t.Fatalf("expected ErrRunnerRuntimeUnavailable, got %v", err)
 	}
 }

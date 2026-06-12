@@ -145,7 +145,7 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 	response.Auth.StepUpActive = identity.StepUpOK
 	response.Auth.Kind = identity.Kind
 	response.Auth.Role = identity.Role
-	response.Auth.ExecAllowed = s.config.Tools.EnableExec && serviceBootstrapExecAllowed(identity.Role)
+	response.Auth.ExecAllowed = serviceBootstrapExecAllowed(identity.Role)
 	response.Auth.Capabilities.PasskeysSupported = authSvc != nil && authSvc.Enabled()
 	response.Auth.Capabilities.StepUpSupported = s.config.Auth.Enabled && s.config.Auth.RequirePasskeyForSensitive
 
@@ -251,11 +251,11 @@ func (s *serviceServer) bootstrapActiveJobCount(ctx context.Context) int {
 	if s == nil || s.control() == nil || s.control().DB == nil {
 		return 0
 	}
-	queued, err := s.control().DB.ListAgentCLIRuns(ctx, db.AgentCLIRunFilter{Status: db.AgentCLIStatusQueued, Limit: 200})
+	queued, err := s.control().DB.ListRunnerRuns(ctx, db.RunnerRunFilter{Status: db.RunnerRunStatusQueued, Limit: 200})
 	if err != nil {
 		return 0
 	}
-	running, err := s.control().DB.ListAgentCLIRuns(ctx, db.AgentCLIRunFilter{Status: db.AgentCLIStatusRunning, Limit: 200})
+	running, err := s.control().DB.ListRunnerRuns(ctx, db.RunnerRunFilter{Status: db.RunnerRunStatusRunning, Limit: 200})
 	if err != nil {
 		return len(queued)
 	}

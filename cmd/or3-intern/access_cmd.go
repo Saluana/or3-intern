@@ -94,10 +94,8 @@ func applyAccessLevelRuntimeRequirements(cfg *config.Config, level string) {
 		cfg.Service.MaxCapability = "privileged"
 		cfg.Hardening.GuardedTools = true
 		cfg.Hardening.PrivilegedTools = true
-		cfg.Tools.EnableExec = true
 	case config.AccessLevelOperator:
 		cfg.Service.MaxCapability = "guarded"
 		cfg.Hardening.GuardedTools = true
-		cfg.Tools.EnableExec = true
 	}
 }

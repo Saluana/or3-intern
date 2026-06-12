@@ -27,9 +27,6 @@ func TestInitDefaults_UsesAppDataPaths(t *testing.T) {
 	if strings.Contains(cfg.ArtifactsDir, "/tmp/project/.or3") {
 		t.Fatalf("artifacts dir should not default inside workspace: %q", cfg.ArtifactsDir)
 	}
-	if !cfg.Tools.RestrictToWorkspace {
-		t.Fatal("expected workspace restriction enabled")
-	}
 	if cfg.WorkspaceDir != "/tmp/project" {
 		t.Fatalf("unexpected workspace dir: %q", cfg.WorkspaceDir)
 	}

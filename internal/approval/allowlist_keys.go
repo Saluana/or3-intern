@@ -8,19 +8,19 @@ import (
 
 // AllowlistMatchKeys holds normalized scope/matcher columns used for indexed lookups.
 type AllowlistMatchKeys struct {
-	ScopeHostID          string
-	ScopeTool            string
-	ScopeProfile         string
-	ScopeAgent           string
-	MatchExecutablePath  string
-	MatchWorkingDir      string
-	MatchScriptHash      string
-	MatchSkillID         string
-	MatchPlanHash        string
-	MatchRunnerID        string
-	MatchTargetPath      string
-	MatchPathPrefix      string
-	MatchFingerprint     string
+	ScopeHostID         string
+	ScopeTool           string
+	ScopeProfile        string
+	ScopeAgent          string
+	MatchExecutablePath string
+	MatchWorkingDir     string
+	MatchScriptHash     string
+	MatchSkillID        string
+	MatchPlanHash       string
+	MatchRunnerID       string
+	MatchTargetPath     string
+	MatchPathPrefix     string
+	MatchFingerprint    string
 }
 
 func allowlistMatchKeys(domain string, scope AllowlistScope, matcher any) AllowlistMatchKeys {

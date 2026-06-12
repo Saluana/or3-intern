@@ -101,7 +101,7 @@ func Default() Config {
 		ConsolidationMaxMessages:         defaultConsolidationMaxMessages,
 		ConsolidationMaxInputChars:       defaultConsolidationMaxInputChars,
 		ConsolidationAsyncTimeoutSeconds: defaultConsolidationAsyncTimeoutSecs,
-		AgentCLI:                         defaultAgentCLIConfig(),
+		Runners:                          defaultRunnersConfig(),
 		DocIndex:                         defaultDocIndexConfig(),
 		Skills:                           defaultSkillsConfig(home, root),
 		Triggers:                         defaultTriggerConfig(),
@@ -112,7 +112,6 @@ func Default() Config {
 		Providers:                        defaultProviderProfiles(),
 		ModelRouting:                     defaultModelRoutingConfig(),
 		FavoriteModels:                   defaultFavoriteModelsConfig(),
-		Tools:                            defaultToolsConfig(),
 		Hardening:                        defaultHardeningConfig(),
 		Cron:                             CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.db")},
 		Service:                          defaultServiceConfig(),
@@ -128,11 +127,10 @@ func Default() Config {
 	}
 }
 
-func defaultAgentCLIConfig() AgentCLIConfig {
-	return AgentCLIConfig{
-		Enabled:                    true,
-		DefaultRunner:              "opencode",
-		DisabledRunners:            []string{},
+func defaultRunnersConfig() RunnersConfig {
+	return RunnersConfig{
+		Default:                    "opencode",
+		Disabled:                   []string{},
 		RuntimeMode:                map[string]string{"opencode": "auto", "codex": "auto"},
 		DefaultModels:              map[string]string{},
 		NativeServerURLs:           map[string]string{},
@@ -266,10 +264,6 @@ func defaultFavoriteModelsConfig() FavoriteModelsConfig {
 	}
 }
 
-func defaultToolsConfig() ToolsConfig {
-	return ToolsConfig{BraveAPIKey: os.Getenv("BRAVE_API_KEY"), WebProxy: "", EnableExec: false, ExecTimeoutSeconds: 60, RestrictToWorkspace: true, AllowFullFileRead: false, PathAppend: "", MCPServers: map[string]MCPServerConfig{}}
-}
-
 func defaultHardeningConfig() HardeningConfig {
 	return HardeningConfig{
 		GuardedTools:        false,
@@ -280,16 +274,6 @@ func defaultHardeningConfig() HardeningConfig {
 		IsolateChannelPeers: true,
 		MetadataScanner:     MetadataScannerConfig{Mode: "warn", Allowlist: []string{}},
 		Sandbox:             SandboxConfig{Enabled: false, BubblewrapPath: "bwrap", AllowNetwork: false, WritablePaths: []string{}},
-		Quotas: HardeningQuotaConfig{
-			Enabled:             true,
-			ExceededAction:      QuotaExceededActionAsk,
-			MaxToolCalls:        16,
-			MaxExecCalls:        2,
-			MaxWebCalls:         4,
-			MaxSessionToolCalls: 256,
-			MaxSessionExecCalls: 32,
-			MaxSessionWebCalls:  64,
-		},
 	}
 }
 
@@ -330,20 +314,17 @@ func defaultContextConfig() ContextConfig {
 		Sections: ContextSectionBudgets{
 			SystemCore:       800,
 			SoulIdentity:     2800,
-			ToolPolicy:       900,
 			ActiveTaskCard:   700,
 			PinnedMemory:     1200,
 			MemoryDigest:     900,
 			RecentHistory:    2200,
 			RetrievedMemory:  1500,
 			WorkspaceContext: 1200,
-			ToolSchemas:      1400,
 		},
 		Retrieval: ContextRetrievalConfig{CandidateMultiplier: 3, MinScore: 0.03},
 		Pressure:  ContextPressureConfig{WarningPercent: 70, HighPercent: 85, EmergencyPercent: 95},
-		Tools:     ContextToolConfig{DynamicExpose: true},
 		Artifacts: ContextArtifactConfig{SummaryMaxChars: 500},
-		TaskCard:  ContextTaskCardConfig{Enabled: true, EnforcePlan: false, MaxRefs: 12, MaxPlanItems: 8},
+		TaskCard:  ContextTaskCardConfig{Enabled: true, MaxRefs: 12, MaxPlanItems: 8},
 	}
 }
 

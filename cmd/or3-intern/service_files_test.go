@@ -27,16 +27,12 @@ func TestServiceFileRootsUseConfiguredDirs(t *testing.T) {
 	}
 }
 
-func TestServiceFileRootsExposeComputerReadOnlyWhenFullReadEnabled(t *testing.T) {
+func TestServiceFileRootsIncludesConfiguredPaths(t *testing.T) {
 	workspace := t.TempDir()
 	allowed := t.TempDir()
 	server := &serviceServer{config: config.Config{
 		WorkspaceDir: workspace,
 		AllowedDir:   allowed,
-		Tools: config.ToolsConfig{
-			RestrictToWorkspace: true,
-			AllowFullFileRead:   true,
-		},
 	}}
 
 	roots := server.serviceFileRoots()
@@ -44,11 +40,8 @@ func TestServiceFileRootsExposeComputerReadOnlyWhenFullReadEnabled(t *testing.T)
 	for _, root := range roots {
 		byID[root.ID] = root
 	}
-	if root, ok := byID["computer"]; !ok || root.Writable {
-		t.Fatalf("expected read-only computer root, got %+v", root)
-	}
-	if root, ok := byID["allowed"]; !ok || root.Writable {
-		t.Fatalf("expected allowed root to become read-only, got %+v", root)
+	if root, ok := byID["allowed"]; !ok || !root.Writable {
+		t.Fatalf("expected writable allowed root, got %+v", root)
 	}
 	if root, ok := byID["workspace"]; !ok || !root.Writable {
 		t.Fatalf("expected writable workspace root, got %+v", root)
@@ -375,7 +368,7 @@ func TestHandleFileWriteRejectsStaleRevision(t *testing.T) {
 	}
 }
 
-func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
+func TestHandleFileWriteAcceptsAllowedRoot(t *testing.T) {
 	workspace := t.TempDir()
 	allowed := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(allowed, "notes"), 0o755); err != nil {
@@ -384,10 +377,6 @@ func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
 	server := &serviceServer{config: config.Config{
 		WorkspaceDir: workspace,
 		AllowedDir:   allowed,
-		Tools: config.ToolsConfig{
-			RestrictToWorkspace: true,
-			AllowFullFileRead:   true,
-		},
 	}}
 	body, _ := json.Marshal(map[string]any{
 		"root_id": "allowed",
@@ -400,8 +389,8 @@ func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
 
 	server.handleFileWrite(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d (%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("expected 200/201, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 

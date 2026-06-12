@@ -11,17 +11,19 @@ const (
 )
 
 // BuiltinAccessProfiles returns the simple product-level access profiles used
-// by channel and device setup. Paths intentionally use a workspace placeholder
-// so configs stay portable when a workspace moves.
+// by channel and device setup. Tool names use runner/service permission
+// language (e.g. "shell_exec" instead of "exec") so configs stay portable
+// across different runner backends. DeclaredTools is metadata only — the
+// runner enforces its own tool policy, this list is for visibility.
 func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 	return map[string]AccessProfileConfig{
 		AccessLevelReader: {
 			MaxCapability: "safe",
-			AllowedTools: []string{
-				"read_file",
-				"search_file",
-				"list_dir",
-				"read_artifact",
+			DeclaredTools: []string{
+				"read_files",
+				"search_files",
+				"list_dirs",
+				"read_artifacts",
 				"memory_search",
 				"memory_recent",
 				"memory_get_pinned",
@@ -31,35 +33,35 @@ func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 		},
 		AccessLevelOperator: {
 			MaxCapability: "guarded",
-			AllowedTools: []string{
-				"read_file",
-				"search_file",
-				"list_dir",
-				"read_artifact",
-				"write_file",
-				"edit_file",
-				"delete_file",
+			DeclaredTools: []string{
+				"read_files",
+				"search_files",
+				"list_dirs",
+				"read_artifacts",
+				"write_files",
+				"edit_files",
+				"delete_files",
 				"memory_search",
 				"memory_recent",
 				"memory_get_pinned",
 				"web_search",
 				"web_fetch",
 				"web_fetch_markdown",
-				"exec",
+				"shell_exec",
 			},
 			AllowedHosts:  []string{},
 			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},
 		AccessLevelAdmin: {
 			MaxCapability: "privileged",
-			AllowedTools: []string{
-				"read_file",
-				"search_file",
-				"list_dir",
-				"read_artifact",
-				"write_file",
-				"edit_file",
-				"delete_file",
+			DeclaredTools: []string{
+				"read_files",
+				"search_files",
+				"list_dirs",
+				"read_artifacts",
+				"write_files",
+				"edit_files",
+				"delete_files",
 				"memory_set_pinned",
 				"memory_add_note",
 				"memory_search",
@@ -68,9 +70,9 @@ func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 				"web_search",
 				"web_fetch",
 				"web_fetch_markdown",
-				"exec",
-				"send_message",
-				"cron",
+				"shell_exec",
+				"send_messages",
+				"schedule_cron",
 			},
 			AllowedHosts:  []string{},
 			WritablePaths: []string{AccessProfileWorkspaceDir},

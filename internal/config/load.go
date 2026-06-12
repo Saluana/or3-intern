@@ -125,108 +125,108 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.ConsolidationAsyncTimeoutSeconds <= 0 {
 		cfg.ConsolidationAsyncTimeoutSeconds = 30
 	}
-	if cfg.AgentCLI.MaxConcurrent <= 0 {
-		cfg.AgentCLI.MaxConcurrent = 1
+	if cfg.Runners.MaxConcurrent <= 0 {
+		cfg.Runners.MaxConcurrent = 1
 	}
-	if cfg.AgentCLI.MaxQueued <= 0 {
-		cfg.AgentCLI.MaxQueued = 16
+	if cfg.Runners.MaxQueued <= 0 {
+		cfg.Runners.MaxQueued = 16
 	}
-	if cfg.AgentCLI.DefaultTimeoutSeconds <= 0 {
-		cfg.AgentCLI.DefaultTimeoutSeconds = 900
+	if cfg.Runners.DefaultTimeoutSeconds <= 0 {
+		cfg.Runners.DefaultTimeoutSeconds = 900
 	}
-	if cfg.AgentCLI.DefaultTimeoutSeconds < 30 {
-		cfg.AgentCLI.DefaultTimeoutSeconds = 30
+	if cfg.Runners.DefaultTimeoutSeconds < 30 {
+		cfg.Runners.DefaultTimeoutSeconds = 30
 	}
-	if cfg.AgentCLI.MaxTimeoutSeconds <= 0 {
-		cfg.AgentCLI.MaxTimeoutSeconds = 7200
+	if cfg.Runners.MaxTimeoutSeconds <= 0 {
+		cfg.Runners.MaxTimeoutSeconds = 7200
 	}
-	if cfg.AgentCLI.MaxTimeoutSeconds < 30 {
-		cfg.AgentCLI.MaxTimeoutSeconds = 30
+	if cfg.Runners.MaxTimeoutSeconds < 30 {
+		cfg.Runners.MaxTimeoutSeconds = 30
 	}
-	if cfg.AgentCLI.EventChunkMaxBytes <= 0 {
-		cfg.AgentCLI.EventChunkMaxBytes = 16384
+	if cfg.Runners.EventChunkMaxBytes <= 0 {
+		cfg.Runners.EventChunkMaxBytes = 16384
 	}
-	if cfg.AgentCLI.PreviewMaxBytes <= 0 {
-		cfg.AgentCLI.PreviewMaxBytes = 65536
+	if cfg.Runners.PreviewMaxBytes <= 0 {
+		cfg.Runners.PreviewMaxBytes = 65536
 	}
-	if cfg.AgentCLI.MaxPersistedOutputBytes <= 0 {
-		cfg.AgentCLI.MaxPersistedOutputBytes = 10485760
+	if cfg.Runners.MaxPersistedOutputBytes <= 0 {
+		cfg.Runners.MaxPersistedOutputBytes = 10485760
 	}
-	if strings.TrimSpace(cfg.AgentCLI.DefaultMode) == "" {
-		cfg.AgentCLI.DefaultMode = "safe_edit"
+	if strings.TrimSpace(cfg.Runners.DefaultMode) == "" {
+		cfg.Runners.DefaultMode = "safe_edit"
 	} else {
-		cfg.AgentCLI.DefaultMode = strings.TrimSpace(cfg.AgentCLI.DefaultMode)
+		cfg.Runners.DefaultMode = strings.TrimSpace(cfg.Runners.DefaultMode)
 	}
-	if strings.TrimSpace(cfg.AgentCLI.DefaultIsolation) == "" {
-		cfg.AgentCLI.DefaultIsolation = "host_workspace_write"
+	if strings.TrimSpace(cfg.Runners.DefaultIsolation) == "" {
+		cfg.Runners.DefaultIsolation = "host_workspace_write"
 	} else {
-		cfg.AgentCLI.DefaultIsolation = strings.TrimSpace(cfg.AgentCLI.DefaultIsolation)
+		cfg.Runners.DefaultIsolation = strings.TrimSpace(cfg.Runners.DefaultIsolation)
 	}
-	if cfg.AgentCLI.DisabledRunners == nil {
-		cfg.AgentCLI.DisabledRunners = []string{}
+	if cfg.Runners.Disabled == nil {
+		cfg.Runners.Disabled = []string{}
 	}
-	cfg.AgentCLI.DisabledRunners = compactStrings(cfg.AgentCLI.DisabledRunners)
-	if cfg.AgentCLI.RuntimeMode == nil {
-		cfg.AgentCLI.RuntimeMode = map[string]string{"opencode": "auto", "codex": "auto"}
+	cfg.Runners.Disabled = compactStrings(cfg.Runners.Disabled)
+	if cfg.Runners.RuntimeMode == nil {
+		cfg.Runners.RuntimeMode = map[string]string{"opencode": "auto", "codex": "auto"}
 	} else {
-		for runner, mode := range cfg.AgentCLI.RuntimeMode {
+		for runner, mode := range cfg.Runners.RuntimeMode {
 			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
 			trimmedMode := strings.ToLower(strings.TrimSpace(mode))
 			if trimmedRunner == "" {
-				delete(cfg.AgentCLI.RuntimeMode, runner)
+				delete(cfg.Runners.RuntimeMode, runner)
 				continue
 			}
 			if trimmedRunner != runner {
-				delete(cfg.AgentCLI.RuntimeMode, runner)
+				delete(cfg.Runners.RuntimeMode, runner)
 			}
-			cfg.AgentCLI.RuntimeMode[trimmedRunner] = trimmedMode
+			cfg.Runners.RuntimeMode[trimmedRunner] = trimmedMode
 		}
 	}
-	if _, ok := cfg.AgentCLI.RuntimeMode["opencode"]; !ok {
-		cfg.AgentCLI.RuntimeMode["opencode"] = "auto"
+	if _, ok := cfg.Runners.RuntimeMode["opencode"]; !ok {
+		cfg.Runners.RuntimeMode["opencode"] = "auto"
 	}
-	if _, ok := cfg.AgentCLI.RuntimeMode["codex"]; !ok {
-		cfg.AgentCLI.RuntimeMode["codex"] = "auto"
+	if _, ok := cfg.Runners.RuntimeMode["codex"]; !ok {
+		cfg.Runners.RuntimeMode["codex"] = "auto"
 	}
-	if cfg.AgentCLI.DefaultModels == nil {
-		cfg.AgentCLI.DefaultModels = map[string]string{}
+	if cfg.Runners.DefaultModels == nil {
+		cfg.Runners.DefaultModels = map[string]string{}
 	} else {
-		for runner, model := range cfg.AgentCLI.DefaultModels {
+		for runner, model := range cfg.Runners.DefaultModels {
 			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
 			trimmedModel := strings.TrimSpace(model)
-			delete(cfg.AgentCLI.DefaultModels, runner)
+			delete(cfg.Runners.DefaultModels, runner)
 			if trimmedRunner != "" && trimmedModel != "" {
-				cfg.AgentCLI.DefaultModels[trimmedRunner] = trimmedModel
+				cfg.Runners.DefaultModels[trimmedRunner] = trimmedModel
 			}
 		}
 	}
-	if cfg.AgentCLI.NativeServerURLs == nil {
-		cfg.AgentCLI.NativeServerURLs = map[string]string{}
+	if cfg.Runners.NativeServerURLs == nil {
+		cfg.Runners.NativeServerURLs = map[string]string{}
 	} else {
-		for runner, endpoint := range cfg.AgentCLI.NativeServerURLs {
+		for runner, endpoint := range cfg.Runners.NativeServerURLs {
 			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
 			trimmedEndpoint := strings.TrimRight(strings.TrimSpace(endpoint), "/")
-			delete(cfg.AgentCLI.NativeServerURLs, runner)
+			delete(cfg.Runners.NativeServerURLs, runner)
 			if trimmedRunner != "" && trimmedEndpoint != "" {
-				cfg.AgentCLI.NativeServerURLs[trimmedRunner] = trimmedEndpoint
+				cfg.Runners.NativeServerURLs[trimmedRunner] = trimmedEndpoint
 			}
 		}
 	}
-	cfg.AgentCLI.CodexHomePath = strings.TrimSpace(cfg.AgentCLI.CodexHomePath)
-	cfg.AgentCLI.CodexShadowHomePath = strings.TrimSpace(cfg.AgentCLI.CodexShadowHomePath)
-	if cfg.AgentCLI.NativeServerStartupSeconds <= 0 {
-		cfg.AgentCLI.NativeServerStartupSeconds = 10
+	cfg.Runners.CodexHomePath = strings.TrimSpace(cfg.Runners.CodexHomePath)
+	cfg.Runners.CodexShadowHomePath = strings.TrimSpace(cfg.Runners.CodexShadowHomePath)
+	if cfg.Runners.NativeServerStartupSeconds <= 0 {
+		cfg.Runners.NativeServerStartupSeconds = 10
 	}
-	if cfg.AgentCLI.NativeServerIdleSeconds <= 0 {
-		cfg.AgentCLI.NativeServerIdleSeconds = 900
+	if cfg.Runners.NativeServerIdleSeconds <= 0 {
+		cfg.Runners.NativeServerIdleSeconds = 900
 	}
-	if len(cfg.AgentCLI.ChildEnvAllowlist) == 0 {
-		cfg.AgentCLI.ChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
+	if len(cfg.Runners.ChildEnvAllowlist) == 0 {
+		cfg.Runners.ChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
 	}
-	if trimmed := strings.ToLower(strings.TrimSpace(cfg.AgentCLI.DefaultRunner)); trimmed == "" {
-		cfg.AgentCLI.DefaultRunner = "opencode"
+	if trimmed := strings.ToLower(strings.TrimSpace(cfg.Runners.Default)); trimmed == "" {
+		cfg.Runners.Default = "opencode"
 	} else {
-		cfg.AgentCLI.DefaultRunner = trimmed
+		cfg.Runners.Default = trimmed
 	}
 	if strings.TrimSpace(cfg.Service.Listen) == "" {
 		cfg.Service.Listen = Default().Service.Listen
@@ -395,9 +395,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Skills.Entries == nil {
 		cfg.Skills.Entries = map[string]SkillEntryConfig{}
 	}
-	if cfg.Tools.MCPServers == nil {
-		cfg.Tools.MCPServers = map[string]MCPServerConfig{}
-	}
 	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
 		cfg.Hardening.ExecAllowedPrograms = append([]string{}, Default().Hardening.ExecAllowedPrograms...)
 	}
@@ -410,51 +407,8 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Hardening.Sandbox.WritablePaths == nil {
 		cfg.Hardening.Sandbox.WritablePaths = []string{}
 	}
-	cfg.Hardening.Quotas.ExceededAction = normalizeQuotaExceededAction(cfg.Hardening.Quotas.ExceededAction, Default().Hardening.Quotas.ExceededAction)
-	if cfg.Hardening.Quotas.MaxToolCalls <= 0 {
-		cfg.Hardening.Quotas.MaxToolCalls = Default().Hardening.Quotas.MaxToolCalls
-	}
 	if strings.TrimSpace(cfg.Hardening.MetadataScanner.Mode) == "" {
 		cfg.Hardening.MetadataScanner.Mode = Default().Hardening.MetadataScanner.Mode
-	}
-	if cfg.Hardening.Quotas.MaxExecCalls <= 0 {
-		cfg.Hardening.Quotas.MaxExecCalls = Default().Hardening.Quotas.MaxExecCalls
-	}
-	if cfg.Hardening.Quotas.MaxWebCalls <= 0 {
-		cfg.Hardening.Quotas.MaxWebCalls = Default().Hardening.Quotas.MaxWebCalls
-	}
-	if cfg.Hardening.Quotas.MaxSessionToolCalls <= 0 {
-		cfg.Hardening.Quotas.MaxSessionToolCalls = Default().Hardening.Quotas.MaxSessionToolCalls
-	}
-	if cfg.Hardening.Quotas.MaxSessionExecCalls <= 0 {
-		cfg.Hardening.Quotas.MaxSessionExecCalls = Default().Hardening.Quotas.MaxSessionExecCalls
-	}
-	if cfg.Hardening.Quotas.MaxSessionWebCalls <= 0 {
-		cfg.Hardening.Quotas.MaxSessionWebCalls = Default().Hardening.Quotas.MaxSessionWebCalls
-	}
-	for name, server := range cfg.Tools.MCPServers {
-		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
-		if server.Transport == "" {
-			server.Transport = DefaultMCPTransport
-		}
-		server.Command = strings.TrimSpace(server.Command)
-		server.URL = strings.TrimSpace(server.URL)
-		if server.Env == nil {
-			server.Env = map[string]string{}
-		}
-		if len(server.ChildEnvAllowlist) == 0 {
-			server.ChildEnvAllowlist = append([]string{}, cfg.Hardening.ChildEnvAllowlist...)
-		}
-		if server.Headers == nil {
-			server.Headers = map[string]string{}
-		}
-		if server.ToolTimeoutSeconds <= 0 {
-			server.ToolTimeoutSeconds = DefaultMCPToolTimeoutSeconds
-		}
-		if server.ConnectTimeoutSeconds <= 0 {
-			server.ConnectTimeoutSeconds = DefaultMCPConnectTimeoutSeconds
-		}
-		cfg.Tools.MCPServers[name] = server
 	}
 	if strings.TrimSpace(cfg.Skills.ClawHub.SiteURL) == "" {
 		cfg.Skills.ClawHub.SiteURL = "https://clawhub.ai"
@@ -564,7 +518,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	normalizeManagedChannelInboundDefaults(&cfg)
 	for name, profile := range cfg.Security.Profiles.Profiles {
 		profile.MaxCapability = strings.ToLower(strings.TrimSpace(profile.MaxCapability))
-		profile.AllowedTools = compactStrings(profile.AllowedTools)
+		profile.DeclaredTools = compactStrings(profile.DeclaredTools)
 		profile.AllowedHosts = compactStrings(profile.AllowedHosts)
 		profile.WritablePaths = compactStrings(profile.WritablePaths)
 		cfg.Security.Profiles.Profiles[name] = profile
@@ -574,9 +528,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		QuarantineInvalidOptionalIntegrations(&cfg)
 	} else {
 		cfg.IntegrationWarnings = nil
-	}
-	if err := validateMCPServers(cfg.Tools.MCPServers); err != nil {
-		return cfg, err
 	}
 	if err := validateChannelAccess(cfg); err != nil {
 		return cfg, err
@@ -590,7 +541,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if err := validateAuthConfig(cfg.Auth); err != nil {
 		return cfg, err
 	}
-	if err := validateAgentCLIConfig(cfg.AgentCLI); err != nil {
+	if err := validateRunnersConfig(cfg.Runners); err != nil {
 		return cfg, err
 	}
 	if err := validateProviderRouting(cfg); err != nil {

@@ -1,6 +1,6 @@
 # Internal service REST / HTTP API reference
 
-> **Runner-first:** When `agentCLI.enabled` is true (default for new installs), foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). The old `/internal/v1/turns` and `/internal/v1/subagents` endpoints are no longer registered. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
+> **Runner-first:** Foreground chat, channels, and automation use **external runners** (OpenCode, Codex, Claude Code, Gemini CLI). External runner orchestration is the only supported execution mode — there is no `runners.enabled` toggle. The old `/internal/v1/turns` and `/internal/v1/subagents` endpoints are no longer registered. See [Migration: runner-first](migration-runner-first.md) and [Runner chat endpoints](v1/architecture/service-api/runner-chat-endpoints.md).
 
 This page documents the authenticated machine-facing REST / HTTP API exposed by:
 
@@ -190,7 +190,7 @@ Auth policy challenges keep their uppercase challenge codes (`SESSION_REQUIRED`,
 
 ### `GET /internal/v1/chat-runners`
 
-Returns installed external runners that are selectable for chat, plus `default_runner` from `agentCLI.defaultRunner`.
+Returns installed external runners that are selectable for chat, plus `default_runner` from `runners.default`.
 
 The legacy built-in `or3-intern` runner is not listed as selectable when runner-first mode is active.
 
@@ -271,7 +271,7 @@ Every run specifies a **mode** and an **isolation** boundary:
 |------|-------------------|-----------|
 | `review` | `host_readonly` or `sandbox_workspace_write` | Read-only analysis; no filesystem mutations. |
 | `safe_edit` | `host_workspace_write` or `sandbox_workspace_write` | Non-interactive edits with the CLI's built-in safety flags. |
-| `sandbox_auto` | `sandbox_dangerous` | Full autonomy inside a sandbox; rejected unless `agentCLI.allowSandboxAuto` is `true`. |
+| `sandbox_auto` | `sandbox_dangerous` | Full autonomy inside a sandbox; rejected unless `runners.allowSandboxAuto` is `true`. |
 
 The default mode is `safe_edit` with `host_workspace_write` isolation. `sandbox_auto` is rejected on host machines regardless of config — it requires a true sandbox runtime.
 
@@ -284,7 +284,7 @@ Each external CLI has four possible states:
 | `available`     | Binary found, version probe passed, auth is ready. |
 | `missing`       | Binary not on `PATH`. |
 | `auth_missing`  | Binary found but required auth check failed. |
-| `disabled_by_config` | Runner listed in `agentCLI.disabledRunners`. |
+| `disabled_by_config` | Runner listed in `runners.disabledRunners`. |
 
 ### `GET /internal/v1/agent-runners`
 
@@ -315,11 +315,11 @@ Enqueues a background external CLI run. Request fields (all snake_case, `Disallo
 | `parent_session_key` | string  | **yes**  |                          |
 | `runner_id`          | string  | **yes**  |                          |
 | `task`               | string  | **yes**  |                          |
-| `timeout_seconds`    | number  | no       | `agentCLI.defaultTimeoutSeconds` (900) |
+| `timeout_seconds`    | number  | no       | `runners.defaultTimeoutSeconds` (900) |
 | `cwd`                | string  | no       | service working directory |
 | `model`              | string  | no       |                          |
-| `mode`               | string  | no       | `agentCLI.defaultMode` (`safe_edit`) |
-| `isolation`          | string  | no       | `agentCLI.defaultIsolation` (`host_workspace_write`) |
+| `mode`               | string  | no       | `runners.defaultMode` (`safe_edit`) |
+| `isolation`          | string  | no       | `runners.defaultIsolation` (`host_workspace_write`) |
 | `max_turns`          | number  | no       |                          |
 | `meta`               | object  | no       |                          |
 
@@ -404,8 +404,8 @@ After cancellation the run status is `aborted` and the job registry emits a `com
 `GET /internal/v1/jobs/{job_id}` resolves in this order:
 
 1. In-memory `JobRegistry` snapshot.
-2. Persisted `agent_cli_runs` row.
-3. Persisted `agent_cli_runs` row.
+2. Persisted `runner_runs` row.
+3. Persisted `runner_runs` row.
 
 This means clients can look up external CLI runs through the same `/internal/v1/jobs/{job_id}` endpoint that serves runner jobs — no dedicated route required.
 
@@ -458,7 +458,7 @@ Create/update job shape:
   "enabled": true,
   "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" },
   "payload": {
-    "kind": "agent_cli_run",
+    "kind": "runner_run",
     "session_key": "scheduled:morning-summary",
     "agent_run": {
       "runner_id": "opencode",
@@ -477,7 +477,7 @@ External agent CLI scheduled job shape:
   "enabled": true,
   "schedule": { "kind": "cron", "expr": "0 9 * * 1" },
   "payload": {
-    "kind": "agent_cli_run",
+    "kind": "runner_run",
     "session_key": "cron:agents",
     "agent_run": {
       "runner_id": "codex",
@@ -489,7 +489,7 @@ External agent CLI scheduled job shape:
 }
 ```
 
-For `agent_cli_run`, `agent_run.runner_id` and `agent_run.task` are required. Missing `mode` defaults to `review`; missing `isolation` defaults to `host_readonly`. A cron run is marked `ok` once the external agent job is enqueued; completion status is tracked through `/internal/v1/agent-runs/{id}` and job stream APIs.
+For `runner_run`, `agent_run.runner_id` and `agent_run.task` are required. Missing `mode` defaults to `review`; missing `isolation` defaults to `host_readonly`. A cron run is marked `ok` once the external agent job is enqueued; completion status is tracked through `/internal/v1/agent-runs/{id}` and job stream APIs.
 
 Job responses include scheduler state:
 

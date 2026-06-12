@@ -6,14 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"or3-intern/internal/clawhub"
 	"or3-intern/internal/config"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/skills"
 )
 
@@ -32,7 +30,7 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 	}
 	if deps.LoadToolNames == nil {
 		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
-			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+			return loadAvailableToolNamesWithManager(ctx, cfg, struct{}{})
 		}
 	}
 	if deps.LoadInventory == nil {
@@ -368,33 +366,9 @@ func makePolicySet(values []string) map[string]struct{} {
 	return out
 }
 
-func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
+func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, _ struct{}) map[string]struct{} {
+	_ = ctx
 	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled))
-	if len(cfg.Tools.MCPServers) == 0 {
-		return toolNames
-	}
-	if manager != nil {
-		manager.SetHostPolicy(buildHostPolicy(cfg))
-		for _, name := range manager.ToolNames() {
-			toolNames[name] = struct{}{}
-		}
-		return toolNames
-	}
-	manager = mcp.NewManager(cfg.Tools.MCPServers)
-	manager.SetLogger(log.Printf)
-	manager.SetHostPolicy(buildHostPolicy(cfg))
-	if err := manager.Connect(ctx); err != nil {
-		log.Printf("mcp setup failed: %v", err)
-		return toolNames
-	}
-	defer func() {
-		if err := manager.Close(); err != nil {
-			log.Printf("mcp close failed: %v", err)
-		}
-	}()
-	for _, name := range manager.ToolNames() {
-		toolNames[name] = struct{}{}
-	}
 	return toolNames
 }
 
@@ -402,9 +376,6 @@ func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{})
 	filtered := make(map[string]struct{}, len(toolNames))
 	for name := range toolNames {
 		filtered[name] = struct{}{}
-	}
-	if !shouldRegisterExecTool(cfg) {
-		delete(filtered, "exec")
 	}
 	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
 		delete(filtered, "exec")
@@ -486,18 +457,7 @@ func envMap() map[string]string {
 }
 
 func skillEnvMap(cfg config.Config) map[string]string {
-	out := envMap()
-	pathAppend := strings.TrimSpace(cfg.Tools.PathAppend)
-	if pathAppend == "" {
-		return out
-	}
-	currentPath := strings.TrimSpace(out["PATH"])
-	if currentPath == "" {
-		out["PATH"] = pathAppend
-		return out
-	}
-	out["PATH"] = currentPath + string(os.PathListSeparator) + pathAppend
-	return out
+	return envMap()
 }
 
 func resolveInstallRoot(cfg config.Config) string {

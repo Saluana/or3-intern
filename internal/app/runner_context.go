@@ -7,11 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/scope"
 )
 
@@ -35,7 +35,7 @@ type RunnerContextDeps struct {
 	TopK             int
 	DocLimit         int
 	BootstrapMax     int
-	Cache            *agentcli.RunnerContextCache
+	Cache            *runners.RunnerContextCache
 }
 
 // RunnerContextBuilder assembles bounded OR3 context blocks without the legacy built-in runtime.

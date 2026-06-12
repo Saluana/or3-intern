@@ -290,7 +290,6 @@ func runSettingsWorkspace(reader *bufio.Reader, out io.Writer, cfgPath, cwd stri
 		return err
 	}
 	cfg.WorkspaceDir = value
-	cfg.Tools.RestrictToWorkspace = true
 	choice, err := promptMenuChoice(reader, out, "Where should OR3 store its own data?", []string{
 		"1) Recommended: OR3 app folder",
 		"2) Inside this workspace folder",

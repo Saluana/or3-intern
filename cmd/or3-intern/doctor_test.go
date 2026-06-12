@@ -92,42 +92,13 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 			expectMatch: "public ingress is enabled while access profiles are disabled",
 		},
 		{
-			name: "stdio mcp missing env allowlist",
-			mutate: func(cfg *config.Config) {
-				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-					"local": {
-						Enabled:   true,
-						Transport: "stdio",
-						Command:   "demo-mcp",
-					},
-				}
-			},
-			expectArea:  "mcp",
-			expectMatch: "uses stdio without a server childEnvAllowlist",
-		},
-		{
-			name: "http mcp insecure",
-			mutate: func(cfg *config.Config) {
-				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-					"remote": {
-						Enabled:           true,
-						Transport:         "streamablehttp",
-						URL:               "http://127.0.0.1:8080/mcp",
-						AllowInsecureHTTP: true,
-					},
-				}
-			},
-			expectArea:  "mcp",
-			expectMatch: "uses insecure HTTP transport",
-		},
-		{
 			name: "webhook profile too permissive",
 			mutate: func(cfg *config.Config) {
 				cfg.Triggers.Webhook.Enabled = true
 				cfg.Security.Profiles.Default = "danger"
 				cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
 					MaxCapability: "privileged",
-					AllowedTools:  []string{"exec", "run_skill_script"},
+					DeclaredTools: []string{"shell_exec", "run_skill_script"},
 					AllowedHosts:  []string{"*.example.com"},
 					WritablePaths: []string{"/tmp"},
 				}
@@ -198,20 +169,19 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 
 func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
 	cfg := safeDoctorConfig()
-	cfg.Tools.RestrictToWorkspace = false
 	cfg.Hardening.PrivilegedTools = true
 	cfg.Hardening.EnableExecShell = true
 	cfg.Triggers.Webhook.Enabled = true
 	cfg.Triggers.Webhook.Secret = ""
 	cfg.Triggers.Webhook.Addr = "0.0.0.0:8765"
 	cfg.Security.Profiles.Default = "danger"
-	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged", AllowedTools: []string{"exec"}}
+	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged", DeclaredTools: []string{"shell_exec"}}
 	var out bytes.Buffer
 	if err := runDoctorCommand("", cfg, "", nil, strings.NewReader(""), &out, &out); err != nil {
 		t.Fatalf("runDoctorCommand: %v", err)
 	}
 	text := out.String()
-	for _, area := range []string{"filesystem", "exec", "privileged-exec", "webhook"} {
+	for _, area := range []string{"exec", "privileged-exec", "webhook"} {
 		if !strings.Contains(text, area) {
 			t.Fatalf("expected %q warning in %q", area, text)
 		}
@@ -414,7 +384,7 @@ func TestDoctorFindings_ProfileHostThreshold(t *testing.T) {
 	}
 	cfg.Security.Profiles.Profiles["safe"] = config.AccessProfileConfig{
 		MaxCapability: "safe",
-		AllowedTools:  []string{"web_fetch"},
+		DeclaredTools: []string{"web_fetch"},
 		AllowedHosts:  hosts,
 	}
 	findings := doctorFindings(cfg)
@@ -457,7 +427,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
 			MaxCapability: "guarded",
-			AllowedTools:  []string{"exec"},
+			DeclaredTools: []string{"shell_exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "webhook", "can reach exec shell mode via profile") {
@@ -474,7 +444,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
 			MaxCapability: "guarded",
-			AllowedTools:  []string{"exec"},
+			DeclaredTools: []string{"shell_exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
@@ -491,7 +461,7 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "danger"
 		cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
 			MaxCapability: "privileged",
-			AllowedTools:  []string{"exec"},
+			DeclaredTools: []string{"shell_exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
@@ -539,12 +509,11 @@ func safeDoctorConfig() config.Config {
 	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
 		"safe": {
 			MaxCapability: "safe",
-			AllowedTools:  []string{"read_file"},
+			DeclaredTools: []string{"read_files"},
 		},
 	}
 	cfg.Security.Network.Enabled = true
 	cfg.Security.Network.DefaultDeny = true
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
 	cfg.Provider.APIKey = "test-provider-key"
 	cfg.RuntimeProfile = config.ProfileLocalDev
 	return cfg

@@ -26,8 +26,8 @@ func TestRunAccessCommandSetsChannelProfile(t *testing.T) {
 	if loaded.Security.Profiles.Channels["telegram"] != config.AccessLevelOperator {
 		t.Fatalf("expected telegram operator, got %#v", loaded.Security.Profiles.Channels)
 	}
-	if !loaded.Hardening.GuardedTools || !loaded.Tools.EnableExec {
-		t.Fatalf("expected operator runtime requirements, got hardening=%#v tools=%#v", loaded.Hardening, loaded.Tools)
+	if !loaded.Hardening.GuardedTools {
+		t.Fatalf("expected operator runtime requirements, got hardening=%#v", loaded.Hardening)
 	}
 	if loaded.Service.MaxCapability != "guarded" {
 		t.Fatalf("expected operator service maxCapability guarded, got %q", loaded.Service.MaxCapability)
@@ -54,7 +54,7 @@ func TestRunAccessCommandSetsAdminServiceCeiling(t *testing.T) {
 	if loaded.Service.MaxCapability != "privileged" {
 		t.Fatalf("expected admin service maxCapability privileged, got %q", loaded.Service.MaxCapability)
 	}
-	if !loaded.Hardening.GuardedTools || !loaded.Hardening.PrivilegedTools || !loaded.Tools.EnableExec {
-		t.Fatalf("expected admin runtime requirements, got hardening=%#v tools=%#v", loaded.Hardening, loaded.Tools)
+	if !loaded.Hardening.GuardedTools || !loaded.Hardening.PrivilegedTools {
+		t.Fatalf("expected admin runtime requirements, got hardening=%#v", loaded.Hardening)
 	}
 }

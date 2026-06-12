@@ -14,7 +14,6 @@ func TestApplyRuntimeConfigDefaultsUsesCwdForRestrictedWorkspace(t *testing.T) {
 		t.Fatalf("Getwd: %v", err)
 	}
 	cfg := config.Default()
-	cfg.Tools.RestrictToWorkspace = true
 	cfg.WorkspaceDir = ""
 
 	applyRuntimeConfigDefaults(&cfg)

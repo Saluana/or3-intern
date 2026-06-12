@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"strings"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/capability"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/requestctx"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/turns"
 )
 
@@ -41,23 +41,23 @@ type RunnerTurnRequest struct {
 type RunnerTurnResult struct {
 	RunnerChatSessionID string
 	RunnerChatTurnID    string
-	AgentCLIRunID       string
-	AgentCLIJobID       string
+	RunnerRunID         string
+	RunnerJobID         string
 }
 
-// RunnerTurnOrchestrator routes ingress work to agentcli.ChatManager instead of
+// RunnerTurnOrchestrator routes ingress work to runners.ChatManager instead of
 // the built-in provider/tool-loop runtime.
 type RunnerTurnOrchestrator struct {
 	cfg            config.Config
-	chat           *agentcli.ChatManager
+	chat           *runners.ChatManager
 	bootstrap      RunnerBootstrapContext
 	context        *RunnerContextBuilder
 	promptCompiler *RunnerPromptCompiler
 }
 
 // NewRunnerTurnOrchestrator constructs an orchestrator when runner chat is enabled.
-func NewRunnerTurnOrchestrator(cfg config.Config, chat *agentcli.ChatManager, bootstrap RunnerBootstrapContext, deps RunnerContextDeps) *RunnerTurnOrchestrator {
-	if chat == nil || !cfg.AgentCLI.Enabled {
+func NewRunnerTurnOrchestrator(cfg config.Config, chat *runners.ChatManager, bootstrap RunnerBootstrapContext, deps RunnerContextDeps) *RunnerTurnOrchestrator {
+	if chat == nil {
 		return nil
 	}
 	compiler := NewRunnerPromptCompiler(cfg, bootstrap, deps)
@@ -85,13 +85,11 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 	if o == nil || o.chat == nil {
 		return RunnerTurnResult{}, errors.New("runner turn orchestrator unavailable")
 	}
-	runnerID := agentcli.RunnerID(strings.TrimSpace(req.RunnerID))
-	activeRunner, legacyRunner, migrated := agentcli.ResolveRunnerIDForTurn(o.cfg, string(runnerID))
-	if legacyRunner != "" && activeRunner == "" {
-		return RunnerTurnResult{}, agentcli.LegacyRunnerMigrationError(legacyRunner)
+	runnerID := runners.RunnerID(strings.TrimSpace(req.RunnerID))
+	if runnerID == "" {
+		runnerID = runners.ResolveDefaultRunner(o.cfg)
 	}
-	runnerID = agentcli.RunnerID(activeRunner)
-	if err := agentcli.ValidateSelectableRunner(o.cfg, runnerID); err != nil {
+	if err := runners.ValidateSelectableRunner(o.cfg, runnerID); err != nil {
 		return RunnerTurnResult{}, err
 	}
 	userMessage := strings.TrimSpace(req.Message)
@@ -108,31 +106,31 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 	}
 	mode := strings.TrimSpace(req.Mode)
 	if mode == "" {
-		mode = strings.TrimSpace(o.cfg.AgentCLI.DefaultMode)
+		mode = strings.TrimSpace(o.cfg.Runners.DefaultMode)
 	}
 	isolation := strings.TrimSpace(req.Isolation)
 	if isolation == "" {
-		isolation = strings.TrimSpace(o.cfg.AgentCLI.DefaultIsolation)
+		isolation = strings.TrimSpace(o.cfg.Runners.DefaultIsolation)
 	}
-	startReq := agentcli.StartTurnRequest{
+	startReq := runners.StartTurnRequest{
 		AppSessionKey:    sessionKey,
 		RunnerID:         string(runnerID),
 		UserMessage:      userMessage,
 		PromptMessage:    userMessage,
 		Attachments:      req.Attachments,
-		ContinuationMode: agentcli.ContinuationReplay,
+		ContinuationMode: runners.ContinuationReplay,
 		Model:            strings.TrimSpace(req.Model),
 		Mode:             mode,
 		Isolation:        isolation,
 		Cwd:              strings.TrimSpace(req.Cwd),
-		Meta:             runnerTurnMeta(req.Meta, migrated, legacyRunner, triggerKind),
+		Meta:             runnerTurnMeta(req.Meta, triggerKind),
 		ApprovalToken:    strings.TrimSpace(req.ApprovalToken),
 	}
 	sess, err := o.chat.EnsureSession(ctx, startReq)
 	if err != nil {
 		return RunnerTurnResult{}, err
 	}
-	compiled, err := o.compileRunnerChatPrompt(ctx, sess.ID, sessionKey, userMessage, triggerKind, req.Meta, agentcli.ContinuationReplay)
+	compiled, err := o.compileRunnerChatPrompt(ctx, sess.ID, sessionKey, userMessage, triggerKind, req.Meta, runners.ContinuationReplay)
 	if err != nil {
 		return RunnerTurnResult{}, err
 	}
@@ -145,31 +143,31 @@ func (o *RunnerTurnOrchestrator) StartTurn(ctx context.Context, req RunnerTurnRe
 	return RunnerTurnResult{
 		RunnerChatSessionID: result.Session.ID,
 		RunnerChatTurnID:    result.Turn.ID,
-		AgentCLIRunID:       result.Turn.AgentCLIRunID,
-		AgentCLIJobID:       result.JobID,
+		RunnerRunID:         result.Turn.RunnerRunID,
+		RunnerJobID:         result.JobID,
 	}, nil
 }
 
 // CompileRunnerChatPrompt builds the OR3 runner envelope for runner-chat HTTP turns.
 func (o *RunnerTurnOrchestrator) CompileRunnerChatPrompt(ctx context.Context, sessionKey, userMessage, triggerKind string, meta map[string]any) RunnerPromptCompileResult {
-	out, _ := o.compileRunnerChatPrompt(ctx, "", sessionKey, userMessage, triggerKind, meta, agentcli.ContinuationReplay)
+	out, _ := o.compileRunnerChatPrompt(ctx, "", sessionKey, userMessage, triggerKind, meta, runners.ContinuationReplay)
 	return out
 }
 
 // CompileRunnerChatPromptForSession builds a final runner-chat execution prompt
 // with prior completed turns included as volatile OR3 context.
-func (o *RunnerTurnOrchestrator) CompileRunnerChatPromptForSession(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation agentcli.ContinuationMode) (RunnerPromptCompileResult, error) {
+func (o *RunnerTurnOrchestrator) CompileRunnerChatPromptForSession(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation runners.ContinuationMode) (RunnerPromptCompileResult, error) {
 	return o.compileRunnerChatPrompt(ctx, runnerChatSessionID, appSessionKey, userMessage, triggerKind, meta, continuation)
 }
 
-func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation agentcli.ContinuationMode) (RunnerPromptCompileResult, error) {
+func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation runners.ContinuationMode) (RunnerPromptCompileResult, error) {
 	extra := []string(nil)
-	if continuation != agentcli.ContinuationNative && strings.TrimSpace(runnerChatSessionID) != "" && o != nil && o.chat != nil && o.chat.DB != nil {
+	if continuation != runners.ContinuationNative && strings.TrimSpace(runnerChatSessionID) != "" && o != nil && o.chat != nil && o.chat.DB != nil {
 		history, err := o.chat.DB.ListRunnerChatTurns(ctx, runnerChatSessionID, 0)
 		if err != nil {
 			return RunnerPromptCompileResult{}, fmt.Errorf("list runner chat history: %w", err)
 		}
-		if block := agentcli.BuildReplayHistoryContextBlock(appAgentcliHistory(history)); block != "" {
+		if block := runners.BuildReplayHistoryContextBlock(appAgentcliHistory(history)); block != "" {
 			extra = append(extra, block)
 		}
 	}
@@ -182,10 +180,10 @@ func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, ru
 	}), nil
 }
 
-func appAgentcliHistory(turns []db.RunnerChatTurn) []agentcli.RunnerChatTurn {
-	out := make([]agentcli.RunnerChatTurn, 0, len(turns))
+func appAgentcliHistory(turns []db.RunnerChatTurn) []runners.RunnerChatTurn {
+	out := make([]runners.RunnerChatTurn, 0, len(turns))
 	for _, t := range turns {
-		out = append(out, agentcli.RunnerChatTurn{
+		out = append(out, runners.RunnerChatTurn{
 			ID:          t.ID,
 			Sequence:    t.Sequence,
 			UserText:    t.UserMessage,
@@ -198,12 +196,12 @@ func appAgentcliHistory(turns []db.RunnerChatTurn) []agentcli.RunnerChatTurn {
 	return out
 }
 
-// PrepareAgentRunRequest applies OR3 context compilation to background agent runs.
-func (o *RunnerTurnOrchestrator) PrepareAgentRunRequest(ctx context.Context, req agentcli.AgentRunRequest) agentcli.AgentRunRequest {
+// PrepareRunnerRunRequest applies OR3 context compilation to background agent runs.
+func (o *RunnerTurnOrchestrator) PrepareRunnerRunRequest(ctx context.Context, req runners.RunnerRunRequest) runners.RunnerRunRequest {
 	if o == nil || o.promptCompiler == nil {
 		return req
 	}
-	return o.promptCompiler.PrepareAgentRunRequest(ctx, req)
+	return o.promptCompiler.PrepareRunnerRunRequest(ctx, req)
 }
 
 func (o *RunnerTurnOrchestrator) compilePrompt(ctx context.Context, in RunnerPromptCompileInput) RunnerPromptCompileResult {
@@ -261,7 +259,7 @@ func RunnerTurnRequestFromBusEvent(cfg config.Config, ev bus.Event) RunnerTurnRe
 		req.Attachments = turns.DecodeAttachments(ev.Meta["attachments"])
 	}
 	if req.RunnerID == "" {
-		req.RunnerID = string(agentcli.ResolveDefaultRunner(cfg))
+		req.RunnerID = string(runners.ResolveDefaultRunner(cfg))
 	}
 	if req.Channel == "cli" {
 		req.Actor = "cli"
@@ -289,23 +287,19 @@ func busEventTriggerKind(ev bus.Event) string {
 	}
 }
 
-// ErrRunnerTurnsDisabled is returned when agent CLI is disabled.
-var ErrRunnerTurnsDisabled = errors.New("runner turns require agentCLI.enabled and a configured default runner")
+// ErrRunnerRuntimeUnavailable is returned when the runner runtime is not
+// wired up — the turn orchestrator is missing and the default runner is not
+// configured. In a runner-first architecture there is no agent CLI toggle to
+// flip; the operator must configure a default runner.
+var ErrRunnerRuntimeUnavailable = errors.New("runner runtime unavailable: default runner not configured")
 
-// ErrLegacyToolReplayDisabled is returned when built-in tool replay is requested in runner-first mode.
-var ErrLegacyToolReplayDisabled = errors.New("built-in tool replay is disabled in runner-first mode; approve runner permissions or retry the turn")
-
-func runnerTurnMeta(in map[string]any, migrated bool, legacyRunner, triggerKind string) map[string]any {
+func runnerTurnMeta(in map[string]any, triggerKind string) map[string]any {
 	meta := cloneServiceMeta(in)
 	if meta == nil {
 		meta = map[string]any{}
 	}
 	if triggerKind != "" {
 		meta["trigger_kind"] = triggerKind
-	}
-	if migrated && legacyRunner != "" {
-		meta["legacy_runner_id"] = legacyRunner
-		meta["runner_migrated"] = true
 	}
 	return meta
 }

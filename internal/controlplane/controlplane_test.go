@@ -15,18 +15,9 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 )
-
-type fakeMCPStatusProvider struct {
-	status map[string]mcp.ServerStatus
-}
-
-func (p fakeMCPStatusProvider) ServerStatus() map[string]mcp.ServerStatus {
-	return p.status
-}
 
 func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time) *approval.Broker {
 	t.Helper()
@@ -50,20 +41,20 @@ func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time
 	}
 }
 
-func TestBuildAgentCLIRunResponseUsesDisplayTaskMetadata(t *testing.T) {
+func TestBuildRunnerRunResponseUsesDisplayTaskMetadata(t *testing.T) {
 	meta, _ := json.Marshal(map[string]any{
 		"ui_task":              "raw visible task",
 		"or3_context_injected": true,
 	})
-	resp := BuildAgentCLIRunResponse(db.AgentCLIRun{
-		ID:               "acr_1",
+	resp := BuildRunnerRunResponse(db.RunnerRun{
+		ID:               "rr_1",
 		JobID:            "job_1",
 		ParentSessionKey: "sess",
 		RunnerID:         "codex",
 		Task:             "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>",
 		Mode:             "safe_edit",
 		Isolation:        "host_workspace_write",
-		Status:           db.AgentCLIStatusQueued,
+		Status:           db.RunnerRunStatusQueued,
 		MetaJSON:         string(meta),
 	})
 	if resp["task"] != "raw visible task" {
@@ -74,46 +65,21 @@ func TestBuildAgentCLIRunResponseUsesDisplayTaskMetadata(t *testing.T) {
 	}
 }
 
-func TestBuildAgentCLIRunResponseUsesRunnerChatUserMessage(t *testing.T) {
+func TestBuildRunnerRunResponseUsesRunnerChatUserMessage(t *testing.T) {
 	meta, _ := json.Marshal(map[string]any{
 		"runner_chat_user_message": "raw chat message",
 	})
-	resp := BuildAgentCLIRunResponse(db.AgentCLIRun{
-		ID:               "acr_2",
+	resp := BuildRunnerRunResponse(db.RunnerRun{
+		ID:               "rr_2",
 		JobID:            "job_2",
 		ParentSessionKey: "sess",
 		RunnerID:         "opencode",
 		Task:             "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>",
-		Status:           db.AgentCLIStatusQueued,
+		Status:           db.RunnerRunStatusQueued,
 		MetaJSON:         string(meta),
 	})
 	if resp["task"] != "raw chat message" {
 		t.Fatalf("expected runner-chat user message, got %#v", resp["task"])
-	}
-}
-
-func TestCollectCapabilitiesReportWithMCPDetails(t *testing.T) {
-	cfg := config.Default()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"files": {Enabled: true, Transport: "stdio"},
-		"docs":  {Enabled: false, Transport: "streamablehttp"},
-	}
-
-	report := CollectCapabilitiesReportWithMCPStatus(cfg, nil, fakeMCPStatusProvider{status: map[string]mcp.ServerStatus{
-		"files": {Connected: true, ToolCount: 2},
-	}}, "", "")
-
-	if len(report.MCPServers) != 2 {
-		t.Fatalf("expected all configured MCP servers, got %#v", report.MCPServers)
-	}
-	if report.MCPServers[0].Name != "docs" || report.MCPServers[0].Transport != "streamablehttp" || report.MCPServers[0].Connected {
-		t.Fatalf("unexpected first MCP server info: %#v", report.MCPServers[0])
-	}
-	if report.MCPServers[1].Name != "files" || report.MCPServers[1].ToolCount != 2 || !report.MCPServers[1].Connected {
-		t.Fatalf("unexpected files MCP server info: %#v", report.MCPServers[1])
-	}
-	if len(report.EnabledMCPServers) != 1 || report.EnabledMCPServers[0].Name != "files" {
-		t.Fatalf("expected only enabled MCP server in enabledMcpServers, got %#v", report.EnabledMCPServers)
 	}
 }
 

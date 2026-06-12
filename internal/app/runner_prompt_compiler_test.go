@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/scope"
 )
 
@@ -148,10 +148,10 @@ func TestRunnerPromptCompilerInjectsRetrievedMemoryInContext(t *testing.T) {
 	}
 }
 
-func TestPrepareAgentRunRequestDefaultsToCompiledContext(t *testing.T) {
+func TestPrepareRunnerRunRequestDefaultsToCompiledContext(t *testing.T) {
 	cfg := config.Default()
 	compiler := NewRunnerPromptCompiler(cfg, RunnerBootstrapContext{Soul: "bootstrap soul"}, RunnerContextDeps{})
-	req := compiler.PrepareAgentRunRequest(context.Background(), agentcli.AgentRunRequest{
+	req := compiler.PrepareRunnerRunRequest(context.Background(), runners.RunnerRunRequest{
 		ParentSessionKey: "cron:job",
 		Task:             "review repo",
 	})
@@ -166,10 +166,10 @@ func TestPrepareAgentRunRequestDefaultsToCompiledContext(t *testing.T) {
 	}
 }
 
-func TestPrepareAgentRunRequestHonorsOptOut(t *testing.T) {
+func TestPrepareRunnerRunRequestHonorsOptOut(t *testing.T) {
 	cfg := config.Default()
 	compiler := NewRunnerPromptCompiler(cfg, RunnerBootstrapContext{Soul: "bootstrap soul"}, RunnerContextDeps{})
-	req := compiler.PrepareAgentRunRequest(context.Background(), agentcli.AgentRunRequest{
+	req := compiler.PrepareRunnerRunRequest(context.Background(), runners.RunnerRunRequest{
 		Task: "plain task",
 		Meta: map[string]any{"or3_context": "none"},
 	})

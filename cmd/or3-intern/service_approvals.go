@@ -186,19 +186,6 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 		if sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID); sessionKey != "" {
 			response["session_key"] = sessionKey
 		}
-		warnings := make([]map[string]any, 0, 1)
-		resumeJobID, err := s.startApprovedResumeJob(r.Context(), issued, serviceAuthIdentityFromContext(r.Context()))
-		if err != nil {
-			warnings = append(warnings, map[string]any{
-				"code":    "resume_start_failed",
-				"message": approvalResumeWarning(err),
-			})
-		} else if strings.TrimSpace(resumeJobID) != "" {
-			response["resume_job_id"] = resumeJobID
-		}
-		if len(warnings) > 0 {
-			response["warnings"] = warnings
-		}
 		writeServiceJSON(w, http.StatusOK, response)
 	case "deny":
 		if r.Method != http.MethodPost {

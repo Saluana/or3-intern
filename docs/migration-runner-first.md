@@ -12,23 +12,20 @@ runner before starting new work.
 
 | Before | After |
 | --- | --- |
-| `agentCLI.enabled=false` (older installs may still carry this) | `agentCLI.enabled=true` for new installs |
-| Implicit built-in agent | `agentCLI.defaultRunner=opencode` |
-| — | `OR3_AGENT_CLI_DEFAULT_RUNNER` env override |
-
-Existing config files with `agentCLI.enabled=false` are preserved on load.
+| Implicit built-in agent | `runners.default=opencode` |
+| — | `OR3_RUNNERS_DEFAULT` env override |
 
 ## Session metadata
 
 Sessions with `runner_id=or3-intern` remain listed. API responses include
 `legacy_runner_id` and `runner_selectable=false`. The first new turn migrates
-to `agentCLI.defaultRunner` when agent CLI is enabled.
+to `runners.default`.
 
 ## Cron jobs
 
-- Keep using `agent_cli_run` for scheduled runner tasks.
-- Legacy scheduled chat payloads (`agent_turn`) publish bus events that become runner chat turns when agent CLI is enabled.
-- When agent CLI is disabled, legacy cron agent turns fail with guidance to enable runners or recreate jobs as `agent_cli_run`.
+- Use `runner_run` for scheduled runner tasks.
+- Legacy scheduled chat payloads (`agent_turn`) publish bus events that become runner chat turns.
+- Legacy cron `agent_turn` jobs that have not been migrated will still fail; recreate them as `runner_run` to route them through a runner. Runner-only mode is the only supported execution path.
 
 ## Commands
 

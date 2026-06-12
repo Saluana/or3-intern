@@ -10,31 +10,9 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
-	"or3-intern/internal/runnerfirst"
 )
 
-func TestApplyLiveConfigUpdatesRunnerFirstFlag(t *testing.T) {
-	previous := runnerfirst.Enabled()
-	t.Cleanup(func() { runnerfirst.SetEnabled(previous) })
-
-	srv := &serviceServer{}
-	enabled := config.Config{AgentCLI: config.AgentCLIConfig{Enabled: true}}
-	srv.applyLiveConfig(enabled)
-	if !runnerfirst.Enabled() {
-		t.Fatal("expected runner-first flag enabled after live config apply")
-	}
-
-	disabled := config.Config{AgentCLI: config.AgentCLIConfig{Enabled: false}}
-	srv.applyLiveConfig(disabled)
-	if runnerfirst.Enabled() {
-		t.Fatal("expected runner-first flag disabled after live config apply")
-	}
-}
-
 func TestApplyLiveConfigRefreshesRunnerRuntime(t *testing.T) {
-	previous := runnerfirst.Enabled()
-	t.Cleanup(func() { runnerfirst.SetEnabled(previous) })
-
 	database, err := db.Open(filepath.Join(t.TempDir(), "service.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +20,7 @@ func TestApplyLiveConfigRefreshesRunnerRuntime(t *testing.T) {
 	t.Cleanup(func() { _ = database.Close() })
 
 	cfg := config.Default()
-	cfg.AgentCLI.DefaultRunner = "opencode"
+	cfg.Runners.Default = "opencode"
 	jobs := jobs.NewRegistry(time.Minute, 16)
 	srv := &serviceServer{
 		config:   cfg,
@@ -51,23 +29,23 @@ func TestApplyLiveConfigRefreshesRunnerRuntime(t *testing.T) {
 		appSvc:   app.NewServiceAppWithRunnerTurns(cfg, jobs, nil, nil, nil),
 	}
 	srv.applyLiveConfig(cfg)
-	if srv.agentCLIManager == nil || srv.chatManager == nil || srv.turnOrchestrator == nil {
-		t.Fatalf("expected live runner runtime, got manager=%v chat=%v orchestrator=%v", srv.agentCLIManager, srv.chatManager, srv.turnOrchestrator)
+	if srv.runnerManager == nil || srv.chatManager == nil || srv.turnOrchestrator == nil {
+		t.Fatalf("expected live runner runtime, got manager=%v chat=%v orchestrator=%v", srv.runnerManager, srv.chatManager, srv.turnOrchestrator)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_ = srv.agentCLIManager.Stop(stopCtx)
+		_ = srv.runnerManager.Stop(stopCtx)
 	})
 
 	next := cfg
-	next.AgentCLI.DefaultRunner = "codex"
-	next.AgentCLI.DisabledRunners = []string{"gemini"}
+	next.Runners.Default = "codex"
+	next.Runners.Disabled = []string{"gemini"}
 	srv.applyLiveConfig(next)
-	if got := srv.agentCLIManager.Cfg.DefaultRunner; got != "codex" {
+	if got := srv.runnerManager.Cfg.Default; got != "codex" {
 		t.Fatalf("expected default runner refreshed, got %q", got)
 	}
-	if len(srv.agentCLIManager.Cfg.DisabledRunners) != 1 || srv.agentCLIManager.Cfg.DisabledRunners[0] != "gemini" {
-		t.Fatalf("expected disabled runners refreshed, got %#v", srv.agentCLIManager.Cfg.DisabledRunners)
+	if len(srv.runnerManager.Cfg.Disabled) != 1 || srv.runnerManager.Cfg.Disabled[0] != "gemini" {
+		t.Fatalf("expected disabled runners refreshed, got %#v", srv.runnerManager.Cfg.Disabled)
 	}
 }

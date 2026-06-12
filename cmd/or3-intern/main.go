@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
@@ -33,7 +32,7 @@ import (
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/runnerfirst"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 	"or3-intern/internal/serviceerrors"
@@ -345,7 +344,6 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := loadedRuntimeConfig.Config
-	runnerfirst.SetEnabled(cfg.RunnerFirst())
 	if err := prepareRuntimeStorage(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime storage error:", err)
 		os.Exit(1)
@@ -441,10 +439,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mcpManager := buildRuntimeMCPManager(ctx, cfg)
-
 	var cronSvc *cron.Service
-	var agentCLIManager *agentcli.Manager
+	var runnerManager *runners.Manager
 
 	ret := memory.NewRetriever(d)
 	ret.EmbedFingerprint = currentEmbedFingerprint(cfg)
@@ -499,17 +495,17 @@ func main() {
 	}
 	serviceJobs := buildServiceJobRegistry(cmd)
 
-	agentCLIManager = buildRuntimeAgentCLIManager(cfg, d, serviceJobs)
-	if agentCLIManager != nil {
-		if err := startRuntimeAgentCLIManager(ctx, agentCLIManager); err != nil {
+	runnerManager = buildRuntimeAgentCLIManager(cfg, d, serviceJobs)
+	if runnerManager != nil {
+		if err := startRuntimeAgentCLIManager(ctx, runnerManager); err != nil {
 			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
 			os.Exit(1)
 		}
 	}
-	chatManager := buildRuntimeChatManager(cfg, d, agentCLIManager, serviceJobs, approvalBroker)
+	chatManager := buildRuntimeChatManager(cfg, d, runnerManager, serviceJobs, approvalBroker)
 	turnOrchestrator := buildRunnerTurnOrchestrator(cfg, chatManager, d, ret, docRetriever, embedProv)
 
-	cronSvc = buildRuntimeCronService(cfg, b, agentCLIManager, turnOrchestrator)
+	cronSvc = buildRuntimeCronService(cfg, b, runnerManager, turnOrchestrator)
 	if cronSvc != nil {
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
@@ -527,13 +523,13 @@ func main() {
 	switch cmd {
 	case "chat":
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: agentCLIManager, Channels: channelManager, CLI: del})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: runnerManager, Channels: channelManager, CLI: del})
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: agentCLIManager, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -558,12 +554,12 @@ func main() {
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
 	case "service":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: agentCLIManager, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
 		}
-		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHost, agentCLIManager, chatManager, turnOrchestrator, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager, channelManager); err != nil {
+		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHost, runnerManager, chatManager, turnOrchestrator, serviceJobs, approvalBroker, unsafeDev, cronSvc, channelManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
@@ -585,7 +581,7 @@ func main() {
 		agentCtx := requestctx.ContextWithApprovalToken(ctx, approvalToken)
 		agentCtx = requestctx.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
 		if turnOrchestrator == nil {
-			fmt.Fprintln(os.Stderr, "agent error: runner orchestration unavailable; enable agentCLI and configure a default runner")
+			fmt.Fprintln(os.Stderr, "agent error: runner orchestration unavailable; enable runners and configure a default runner")
 			os.Exit(1)
 		}
 		_, err := turnOrchestrator.StartTurn(agentCtx, app.RunnerTurnRequest{
@@ -625,7 +621,7 @@ func main() {
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
 			LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
-				return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+				return loadAvailableToolNamesWithManager(ctx, cfg, struct{}{})
 			},
 			LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
 				builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
@@ -681,11 +677,6 @@ func main() {
 
 	if heartbeatSvc != nil {
 		heartbeatSvc.Stop()
-	}
-	if mcpManager != nil {
-		if err := mcpManager.Close(); err != nil {
-			log.Printf("mcp shutdown failed: %v", err)
-		}
 	}
 	if cronSvc != nil {
 		cronSvc.Stop()
@@ -803,9 +794,6 @@ func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) er
 }
 
 func shouldRegisterExecTool(cfg config.Config) bool {
-	if !cfg.Tools.EnableExec {
-		return false
-	}
 	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
 		return false
 	}
@@ -863,10 +851,8 @@ func cfgPathOrDefault(p string) string {
 }
 
 func allowedRoot(cfg config.Config) string {
-	if cfg.Tools.RestrictToWorkspace {
-		if cfg.WorkspaceDir != "" {
-			return cfg.WorkspaceDir
-		}
+	if cfg.WorkspaceDir != "" {
+		return cfg.WorkspaceDir
 	}
 	if cfg.AllowedDir != "" {
 		return cfg.AllowedDir
@@ -875,9 +861,6 @@ func allowedRoot(cfg config.Config) string {
 }
 
 func allowedReadRoot(cfg config.Config) string {
-	if cfg.Tools.RestrictToWorkspace && cfg.Tools.AllowFullFileRead {
-		return ""
-	}
 	return allowedRoot(cfg)
 }
 
@@ -927,7 +910,7 @@ func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTur
 				if turnOrchestrator != nil {
 					err = turnOrchestrator.HandleBusEvent(cctx, ev)
 				} else {
-					err = app.ErrRunnerTurnsDisabled
+					err = app.ErrRunnerRuntimeUnavailable
 				}
 				if err != nil {
 					if ev.Channel == "cli" {

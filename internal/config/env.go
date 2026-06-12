@@ -30,10 +30,6 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_MODEL"); v != "" && shouldApplyEnvModelOverride(cfg) {
 		cfg.Provider.Model = v
 		cfg.ModelRouting.Chat.Primary.Model = v
-		if cfg.AgentCLI.Enabled {
-			appendCompatEnvWarning(cfg,
-				"OR3_MODEL only affects legacy built-in agent paths; configure chat turns via agentCLI.defaultRunner and external runner models instead.")
-		}
 	}
 	if v := os.Getenv("OR3_CONSOLIDATION_MODEL"); v != "" {
 		cfg.ConsolidationModel = v
@@ -70,20 +66,19 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvString("OR3_EMAIL_SMTP_USERNAME", &cfg.Channels.Email.SMTPUsername)
 	applyEnvString("OR3_EMAIL_SMTP_PASSWORD", &cfg.Channels.Email.SMTPPassword)
 	applyEnvString("OR3_EMAIL_FROM_ADDRESS", &cfg.Channels.Email.FromAddress)
-	applyEnvBool("OR3_AGENT_CLI_ENABLED", &cfg.AgentCLI.Enabled)
-	applyEnvString("OR3_AGENT_CLI_DEFAULT_RUNNER", &cfg.AgentCLI.DefaultRunner)
-	if v := os.Getenv("OR3_AGENT_CLI_DISABLED_RUNNERS"); v != "" {
-		cfg.AgentCLI.DisabledRunners = compactStrings(strings.Split(v, ","))
+	applyEnvString("OR3_RUNNERS_DEFAULT", &cfg.Runners.Default)
+	if v := os.Getenv("OR3_RUNNERS_DISABLED"); v != "" {
+		cfg.Runners.Disabled = compactStrings(strings.Split(v, ","))
 	}
-	applyEnvInt("OR3_AGENT_CLI_MAX_CONCURRENT", &cfg.AgentCLI.MaxConcurrent)
-	applyEnvInt("OR3_AGENT_CLI_MAX_QUEUED", &cfg.AgentCLI.MaxQueued)
-	applyEnvInt("OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS", &cfg.AgentCLI.DefaultTimeoutSeconds)
-	applyEnvInt("OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS", &cfg.AgentCLI.MaxTimeoutSeconds)
-	applyEnvBool("OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO", &cfg.AgentCLI.AllowSandboxAuto)
-	applyEnvString("OR3_AGENT_CLI_DEFAULT_MODE", &cfg.AgentCLI.DefaultMode)
-	applyEnvString("OR3_AGENT_CLI_DEFAULT_ISOLATION", &cfg.AgentCLI.DefaultIsolation)
-	applyEnvString("OR3_AGENT_CLI_CODEX_HOME", &cfg.AgentCLI.CodexHomePath)
-	applyEnvString("OR3_AGENT_CLI_CODEX_SHADOW_HOME", &cfg.AgentCLI.CodexShadowHomePath)
+	applyEnvInt("OR3_RUNNERS_MAX_CONCURRENT", &cfg.Runners.MaxConcurrent)
+	applyEnvInt("OR3_RUNNERS_MAX_QUEUED", &cfg.Runners.MaxQueued)
+	applyEnvInt("OR3_RUNNERS_DEFAULT_TIMEOUT_SECONDS", &cfg.Runners.DefaultTimeoutSeconds)
+	applyEnvInt("OR3_RUNNERS_MAX_TIMEOUT_SECONDS", &cfg.Runners.MaxTimeoutSeconds)
+	applyEnvBool("OR3_RUNNERS_ALLOW_SANDBOX_AUTO", &cfg.Runners.AllowSandboxAuto)
+	applyEnvString("OR3_RUNNERS_DEFAULT_MODE", &cfg.Runners.DefaultMode)
+	applyEnvString("OR3_RUNNERS_DEFAULT_ISOLATION", &cfg.Runners.DefaultIsolation)
+	applyEnvString("OR3_RUNNERS_CODEX_HOME", &cfg.Runners.CodexHomePath)
+	applyEnvString("OR3_RUNNERS_CODEX_SHADOW_HOME", &cfg.Runners.CodexShadowHomePath)
 	applyEnvBool("OR3_SERVICE_ENABLED", &cfg.Service.Enabled)
 	applyEnvString("OR3_SERVICE_LISTEN", &cfg.Service.Listen)
 	applyEnvString("OR3_SERVICE_SECRET", &cfg.Service.Secret)

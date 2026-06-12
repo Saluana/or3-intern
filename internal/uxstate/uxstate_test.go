@@ -42,8 +42,8 @@ func TestBuildApprovalPromptRepresentativeSubjects(t *testing.T) {
 
 func TestBuildAccessDashboardViewLocalAndHostedStates(t *testing.T) {
 	local := config.Default()
-	local.Tools.RestrictToWorkspace = true
 	local.WorkspaceDir = t.TempDir()
+	local.Hardening.ExecAllowedPrograms = nil
 	local.Service.Enabled = false
 	view := BuildAccessDashboardView(local, intdoctor.Report{}, 0, 0)
 	if len(view.Sections) != 7 {
@@ -55,13 +55,12 @@ func TestBuildAccessDashboardViewLocalAndHostedStates(t *testing.T) {
 	if view.Sections[1].Name != "Commands" || view.Sections[1].Risk != "green" {
 		t.Fatalf("expected disabled command execution to be green, got %#v", view.Sections[1])
 	}
-	local.Tools.EnableExec = true
+	local.Hardening.ExecAllowedPrograms = []string{"git"}
 	view = BuildAccessDashboardView(local, intdoctor.Report{}, 0, 0)
 	if view.Sections[1].Risk != "red" {
 		t.Fatalf("expected trusted available command execution to be red, got %#v", view.Sections[1])
 	}
 	hosted := config.Default()
-	hosted.Tools.RestrictToWorkspace = false
 	hosted.Service.Enabled = true
 	hosted.Service.Secret = "secret"
 	hosted.Security.Network.Enabled = true

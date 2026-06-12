@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
@@ -24,10 +23,10 @@ import (
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
 	or3log "or3-intern/internal/log"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/memorysvc"
 	"or3-intern/internal/providers"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/security"
 )
 
@@ -41,11 +40,9 @@ type serviceServer struct {
 	docRetriever          *memory.DocRetriever
 	embedProvider         *providers.Client
 	cronSvc               *cron.Service
-	agentCLIManager       *agentcli.Manager
-	chatManager           *agentcli.ChatManager
+	runnerManager         *runners.Manager
+	chatManager           *runners.ChatManager
 	turnOrchestrator      *app.RunnerTurnOrchestrator
-	mcpManager            *mcp.Manager
-	mcpTestManagerFactory serviceMCPTestManagerFactory
 	jobs                  *jobs.Registry
 	channelDeliverer      channels.MetaDeliverer
 	broker                *approval.Broker
@@ -137,7 +134,7 @@ const (
 	serviceFileTextReadLimit                 int64 = 1 << 20
 	serviceFileTextWriteLimit                int64 = 1 << 20
 	serviceTerminalBodyLimit                 int64 = 64 << 10
-	serviceAgentRunsBodyLimit                int64 = 256 << 10
+	serviceRunnerRunsBodyLimit               int64 = 256 << 10
 	serviceCronBodyLimit                     int64 = 64 << 10
 	serviceTerminalSessionTTL                      = 10 * time.Minute
 	serviceTerminalMaxSessions                     = 4
@@ -151,27 +148,27 @@ const (
 	serviceJobStreamHeartbeatInterval              = 15 * time.Second
 )
 
-func runServiceCommand(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry) error {
-	return runServiceCommandWithBroker(ctx, cfg, agentCLIManager, jobRegistry, nil)
+func runServiceCommand(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry) error {
+	return runServiceCommandWithBroker(ctx, cfg, runnerManager, jobRegistry, nil)
 }
 
-func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker) error {
-	return runServiceCommandWithBrokerOptions(ctx, cfg, agentCLIManager, jobRegistry, broker, false)
+func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry, broker *approval.Broker) error {
+	return runServiceCommandWithBrokerOptions(ctx, cfg, runnerManager, jobRegistry, broker, false)
 }
 
-func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool) error {
-	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, agentCLIManager, jobRegistry, broker, unsafeDev, nil)
+func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool) error {
+	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, runnerManager, jobRegistry, broker, unsafeDev, nil)
 }
 
-func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
-	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, agentCLIManager, nil, jobRegistry, broker, unsafeDev, cronSvc, nil)
+func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
+	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, runnerManager, nil, jobRegistry, broker, unsafeDev, cronSvc)
 }
 
-func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, agentCLIManager *agentcli.Manager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
-	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHostDeps{}, agentCLIManager, nil, turnOrchestrator, jobRegistry, broker, unsafeDev, cronSvc, mcpManager, nil)
+func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
+	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHostDeps{}, runnerManager, nil, turnOrchestrator, jobRegistry, broker, unsafeDev, cronSvc, nil)
 }
 
-func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, host serviceHostDeps, agentCLIManager *agentcli.Manager, chatManager *agentcli.ChatManager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager, channelDeliverer channels.MetaDeliverer) error {
+func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, host serviceHostDeps, runnerManager *runners.Manager, chatManager *runners.ChatManager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, channelDeliverer channels.MetaDeliverer) error {
 	or3log.InstallStdlibSink()
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
@@ -185,7 +182,7 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	if jobRegistry == nil {
 		jobRegistry = jobs.NewRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), cronSvc: cronSvc, agentCLIManager: agentCLIManager, chatManager: nil, turnOrchestrator: turnOrchestrator, mcpManager: mcpManager, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), cronSvc: cronSvc, runnerManager: runnerManager, chatManager: nil, turnOrchestrator: turnOrchestrator, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
 	server.applyHostDeps(host)
 	if db := server.serviceDB(); db != nil {
 		server.memorySvc = memorysvc.New(cfg, db, server.serviceEmbedProvider(), currentEmbedFingerprint(cfg))
@@ -193,7 +190,7 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	if chatManager != nil {
 		server.chatManager = chatManager
 	} else if db := server.serviceDB(); db != nil {
-		server.chatManager = buildRuntimeChatManager(cfg, db, agentCLIManager, jobRegistry, broker)
+		server.chatManager = buildRuntimeChatManager(cfg, db, runnerManager, jobRegistry, broker)
 	}
 	if turnOrchestrator == nil && server.chatManager != nil {
 		turnOrchestrator = buildRunnerTurnOrchestrator(cfg, server.chatManager, server.serviceDB(), server.serviceMemRetriever(), server.serviceDocRetriever(), server.serviceEmbedProvider())
@@ -304,14 +301,13 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 func (s *serviceServer) control() *controlplane.Service {
 	s.controlOnce.Do(func() {
 		s.controlSvc = controlplane.New(s.config, s.serviceDB(), s.serviceEmbedProvider(), s.serviceAudit(), s.broker, s.jobs)
-		s.controlSvc.MCPStatus = s.mcpManager
 	})
 	return s.controlSvc
 }
 
 func (s *serviceServer) app() *app.ServiceApp {
 	s.appOnce.Do(func() {
-		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.jobs, s.agentCLIManager, s.turnOrchestrator, s.control())
+		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.jobs, s.runnerManager, s.turnOrchestrator, s.control())
 	})
 	return s.appSvc
 }
@@ -526,7 +522,7 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 		jobID := strings.TrimSpace(parts[0])
 		snapshot, err := s.app().GetJob(jobID)
 		if err != nil {
-			if s.writePersistedAgentCLIRunSnapshot(w, r, jobID) {
+			if s.writePersistedRunnerRunSnapshot(w, r, jobID) {
 				return
 			}
 			if s.writePersistedServiceJobSnapshot(w, r, jobID) {

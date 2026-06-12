@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/turns"
 )
@@ -178,10 +178,10 @@ func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "runner_id required"})
 		return
 	}
-	sess, err := s.chatManager.EnsureSession(r.Context(), agentcli.StartTurnRequest{
+	sess, err := s.chatManager.EnsureSession(r.Context(), runners.StartTurnRequest{
 		AppSessionKey:    req.AppSessionKey,
 		RunnerID:         req.RunnerID,
-		ContinuationMode: agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
+		ContinuationMode: runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
 		Model:            req.Model,
 		Mode:             req.Mode,
 		Isolation:        req.Isolation,
@@ -267,9 +267,9 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 	promptMessage := strings.TrimSpace(req.UserMessage)
 	promptMessageFinal := false
 	if s.turnOrchestrator != nil {
-		continuation := agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
+		continuation := runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
 		if continuation == "" {
-			continuation = agentcli.ContinuationMode(sess.ContinuationMode)
+			continuation = runners.ContinuationMode(sess.ContinuationMode)
 		}
 		compileCtx, cancelCompile := context.WithTimeout(r.Context(), serviceRunnerChatPromptCompileTimeout)
 		compiled, err := s.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
@@ -297,8 +297,8 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 			promptMessageFinal = true
 		}
 	}
-	startReq := agentcli.StartTurnRequest{
-		ContinuationMode:   agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
+	startReq := runners.StartTurnRequest{
+		ContinuationMode:   runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
 		UserMessage:        req.UserMessage,
 		PromptMessage:      promptMessage,
 		PromptMessageFinal: promptMessageFinal,
@@ -318,7 +318,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		}
 		startReq.Meta["runner_thinking_level"] = thinking
 	}
-	if permission, ok := agentcli.NormalizeRunnerPermissionRequest(agentcli.RunnerPermissionRequest{
+	if permission, ok := runners.NormalizeRunnerPermissionRequest(runners.RunnerPermissionRequest{
 		RunnerID:   strings.TrimSpace(req.RunnerPermission.RunnerID),
 		Kind:       strings.TrimSpace(req.RunnerPermission.Kind),
 		Access:     strings.TrimSpace(req.RunnerPermission.Access),
@@ -332,7 +332,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		switch {
 		case errors.As(err, &approvalErr):
 			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "code": "approval_required", "status": "approval_required", "approval_id": approvalErr.RequestID, "request_id": approvalErr.RequestID})
-		case errors.Is(err, agentcli.ErrUnsupportedNativeSession):
+		case errors.Is(err, runners.ErrUnsupportedNativeSession):
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "native continuation not supported by this runner", "code": "unsupported_native_session"})
 		case errors.Is(err, db.ErrRunnerChatSessionNotFound):
 			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
@@ -547,7 +547,7 @@ func (s *serviceServer) handleRunnerChatTurnDecision(w http.ResponseWriter, r *h
 		}
 	}
 	actor := serviceAuthIdentityFromContext(r.Context()).Actor
-	result, err := s.chatManager.RespondToTurnApproval(r.Context(), turnID, agentcli.RespondToTurnApprovalOpts{
+	result, err := s.chatManager.RespondToTurnApproval(r.Context(), turnID, runners.RespondToTurnApprovalOpts{
 		Decision:     decision,
 		Note:         body.Note,
 		AllowSession: body.AllowSession,

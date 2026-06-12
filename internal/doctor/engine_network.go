@@ -26,14 +26,6 @@ func networkFindings(cfg config.Config, opts Options) []Finding {
 			Summary:  "security.network.allowedHosts is broad",
 		})
 	}
-	if hasRemoteHTTPMCP(cfg) && (!cfg.Security.Network.Enabled || !cfg.Security.Network.DefaultDeny) {
-		findings = append(findings, Finding{
-			ID:       "network.remote_mcp_without_default_deny",
-			Area:     "network",
-			Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
-			Summary:  "remote MCP transports are enabled without a meaningful deny-by-default network posture",
-		})
-	}
 	return findings
 }
 
@@ -82,24 +74,4 @@ func isLoopbackAddr(addr string) bool {
 	}
 	parsed := net.ParseIP(host)
 	return parsed != nil && parsed.IsLoopback()
-}
-
-func hasRemoteHTTPMCP(cfg config.Config) bool {
-	for _, server := range cfg.Tools.MCPServers {
-		if !server.Enabled {
-			continue
-		}
-		transport := strings.ToLower(strings.TrimSpace(server.Transport))
-		if transport != "sse" && transport != "streamablehttp" {
-			continue
-		}
-		u, err := url.Parse(strings.TrimSpace(server.URL))
-		if err != nil {
-			return true
-		}
-		if !isLoopbackAddr(u.Hostname()) {
-			return true
-		}
-	}
-	return false
 }

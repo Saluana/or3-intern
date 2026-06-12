@@ -40,8 +40,6 @@ func (m configureTUIModel) screenAdapter() configureScreenAdapter {
 		return configureSectionsScreen{}
 	case configureScreenChannels:
 		return configureChannelsScreen{}
-	case configureScreenMCPServerList, configureScreenMCPNameInput, configureScreenMCPForm, configureScreenMCPDeleteConfirm:
-		return configureMCPScreen{}
 	case configureScreenReview:
 		return configureReviewScreen{}
 	case configureScreenSuccess:
@@ -63,8 +61,6 @@ func configureFormScreenForSection(section string) configureScreenAdapter {
 		return configureWorkspaceScreen{}
 	case "channels":
 		return configureChannelsScreen{}
-	case "mcp":
-		return configureMCPScreen{}
 	case "context":
 		return configureContextScreen{}
 	case "hardening", "security", "session":

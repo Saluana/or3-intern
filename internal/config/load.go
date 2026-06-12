@@ -291,9 +291,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Channels.Email.SMTPPort <= 0 {
 		cfg.Channels.Email.SMTPPort = 587
 	}
-	if cfg.DocIndex.MaxFiles <= 0 {
-		cfg.DocIndex.MaxFiles = 100
-	}
 	if strings.TrimSpace(cfg.Context.Mode) == "" {
 		cfg.Context.Mode = "quality"
 	}
@@ -327,40 +324,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	}
 	if cfg.Context.Pressure.EmergencyPercent <= cfg.Context.Pressure.HighPercent {
 		cfg.Context.Pressure.EmergencyPercent = cfg.Context.Pressure.HighPercent + 10
-	}
-	if cfg.ContextManager.TimeoutSeconds <= 0 {
-		cfg.ContextManager.TimeoutSeconds = 15
-	}
-	if cfg.ContextManager.IdlePruneSeconds <= 0 {
-		cfg.ContextManager.IdlePruneSeconds = 300
-	}
-	if cfg.ContextManager.MaxInputTokens <= 0 {
-		cfg.ContextManager.MaxInputTokens = 1200
-	}
-	if cfg.ContextManager.MaxOutputTokens <= 0 {
-		cfg.ContextManager.MaxOutputTokens = 600
-	}
-	if cfg.DocIndex.MaxFileBytes <= 0 {
-		cfg.DocIndex.MaxFileBytes = 64 * 1024
-	}
-	if cfg.DocIndex.MaxChunks <= 0 {
-		cfg.DocIndex.MaxChunks = 500
-	}
-	if cfg.DocIndex.EmbedMaxBytes <= 0 {
-		cfg.DocIndex.EmbedMaxBytes = 8 * 1024
-	}
-	if cfg.DocIndex.RefreshSeconds <= 0 {
-		cfg.DocIndex.RefreshSeconds = 300
-	}
-	if cfg.DocIndex.RetrieveLimit <= 0 {
-		cfg.DocIndex.RetrieveLimit = 5
-	}
-	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) == 0 {
-		root := strings.TrimSpace(cfg.WorkspaceDir)
-		if root == "" {
-			root = "."
-		}
-		cfg.DocIndex.Roots = []string{root}
 	}
 	if cfg.Skills.MaxRunSeconds <= 0 {
 		cfg.Skills.MaxRunSeconds = 30
@@ -518,7 +481,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	normalizeManagedChannelInboundDefaults(&cfg)
 	for name, profile := range cfg.Security.Profiles.Profiles {
 		profile.MaxCapability = strings.ToLower(strings.TrimSpace(profile.MaxCapability))
-		profile.DeclaredTools = compactStrings(profile.DeclaredTools)
 		profile.AllowedHosts = compactStrings(profile.AllowedHosts)
 		profile.WritablePaths = compactStrings(profile.WritablePaths)
 		cfg.Security.Profiles.Profiles[name] = profile

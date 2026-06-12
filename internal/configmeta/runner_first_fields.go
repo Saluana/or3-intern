@@ -12,13 +12,11 @@ type ConfigureFieldRunnerFirst struct {
 // configureFieldRunnerFirst is the canonical registry for runner-first configure keys.
 //
 // `FieldStatusHidden` fields are removed from every UI surface (TUI,
-// or3-app, doctor plan) when runner-first mode is active. They still
-// exist on disk for backwards compatibility with users upgrading from
-// the legacy agent, but no settings UI writes to them anymore.
+// or3-app, doctor plan) when runner-first mode is active.
 //
-// `FieldStatusCompatibility` fields still drive the legacy compat
-// paths (summarization, embeddings, doctor repair) but no longer
-// select the chat model.
+// `FieldStatusCompatibility` fields still drive provider-side service work
+// such as summarization, embeddings, and doctor repair, but do not select the
+// runner chat model.
 var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 	"provider_model": {
 		Status:      FieldStatusHidden,
@@ -69,21 +67,6 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Label:       "Agents routing fallbacks (legacy)",
 		Description: "Hidden in runner-first mode. External runners choose their own model.",
 	},
-	"routing_context_provider": {
-		Status:      FieldStatusHidden,
-		Label:       "Context manager provider (legacy)",
-		Description: "Hidden in runner-first mode. Runner-first chat does not call the context-manager provider client.",
-	},
-	"routing_context_model": {
-		Status:      FieldStatusHidden,
-		Label:       "Context manager model (legacy)",
-		Description: "Hidden in runner-first mode. Memory consolidation uses the summarization role instead.",
-	},
-	"routing_context_fallbacks": {
-		Status:      FieldStatusHidden,
-		Label:       "Context manager fallbacks (legacy)",
-		Description: "Hidden in runner-first mode. Memory consolidation uses the summarization role instead.",
-	},
 	"tools_brave": {
 		Status:      FieldStatusHidden,
 		Label:       "Brave search API key (legacy)",
@@ -120,25 +103,6 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Label:       "Max input tokens (legacy)",
 		Description: "Hidden in runner-first mode. External runner context is assembled by runner-specific bootstrap paths.",
 	},
-	"context_manager_enabled": {
-		Status:      FieldStatusHidden,
-		Label:       "Context manager (legacy)",
-		Description: "Hidden in runner-first mode. Background memory consolidation uses the summarization path.",
-	},
-	"context_manager_provider":   {Status: FieldStatusHidden, Label: "Context manager provider (legacy)"},
-	"context_manager_model":      {Status: FieldStatusHidden, Label: "Context manager model (legacy)"},
-	"context_manager_timeout":    {Status: FieldStatusHidden, Label: "Context manager timeout (legacy)"},
-	"context_manager_idle_prune": {Status: FieldStatusHidden, Label: "Idle prune seconds (legacy)"},
-	"context_manager_max_input":  {Status: FieldStatusHidden, Label: "Context manager max input (legacy)"},
-	"context_manager_max_output": {Status: FieldStatusHidden, Label: "Context manager max output (legacy)"},
-	"context_manager_allow_task_updates": {
-		Status: FieldStatusHidden,
-		Label:  "Allow task updates (legacy)",
-	},
-	"context_manager_allow_stale_propose": {
-		Status: FieldStatusHidden,
-		Label:  "Allow stale proposals (legacy)",
-	},
 	"security_approval_skill_mode": {
 		Status:      FieldStatusHidden,
 		Label:       "Skill execution mode (legacy)",
@@ -174,14 +138,6 @@ var configureFieldRunnerFirst = map[string]ConfigureFieldRunnerFirst{
 		Label:       "Service tool power (legacy)",
 		Description: "Hidden in runner-first mode. Tool capability is set per-runner.",
 	},
-	"docindex_enabled":           {Status: FieldStatusHidden, Label: "Search workspace files (legacy)", Description: "Hidden in runner-first mode. Runners bring their own file search."},
-	"docindex_roots":             {Status: FieldStatusHidden, Label: "Doc index roots (legacy)"},
-	"docindex_max_files":         {Status: FieldStatusHidden, Label: "Doc index max files (legacy)"},
-	"docindex_max_file_bytes":    {Status: FieldStatusHidden, Label: "Doc index max file bytes (legacy)"},
-	"docindex_max_chunks":        {Status: FieldStatusHidden, Label: "Doc index max chunks (legacy)"},
-	"docindex_embed_max_bytes":   {Status: FieldStatusHidden, Label: "Doc index embed max bytes (legacy)"},
-	"docindex_refresh_seconds":   {Status: FieldStatusHidden, Label: "Doc index refresh seconds (legacy)"},
-	"docindex_retrieve_limit":    {Status: FieldStatusHidden, Label: "Doc index retrieve limit (legacy)"},
 	"runners_default":            {Status: FieldStatusHidden, Label: "Default runner (legacy)", Description: "Hidden in runner-first mode. The service picks the default runner itself."},
 	"runners_max_concurrent":     {Status: FieldStatusHidden, Label: "Runner concurrency (legacy)", Description: "Hidden in runner-first mode. Set by the runner host."},
 	"runners_max_queued":         {Status: FieldStatusHidden, Label: "Runner queue size (legacy)", Description: "Hidden in runner-first mode. Set by the runner host."},

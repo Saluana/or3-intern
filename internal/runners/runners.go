@@ -1,5 +1,5 @@
 // Package runners defines the typed runner registry, detection, and adapter
-// contracts for external agent CLI delegation.
+// contracts for external runner delegation.
 package runners
 
 import (
@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 )
 
-// RunnerID uniquely identifies an external agent CLI runner.
+// RunnerID uniquely identifies an external runner runner.
 type RunnerID string
 
 const (
@@ -342,7 +342,7 @@ type RunnerRunEvent struct {
 	DurationMS int64           `json:"duration_ms,omitempty"`
 }
 
-// RunnerAdapter builds commands for a specific external CLI tool.
+// RunnerAdapter builds commands for a specific external runner tool.
 type RunnerAdapter interface {
 	ID() RunnerID
 	DisplayName() string

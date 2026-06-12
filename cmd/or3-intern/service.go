@@ -31,45 +31,35 @@ import (
 )
 
 type serviceServer struct {
-	config                config.Config
-	configPath            string
-	database              *db.DB
-	audit                 *security.AuditLogger
-	artifacts             *artifacts.Store
-	memRetriever          *memory.Retriever
-	docRetriever          *memory.DocRetriever
-	embedProvider         *providers.Client
-	cronSvc               *cron.Service
-	runnerManager         *runners.Manager
-	chatManager           *runners.ChatManager
-	turnOrchestrator      *app.RunnerTurnOrchestrator
-	jobs                  *jobs.Registry
-	channelDeliverer      channels.MetaDeliverer
-	broker                *approval.Broker
-	unsafeDev             bool
-	controlOnce           sync.Once
-	controlSvc            *controlplane.Service
-	appOnce               sync.Once
-	appSvc                *app.ServiceApp
-	componentsOnce        sync.Once
-	terminalManager       *serviceTerminalManager
-	terminalTicketStore   *serviceTerminalWebSocketTicketStore
-	rateLimiter           *serviceRateLimiter
-	authFailures          *serviceAuthFailureTracker
-	nonceGuard            *serviceNonceReplayGuard
-	modelCatalog          *serviceModelCatalogCache
-	secureRelayHub        *secureConnectionRelayHub
-	memorySvc             *memorysvc.Service
-}
-
-type serviceDeviceResponse struct {
-	DeviceID    string `json:"device_id"`
-	DisplayName string `json:"display_name,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Status      string `json:"status,omitempty"`
-	CreatedAt   int64  `json:"created_at,omitempty"`
-	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
-	RevokedAt   int64  `json:"revoked_at,omitempty"`
+	config              config.Config
+	configPath          string
+	database            *db.DB
+	audit               *security.AuditLogger
+	artifacts           *artifacts.Store
+	memRetriever        *memory.Retriever
+	docRetriever        *memory.DocRetriever
+	embedProvider       *providers.Client
+	cronSvc             *cron.Service
+	runnerManager       *runners.Manager
+	chatManager         *runners.ChatManager
+	turnOrchestrator    *app.RunnerTurnOrchestrator
+	jobs                *jobs.Registry
+	channelDeliverer    channels.MetaDeliverer
+	broker              *approval.Broker
+	unsafeDev           bool
+	controlOnce         sync.Once
+	controlSvc          *controlplane.Service
+	appOnce             sync.Once
+	appSvc              *app.ServiceApp
+	componentsOnce      sync.Once
+	terminalManager     *serviceTerminalManager
+	terminalTicketStore *serviceTerminalWebSocketTicketStore
+	rateLimiter         *serviceRateLimiter
+	authFailures        *serviceAuthFailureTracker
+	nonceGuard          *serviceNonceReplayGuard
+	modelCatalog        *serviceModelCatalogCache
+	secureRelayHub      *secureConnectionRelayHub
+	memorySvc           *memorysvc.Service
 }
 
 func (s *serviceServer) initComponents() {
@@ -310,205 +300,6 @@ func (s *serviceServer) app() *app.ServiceApp {
 		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.jobs, s.runnerManager, s.turnOrchestrator, s.control())
 	})
 	return s.appSvc
-}
-
-func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
-	appSvc := s.app()
-	if s.broker == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
-		return
-	}
-	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/pairing/")
-	if path == "requests" {
-		switch r.Method {
-		case http.MethodPost:
-			limitServiceRequestBody(w, r, servicePairingBodyLimit)
-			var body struct {
-				Role         string         `json:"role"`
-				DisplayName  string         `json:"display_name"`
-				DisplayName2 string         `json:"displayName"`
-				Origin       string         `json:"origin"`
-				Metadata     map[string]any `json:"metadata"`
-				DeviceID     string         `json:"device_id"`
-			}
-			if err := decodeServiceRequestBody(r.Body, &body); err != nil {
-				writeServiceRequestDecodeError(w, err)
-				return
-			}
-			req, code, err := appSvc.CreatePairingRequest(r.Context(), approval.PairingRequestInput{Role: body.Role, DisplayName: serviceFirstNonEmpty(body.DisplayName, body.DisplayName2), Origin: body.Origin, Metadata: body.Metadata, DeviceID: body.DeviceID})
-			if err != nil {
-				writeServiceError(w, r, http.StatusBadRequest, "pairing request failed", err)
-				return
-			}
-			writeServiceJSON(w, http.StatusAccepted, map[string]any{"id": req.ID, "device_id": req.DeviceID, "role": req.Role, "display_name": req.DisplayName, "expires_at": req.ExpiresAt, "code": code})
-		case http.MethodGet:
-			if !requireServiceRole(w, r, approval.RoleOperator) {
-				return
-			}
-			items, err := appSvc.ListPairingRequests(r.Context(), r.URL.Query().Get("status"), 100)
-			if err != nil {
-				writeServiceError(w, r, http.StatusBadGateway, "pairing list unavailable", err)
-				return
-			}
-			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
-		default:
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		}
-		return
-	}
-	if path == "exchange" {
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		if retryAfter := s.serviceAuthRetryAfter(r, "pairing"); retryAfter > 0 {
-			writeServiceAuthRateLimit(w, r, retryAfter)
-			return
-		}
-		limitServiceRequestBody(w, r, servicePairingBodyLimit)
-		var body struct {
-			RequestID int64  `json:"request_id"`
-			Code      string `json:"code"`
-		}
-		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
-			writeServiceRequestDecodeError(w, err)
-			return
-		}
-		pairingScope := fmt.Sprintf("pairing:%d", body.RequestID)
-		if retryAfter := s.serviceAuthRetryAfter(r, pairingScope); retryAfter > 0 {
-			writeServiceAuthRateLimit(w, r, retryAfter)
-			return
-		}
-		device, token, err := appSvc.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
-		if err != nil {
-			s.recordServiceAuthFailure(r, "pairing")
-			s.recordServiceAuthFailure(r, pairingScope)
-			if message, ok := servicePublicPairingExchangeError(err); ok {
-				writeServiceJSON(w, http.StatusBadRequest, serviceErrorPayload(r, message))
-			} else {
-				writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
-			}
-			return
-		}
-		s.clearServiceAuthFailures(r, "pairing")
-		s.clearServiceAuthFailures(r, pairingScope)
-		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": device.DeviceID, "role": device.Role, "token": token})
-		return
-	}
-	if !strings.HasPrefix(path, "requests/") {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing route not found"})
-		return
-	}
-	if !requireServiceRole(w, r, approval.RoleOperator) {
-		return
-	}
-	parts := strings.Split(strings.TrimPrefix(path, "requests/"), "/")
-	if len(parts) != 2 {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing route not found"})
-		return
-	}
-	id, err := parseServiceInt64(parts[0])
-	if err != nil {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid pairing request ID"})
-		return
-	}
-	switch parts[1] {
-	case "approve":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		req, err := appSvc.ApprovePairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor)
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "pairing approval failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"id": req.ID, "status": req.Status})
-	case "deny":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		if err := appSvc.DenyPairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "pairing denial failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "denied"})
-	default:
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing action not found"})
-	}
-}
-
-func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
-	appSvc := s.app()
-	if s.broker == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
-		return
-	}
-	if !requireServiceRole(w, r, approval.RoleOperator) {
-		return
-	}
-	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/devices")
-	if path == "" || path == "/" {
-		if r.Method != http.MethodGet {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		items, err := appSvc.ListDevices(r.Context(), 100)
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadGateway, "device list unavailable", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"items": serviceDeviceResponses(items)})
-		return
-	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device route not found"})
-		return
-	}
-	deviceID := parts[0]
-	switch parts[1] {
-	case "revoke":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		if err := appSvc.RevokeDevice(r.Context(), deviceID, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "device revoke failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": deviceID, "status": "revoked"})
-	case "rotate":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		rotated, token, err := appSvc.RotateDevice(r.Context(), deviceID)
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "device rotation failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": rotated.DeviceID, "token": token})
-	default:
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device action not found"})
-	}
-}
-
-func serviceDeviceResponses(items []db.PairedDeviceRecord) []serviceDeviceResponse {
-	out := make([]serviceDeviceResponse, 0, len(items))
-	for _, item := range items {
-		out = append(out, serviceDeviceResponse{
-			DeviceID:    item.DeviceID,
-			DisplayName: item.DisplayName,
-			Role:        item.Role,
-			Status:      item.Status,
-			CreatedAt:   item.CreatedAt,
-			LastSeenAt:  item.LastSeenAt,
-			RevokedAt:   item.RevokedAt,
-		})
-	}
-	return out
 }
 
 func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {

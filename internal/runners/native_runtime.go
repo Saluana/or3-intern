@@ -2019,5 +2019,5 @@ func asString(value any) string {
 }
 
 func nativeEnv(cfg config.RunnersConfig) []string {
-	return BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
+	return BuildRunnerEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
 }

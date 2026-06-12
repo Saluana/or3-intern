@@ -8,7 +8,7 @@ import (
 	"or3-intern/internal/db"
 )
 
-func openAgentCLITestDB(t *testing.T) *db.DB {
+func openRunnerTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")

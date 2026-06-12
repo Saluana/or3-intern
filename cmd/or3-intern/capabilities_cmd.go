@@ -53,9 +53,6 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 		_, _ = fmt.Fprintf(w, "  - %s enabled=%t inbound=%s", item.Name, item.Enabled, item.InboundPolicy)
 		if item.Profile != nil {
 			_, _ = fmt.Fprintf(w, " profile=%s max=%s", item.Profile.Name, item.Profile.MaxCapability)
-			if len(item.Profile.DeclaredTools) > 0 {
-				_, _ = fmt.Fprintf(w, " declaredTools=%s", strings.Join(item.Profile.DeclaredTools, ","))
-			}
 			if len(item.Profile.AllowedHosts) > 0 {
 				_, _ = fmt.Fprintf(w, " hosts=%s", strings.Join(item.Profile.AllowedHosts, ","))
 			}
@@ -67,9 +64,6 @@ func printCapabilitiesReport(w io.Writer, report controlplane.CapabilitiesReport
 		_, _ = fmt.Fprintf(w, "  - %s enabled=%t", item.Name, item.Enabled)
 		if item.Profile != nil {
 			_, _ = fmt.Fprintf(w, " profile=%s max=%s", item.Profile.Name, item.Profile.MaxCapability)
-			if len(item.Profile.DeclaredTools) > 0 {
-				_, _ = fmt.Fprintf(w, " declaredTools=%s", strings.Join(item.Profile.DeclaredTools, ","))
-			}
 			if len(item.Profile.AllowedHosts) > 0 {
 				_, _ = fmt.Fprintf(w, " hosts=%s", strings.Join(item.Profile.AllowedHosts, ","))
 			}

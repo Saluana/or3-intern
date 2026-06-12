@@ -345,9 +345,9 @@ func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
 	}
 	if s.runnerManager == nil {
 		database := s.runtimeDB()
-		s.runnerManager = buildRuntimeAgentCLIManager(next, database, s.jobs)
-		if err := startRuntimeAgentCLIManager(context.Background(), s.runnerManager); err != nil {
-			log.Printf("agent CLI manager: live start failed: %v", err)
+		s.runnerManager = buildRuntimeRunnerManager(next, database, s.jobs)
+		if err := startRuntimeRunnerManager(context.Background(), s.runnerManager); err != nil {
+			log.Printf("runner manager: live start failed: %v", err)
 			s.runnerManager = nil
 		}
 	} else {
@@ -509,7 +509,7 @@ func serviceProviderStatus(cfg config.Config) map[string]any {
 		})
 	}
 	roleItems := map[string]any{}
-	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleSummarization, config.ModelRoleContextManager, config.ModelRoleEmbeddings} {
+	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleSummarization, config.ModelRoleEmbeddings} {
 		role := cfg.ModelRole(roleName)
 		roleItems[roleName] = map[string]any{
 			"primary":         role.Primary,

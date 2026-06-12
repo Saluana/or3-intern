@@ -10,7 +10,7 @@ import (
 )
 
 func TestChatManagerStartTurnValidatesEmptyUserMessage(t *testing.T) {
-	d := openAgentCLITestDB(t)
+	d := openRunnerTestDB(t)
 	cm := testChatManager(d)
 	ctx := context.Background()
 	sess, err := cm.EnsureSession(ctx, StartTurnRequest{AppSessionKey: "app-session", RunnerID: string(RunnerCodex), ContinuationMode: ContinuationReplay})
@@ -23,7 +23,7 @@ func TestChatManagerStartTurnValidatesEmptyUserMessage(t *testing.T) {
 }
 
 func TestChatManagerEnsureSessionDefaultsNativeForCapableRunners(t *testing.T) {
-	d := openAgentCLITestDB(t)
+	d := openRunnerTestDB(t)
 	cm := testChatManager(d)
 	sess, err := cm.EnsureSession(context.Background(), StartTurnRequest{AppSessionKey: "app-session", RunnerID: string(RunnerCodex)})
 	if err != nil {
@@ -35,7 +35,7 @@ func TestChatManagerEnsureSessionDefaultsNativeForCapableRunners(t *testing.T) {
 }
 
 func TestChatManagerPersistsDistinctNativeRefsPerSession(t *testing.T) {
-	d := openAgentCLITestDB(t)
+	d := openRunnerTestDB(t)
 	cm := testChatManager(d)
 	ctx := context.Background()
 	first, err := d.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{ID: "session-a", AppSessionKey: "app-a", RunnerID: string(RunnerCodex), ContinuationMode: string(ContinuationNative)})
@@ -63,7 +63,7 @@ func TestChatManagerPersistsDistinctNativeRefsPerSession(t *testing.T) {
 }
 
 func TestChatManagerStartTurnAppendMessageFailureMarksTurnFailed(t *testing.T) {
-	d := openAgentCLITestDB(t)
+	d := openRunnerTestDB(t)
 	cm := testChatManager(d)
 	ctx := context.Background()
 	sess, err := cm.EnsureSession(ctx, StartTurnRequest{AppSessionKey: "app-session", RunnerID: string(RunnerCodex), ContinuationMode: ContinuationReplay})
@@ -89,7 +89,7 @@ func TestChatManagerStartTurnAppendMessageFailureMarksTurnFailed(t *testing.T) {
 }
 
 func TestChatManagerReconcileOnStartupPaths(t *testing.T) {
-	d := openAgentCLITestDB(t)
+	d := openRunnerTestDB(t)
 	cm := testChatManager(d)
 	if err := cm.ReconcileOnStartup(context.Background()); err != nil {
 		t.Fatalf("expected zero-row reconcile to succeed, got %v", err)

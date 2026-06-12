@@ -289,7 +289,7 @@ func busEventTriggerKind(ev bus.Event) string {
 
 // ErrRunnerRuntimeUnavailable is returned when the runner runtime is not
 // wired up — the turn orchestrator is missing and the default runner is not
-// configured. In a runner-first architecture there is no agent CLI toggle to
+// configured. In a runner-first architecture there is no runner toggle to
 // flip; the operator must configure a default runner.
 var ErrRunnerRuntimeUnavailable = errors.New("runner runtime unavailable: default runner not configured")
 

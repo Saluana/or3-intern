@@ -739,8 +739,8 @@ tools:
 	if !skill.Eligible {
 		t.Fatalf("expected declared tool list to be supported, got unsupported=%v", skill.Unsupported)
 	}
-	if len(skill.AllowedTools) != 2 || skill.AllowedTools[0] != "read_skill" || skill.AllowedTools[1] != "exec" {
-		t.Fatalf("unexpected declared tools: %#v", skill.AllowedTools)
+	if len(skill.DeclaredTools) != 2 || skill.DeclaredTools[0] != "read_skill" || skill.DeclaredTools[1] != "exec" {
+		t.Fatalf("unexpected declared tools: %#v", skill.DeclaredTools)
 	}
 }
 
@@ -755,8 +755,8 @@ func TestScanWithOptions_MergesManifestOnlyDeclaredTools(t *testing.T) {
 	if !ok {
 		t.Fatal("expected skill")
 	}
-	if len(skill.AllowedTools) != 1 || skill.AllowedTools[0] != "read_skill" {
-		t.Fatalf("expected manifest-only tools to be merged, got %#v", skill.AllowedTools)
+	if len(skill.DeclaredTools) != 1 || skill.DeclaredTools[0] != "read_skill" {
+		t.Fatalf("expected manifest-only tools to be merged, got %#v", skill.DeclaredTools)
 	}
 	if !skill.Eligible {
 		t.Fatalf("expected manifest-only tools skill to remain eligible, got unsupported=%v", skill.Unsupported)

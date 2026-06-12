@@ -7,16 +7,12 @@ import (
 )
 
 func TestFilterConfigureFields_RunnerFirstHidesRunnerToggle(t *testing.T) {
-	// Runner-only mode hides every `runners.*` and `docindex.*` field
-	// from the configure TUI. The enabled toggle is removed entirely;
-	// runners are always on.
 	cfg := config.Default()
 	fields := filterConfigureFields(cfg, []configureField{
 		{Key: "runners_default", Label: "Default runner"},
-		{Key: "docindex_enabled", Label: "Doc index"},
 	})
 	if len(fields) != 0 {
-		t.Fatalf("expected runner-first to hide every runners/docindex field, got %d", len(fields))
+		t.Fatalf("expected runner-first to hide runner host fields, got %d", len(fields))
 	}
 }
 

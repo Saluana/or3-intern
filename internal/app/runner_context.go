@@ -60,9 +60,6 @@ func NewRunnerContextBuilder(cfg config.Config, deps RunnerContextDeps) *RunnerC
 	if deps.TopK <= 0 {
 		deps.TopK = cfg.MemoryRetrieve
 	}
-	if deps.DocLimit <= 0 && cfg.DocIndex.Enabled {
-		deps.DocLimit = cfg.DocIndex.RetrieveLimit
-	}
 	return &RunnerContextBuilder{cfg: cfg, deps: deps}
 }
 

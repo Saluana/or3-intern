@@ -98,7 +98,6 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 				cfg.Security.Profiles.Default = "danger"
 				cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
 					MaxCapability: "privileged",
-					DeclaredTools: []string{"shell_exec", "run_skill_script"},
 					AllowedHosts:  []string{"*.example.com"},
 					WritablePaths: []string{"/tmp"},
 				}
@@ -175,7 +174,7 @@ func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
 	cfg.Triggers.Webhook.Secret = ""
 	cfg.Triggers.Webhook.Addr = "0.0.0.0:8765"
 	cfg.Security.Profiles.Default = "danger"
-	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged", DeclaredTools: []string{"shell_exec"}}
+	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged"}
 	var out bytes.Buffer
 	if err := runDoctorCommand("", cfg, "", nil, strings.NewReader(""), &out, &out); err != nil {
 		t.Fatalf("runDoctorCommand: %v", err)
@@ -384,7 +383,6 @@ func TestDoctorFindings_ProfileHostThreshold(t *testing.T) {
 	}
 	cfg.Security.Profiles.Profiles["safe"] = config.AccessProfileConfig{
 		MaxCapability: "safe",
-		DeclaredTools: []string{"web_fetch"},
 		AllowedHosts:  hosts,
 	}
 	findings := doctorFindings(cfg)
@@ -427,7 +425,6 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
 			MaxCapability: "guarded",
-			DeclaredTools: []string{"shell_exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "webhook", "can reach exec shell mode via profile") {
@@ -444,7 +441,6 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
 			MaxCapability: "guarded",
-			DeclaredTools: []string{"shell_exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
@@ -461,7 +457,6 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "danger"
 		cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
 			MaxCapability: "privileged",
-			DeclaredTools: []string{"shell_exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
@@ -509,7 +504,6 @@ func safeDoctorConfig() config.Config {
 	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
 		"safe": {
 			MaxCapability: "safe",
-			DeclaredTools: []string{"read_files"},
 		},
 	}
 	cfg.Security.Network.Enabled = true

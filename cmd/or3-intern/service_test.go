@@ -276,33 +276,6 @@ func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
 	}
 }
 
-func TestServiceAuthMiddleware_PairingUnauthorizedExplainsTrustedOrigin(t *testing.T) {
-	cfg := config.Default()
-	cfg.Service.Secret = strings.Repeat("p", 32)
-	cfg.Service.AllowUnauthenticatedPairing = true
-	cfg.Service.AllowRemoteUnauthenticatedPairing = true
-	cfg.Service.TrustedPairingOrigins = []string{"http://trusted.example"}
-	handler := serviceAuthMiddlewareWithBrokerAndLimiter(cfg, nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("pairing request should not reach handler")
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/requests", strings.NewReader(`{"role":"operator"}`))
-	req.RemoteAddr = "203.0.113.10:1234"
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d (%s)", rec.Code, rec.Body.String())
-	}
-	payload := mustDecodeJSONBody(t, rec.Body)
-	if payload["code"] != "trusted_pairing_required" {
-		t.Fatalf("expected trusted pairing guidance, got %#v", payload)
-	}
-	origins, _ := payload["trusted_origins"].([]any)
-	if len(origins) != 1 || origins[0] != "http://trusted.example" {
-		t.Fatalf("expected trusted origin list, got %#v", payload)
-	}
-}
-
 func TestValidateServiceAuthorization(t *testing.T) {
 	secret := strings.Repeat("s", 32)
 	now := time.Unix(1_700_000_000, 0)
@@ -597,7 +570,7 @@ func TestServiceBrowserMiddleware_AllowsLoopbackPreflight(t *testing.T) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/pairing/requests", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/secure-connections/pairing/approve", nil)
 	req.RemoteAddr = "127.0.0.1:43210"
 	req.Header.Set("Origin", "http://localhost:3000")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -665,7 +638,7 @@ func TestServiceBrowserMiddleware_AddsLoopbackCORSHeadersToRequests(t *testing.T
 		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/requests", strings.NewReader(`{"role":"operator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/runner-runs", strings.NewReader(`{"runner_id":"opencode"}`))
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Origin", "http://127.0.0.1:3000")
 	rec := httptest.NewRecorder()
@@ -735,7 +708,7 @@ func TestServiceBrowserMiddleware_AllowsPrivateNetworkAuthenticatedOriginWithout
 		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/devices", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/secure-connections/discovery", nil)
 	req.RemoteAddr = "192.168.1.42:54321"
 	req.Header.Set("Origin", "https://app.example.test")
 	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
@@ -782,7 +755,7 @@ func TestAllowsUnauthenticatedPairingRoute_AllowsPrivateNetworkSecurePairing(t *
 	}
 }
 
-func TestServiceAuthMiddleware_AllowsHostCreatedSecurePairingCompletionWithoutLegacyPairingFlag(t *testing.T) {
+func TestServiceAuthMiddleware_AllowsHostCreatedSecurePairingCompletion(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
 		Listen: "127.0.0.1:9100",
 	}}
@@ -801,25 +774,6 @@ func TestServiceAuthMiddleware_AllowsHostCreatedSecurePairingCompletionWithoutLe
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected secure pairing completion to bypass app-token auth, got %d (%s)", rec.Code, rec.Body.String())
-	}
-}
-
-func TestServiceAuthMiddleware_StillRejectsLegacyPairingWithoutPairingFlag(t *testing.T) {
-	cfg := config.Config{Service: config.ServiceConfig{
-		Listen: "127.0.0.1:9100",
-	}}
-	handler := serviceAuthMiddlewareWithBroker(cfg, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("legacy pairing exchange should not reach handler without auth or allowUnauthenticatedPairing")
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/pairing/exchange", strings.NewReader(`{}`))
-	req.RemoteAddr = "127.0.0.1:54321"
-	rec := httptest.NewRecorder()
-
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected legacy pairing exchange to remain unauthorized, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -903,28 +857,6 @@ func TestServiceBrowserMiddleware_AllowsOpaqueElectronOriginFromLoopback(t *test
 	}
 }
 
-func TestServiceBrowserMiddleware_DoesNotAllowOpaquePairingPreflight(t *testing.T) {
-	cfg := config.Config{Service: config.ServiceConfig{
-		Listen:                      "127.0.0.1:9100",
-		AllowUnauthenticatedPairing: true,
-	}}
-	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
-	}))
-
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/pairing/requests", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	req.Header.Set("Origin", "null")
-	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
-	rec := httptest.NewRecorder()
-
-	handler.ServeHTTP(rec, req)
-
-	if rec.Header().Get("Access-Control-Allow-Origin") == "null" {
-		t.Fatal("opaque origins should not receive CORS access to unauthenticated pairing")
-	}
-}
-
 func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequests(t *testing.T) {
 	cfg := config.Config{Service: config.ServiceConfig{
 		Listen:                "100.64.0.42:9100",
@@ -951,32 +883,6 @@ func TestServiceBrowserMiddleware_AddsTrustedTailscaleCORSHeadersToRemoteAppRequ
 	}
 }
 
-func TestServiceBrowserMiddleware_TrustedPairingOriginsRemainBrowserCORSFallback(t *testing.T) {
-	cfg := config.Config{Service: config.ServiceConfig{
-		Listen:                "100.64.0.42:9100",
-		TrustedPairingOrigins: []string{"http://100.64.0.42:3060"},
-		TrustedPairingCIDRs:   []string{"100.64.0.0/10"},
-	}}
-	handler := serviceBrowserMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeServiceJSON(w, http.StatusAccepted, map[string]any{"ok": true})
-	}))
-
-	req := httptest.NewRequest(http.MethodOptions, "/internal/v1/runner-runs", nil)
-	req.RemoteAddr = "100.64.0.42:54321"
-	req.Header.Set("Origin", "http://100.64.0.42:3060")
-	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
-	rec := httptest.NewRecorder()
-
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected legacy trusted pairing origin to allow browser preflight, got %d (%s)", rec.Code, rec.Body.String())
-	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://100.64.0.42:3060" {
-		t.Fatalf("expected trusted pairing allow-origin fallback, got %q", got)
-	}
-}
-
 func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/runner-runs", nil)
 	req = req.WithContext(context.WithValue(req.Context(), serviceRequestContextKey{}, serviceRequestContext{RequestID: "req-redact"}))
@@ -993,23 +899,6 @@ func TestWriteServiceErrorRedactsInternalError(t *testing.T) {
 	}
 	if strings.Contains(body, "database password") || strings.Contains(body, "stack trace") {
 		t.Fatalf("expected internal error to be redacted, got %s", body)
-	}
-}
-
-func TestServicePublicPairingExchangeError_OnlyExposesPairingState(t *testing.T) {
-	for _, message := range []string{
-		"pairing request not found",
-		"pairing request expired",
-		"pairing request is not approved",
-	} {
-		got, ok := servicePublicPairingExchangeError(fmt.Errorf("%s", message))
-		if !ok || got != message {
-			t.Fatalf("expected public pairing error %q, got %q ok=%v", message, got, ok)
-		}
-	}
-
-	if got, ok := servicePublicPairingExchangeError(fmt.Errorf("database password leaked")); ok || got != "" {
-		t.Fatalf("expected internal pairing exchange error to be redacted, got %q ok=%v", got, ok)
 	}
 }
 
@@ -1480,7 +1369,7 @@ func TestServiceCron_RunnerRunPayloadCRUDAndRun(t *testing.T) {
 	var captured cron.CronJob
 	cronSvc := cron.New(cfg.Cron.StorePath, func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
 		captured = job
-		return cron.RunResult{EnqueuedJobID: "job-agentcli-test", EnqueuedRunID: "acr_test"}, nil
+		return cron.RunResult{EnqueuedJobID: "job-runner-test", EnqueuedRunID: "rr_test"}, nil
 	})
 	if err := cronSvc.Start(); err != nil {
 		t.Fatalf("cron start: %v", err)
@@ -1536,10 +1425,10 @@ func TestServiceCron_RunnerRunPayloadCRUDAndRun(t *testing.T) {
 	got := mustDecodeJSONBody(t, getRec.Body)
 	gotJob := got["job"].(map[string]any)
 	state := gotJob["state"].(map[string]any)
-	if state["last_enqueued_job_id"] != "job-agentcli-test" {
+	if state["last_enqueued_job_id"] != "job-runner-test" {
 		t.Fatalf("expected enqueued job id in state, got %#v", state)
 	}
-	if state["last_enqueued_run_id"] != "acr_test" {
+	if state["last_enqueued_run_id"] != "rr_test" {
 		t.Fatalf("expected enqueued run id in state, got %#v", state)
 	}
 }
@@ -2060,241 +1949,6 @@ func readLatestAuditEvent(t *testing.T, database *db.DB) db.AuditEvent {
 	return event
 }
 
-func TestServicePairingWorkflow_AllowsUnauthenticatedBootstrapAndPairedOperatorRoutes(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Pairing.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	server.config.Service.AllowUnauthenticatedPairing = true
-	server.config.Service.Listen = "127.0.0.1:0"
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("p", 32), server)
-	defer httpServer.Close()
-
-	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","display_name":"Ops Laptop"}`)
-	createResp, err := httpServer.Client().Do(createReq)
-	if err != nil {
-		t.Fatalf("Do create pairing: %v", err)
-	}
-	defer createResp.Body.Close()
-	if createResp.StatusCode != http.StatusAccepted {
-		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
-	}
-	created := mustDecodeJSONBody(t, createResp.Body)
-	requestID := int64(created["id"].(float64))
-	code := created["code"].(string)
-
-	approveReq := mustServiceRequest(t, httpServer, strings.Repeat("p", 32), http.MethodPost, fmt.Sprintf("/internal/v1/pairing/requests/%d/approve", requestID), "")
-	approveResp, err := httpServer.Client().Do(approveReq)
-	if err != nil {
-		t.Fatalf("Do approve pairing: %v", err)
-	}
-	defer approveResp.Body.Close()
-	if approveResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected approve pairing 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
-	}
-
-	exchangeReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/exchange", fmt.Sprintf(`{"request_id":%d,"code":%q}`, requestID, code))
-	exchangeResp, err := httpServer.Client().Do(exchangeReq)
-	if err != nil {
-		t.Fatalf("Do exchange pairing: %v", err)
-	}
-	defer exchangeResp.Body.Close()
-	if exchangeResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected exchange pairing 200, got %d (%s)", exchangeResp.StatusCode, mustReadBody(t, exchangeResp.Body))
-	}
-	exchanged := mustDecodeJSONBody(t, exchangeResp.Body)
-	token := exchanged["token"].(string)
-	if token == "" {
-		t.Fatal("expected paired device token")
-	}
-
-	deviceReq := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/devices", "")
-	deviceReq.Header.Set("Authorization", "Bearer "+token)
-	deviceResp, err := httpServer.Client().Do(deviceReq)
-	if err != nil {
-		t.Fatalf("Do list devices: %v", err)
-	}
-	defer deviceResp.Body.Close()
-	if deviceResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected paired operator device access 200, got %d (%s)", deviceResp.StatusCode, mustReadBody(t, deviceResp.Body))
-	}
-	listed := mustDecodeJSONBody(t, deviceResp.Body)
-	items, ok := listed["items"].([]any)
-	if !ok || len(items) != 1 {
-		t.Fatalf("expected one listed device, got %#v", listed["items"])
-	}
-	item, ok := items[0].(map[string]any)
-	if !ok {
-		t.Fatalf("expected listed device object, got %#v", items[0])
-	}
-	if item["device_id"] == "" || item["DeviceID"] != nil {
-		t.Fatalf("expected snake_case device payload, got %#v", item)
-	}
-}
-
-func TestServicePairingWorkflow_RejectsNonOperatorDeviceOnOperatorRoutes(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Pairing.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	server.config.Service.AllowUnauthenticatedPairing = true
-	server.config.Service.Listen = "127.0.0.1:0"
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("r", 32), server)
-	defer httpServer.Close()
-
-	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"service-client","display_name":"Worker"}`)
-	createResp, err := httpServer.Client().Do(createReq)
-	if err != nil {
-		t.Fatalf("Do create pairing: %v", err)
-	}
-	defer createResp.Body.Close()
-	created := mustDecodeJSONBody(t, createResp.Body)
-	requestID := int64(created["id"].(float64))
-	code := created["code"].(string)
-
-	approveReq := mustServiceRequest(t, httpServer, strings.Repeat("r", 32), http.MethodPost, fmt.Sprintf("/internal/v1/pairing/requests/%d/approve", requestID), "")
-	approveResp, err := httpServer.Client().Do(approveReq)
-	if err != nil {
-		t.Fatalf("Do approve pairing: %v", err)
-	}
-	defer approveResp.Body.Close()
-	if approveResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected approve pairing 200, got %d (%s)", approveResp.StatusCode, mustReadBody(t, approveResp.Body))
-	}
-
-	exchangeReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/exchange", fmt.Sprintf(`{"request_id":%d,"code":%q}`, requestID, code))
-	exchangeResp, err := httpServer.Client().Do(exchangeReq)
-	if err != nil {
-		t.Fatalf("Do exchange pairing: %v", err)
-	}
-	defer exchangeResp.Body.Close()
-	exchanged := mustDecodeJSONBody(t, exchangeResp.Body)
-	token := exchanged["token"].(string)
-
-	deviceReq := mustJSONRequest(t, http.MethodGet, httpServer.URL+"/internal/v1/devices", "")
-	deviceReq.Header.Set("Authorization", "Bearer "+token)
-	deviceResp, err := httpServer.Client().Do(deviceReq)
-	if err != nil {
-		t.Fatalf("Do list devices: %v", err)
-	}
-	defer deviceResp.Body.Close()
-	if deviceResp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected non-operator device to be forbidden, got %d (%s)", deviceResp.StatusCode, mustReadBody(t, deviceResp.Body))
-	}
-}
-
-func TestServicePairing_AllowlistMode_AnonymousCannotReissueExistingDeviceToken(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Pairing.Mode = config.ApprovalModeAllowlist
-	})
-	defer cleanup()
-
-	if _, _, err := broker.RotateDeviceToken(context.Background(), "device-1", approval.RoleOperator, "Ops Laptop", nil); err != nil {
-		t.Fatalf("RotateDeviceToken seed: %v", err)
-	}
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("l", 32), server)
-	defer httpServer.Close()
-
-	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","device_id":"device-1","display_name":"Ops Laptop"}`)
-	createResp, err := httpServer.Client().Do(createReq)
-	if err != nil {
-		t.Fatalf("Do create pairing: %v", err)
-	}
-	defer createResp.Body.Close()
-	if createResp.StatusCode != http.StatusAccepted {
-		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
-	}
-	created := mustDecodeJSONBody(t, createResp.Body)
-	requestID := int64(created["id"].(float64))
-	record, err := broker.DB.GetPairingRequest(context.Background(), requestID)
-	if err != nil {
-		t.Fatalf("GetPairingRequest: %v", err)
-	}
-	if record.Status != approval.StatusPending {
-		t.Fatalf("expected anonymous allowlist pairing to remain pending, got %#v", record)
-	}
-
-	exchangeReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/exchange", fmt.Sprintf(`{"request_id":%d,"code":%q}`, requestID, created["code"].(string)))
-	exchangeResp, err := httpServer.Client().Do(exchangeReq)
-	if err != nil {
-		t.Fatalf("Do exchange pairing: %v", err)
-	}
-	defer exchangeResp.Body.Close()
-	if exchangeResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected pending exchange to fail, got %d (%s)", exchangeResp.StatusCode, mustReadBody(t, exchangeResp.Body))
-	}
-}
-
-func TestServicePairing_TrustedMode_AnonymousRequestStaysPending(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Pairing.Mode = config.ApprovalModeTrusted
-	})
-	defer cleanup()
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
-	defer httpServer.Close()
-
-	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","display_name":"Ops Laptop"}`)
-	createResp, err := httpServer.Client().Do(createReq)
-	if err != nil {
-		t.Fatalf("Do create pairing: %v", err)
-	}
-	defer createResp.Body.Close()
-	if createResp.StatusCode != http.StatusAccepted {
-		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
-	}
-	created := mustDecodeJSONBody(t, createResp.Body)
-	requestID := int64(created["id"].(float64))
-	record, err := broker.DB.GetPairingRequest(context.Background(), requestID)
-	if err != nil {
-		t.Fatalf("GetPairingRequest: %v", err)
-	}
-	if record.Status != approval.StatusPending {
-		t.Fatalf("expected anonymous trusted pairing to remain pending, got %#v", record)
-	}
-}
-
-func TestServicePairing_UnauthenticatedRoutesStampAnonymousAuditKind(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Pairing.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-	broker.Audit = &security.AuditLogger{DB: broker.DB, Key: []byte(strings.Repeat("z", 32))}
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	httpServer := newServiceTestHTTPServer(t, strings.Repeat("z", 32), server)
-	defer httpServer.Close()
-
-	createReq := mustJSONRequest(t, http.MethodPost, httpServer.URL+"/internal/v1/pairing/requests", `{"role":"operator","display_name":"Ops Laptop"}`)
-	createResp, err := httpServer.Client().Do(createReq)
-	if err != nil {
-		t.Fatalf("Do create pairing: %v", err)
-	}
-	defer createResp.Body.Close()
-	if createResp.StatusCode != http.StatusAccepted {
-		t.Fatalf("expected create pairing 202, got %d (%s)", createResp.StatusCode, mustReadBody(t, createResp.Body))
-	}
-
-	event := readLatestAuditEvent(t, broker.DB)
-	if event.Actor != "anonymous" {
-		t.Fatalf("expected anonymous audit actor, got %#v", event)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-		t.Fatalf("Unmarshal payload: %v", err)
-	}
-	if payload["auth_kind"] != "unauthenticated" {
-		t.Fatalf("expected unauthenticated auth_kind, got %#v", payload)
-	}
-}
-
 func TestServiceApprovals_PairedOperatorCanApprovePendingRequest(t *testing.T) {
 	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.Exec.Mode = config.ApprovalModeAsk
@@ -2385,9 +2039,6 @@ func TestServiceApprovals_Approve_ReturnsSuccessWithoutResumeJob(t *testing.T) {
 	payload := mustDecodeJSONBody(t, approveResp.Body)
 	if payload["request_id"] == nil {
 		t.Fatalf("expected request_id in response, got %#v", payload)
-	}
-	if _, hasResume := payload["resume_job_id"]; hasResume {
-		t.Fatalf("expected no resume_job_id in response, got %#v", payload)
 	}
 	if payload["session_key"] != "sess-approval-no-resume" {
 		t.Fatalf("expected session_key, got %#v", payload)
@@ -2523,46 +2174,6 @@ func TestServiceApprovals_Deny_RejectsMalformedJSON(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected malformed deny 400, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
-	}
-}
-
-func TestServiceDevices_Rotate_RevokedDeviceFails(t *testing.T) {
-	broker, cleanup := buildServiceTestBroker(t, func(cfg *config.ApprovalConfig) {
-		cfg.Pairing.Mode = config.ApprovalModeAsk
-	})
-	defer cleanup()
-
-	req, code, err := broker.CreatePairingRequest(context.Background(), approval.PairingRequestInput{
-		Role:        approval.RoleOperator,
-		DisplayName: "Ops Laptop",
-	})
-	if err != nil {
-		t.Fatalf("CreatePairingRequest: %v", err)
-	}
-	if _, err := broker.ApprovePairingRequest(context.Background(), req.ID, "cli"); err != nil {
-		t.Fatalf("ApprovePairingRequest: %v", err)
-	}
-	device, _, err := broker.ExchangePairingCode(context.Background(), approval.PairingExchangeInput{RequestID: req.ID, Code: code})
-	if err != nil {
-		t.Fatalf("ExchangePairingCode: %v", err)
-	}
-	if err := broker.RevokeDevice(context.Background(), device.DeviceID, "cli"); err != nil {
-		t.Fatalf("RevokeDevice: %v", err)
-	}
-
-	server := &serviceServer{broker: broker, jobs: jobs.NewRegistry(time.Minute, 32)}
-	secret := strings.Repeat("d", 32)
-	httpServer := newServiceTestHTTPServer(t, secret, server)
-	defer httpServer.Close()
-
-	rotateReq := mustServiceRequest(t, httpServer, secret, http.MethodPost, fmt.Sprintf("/internal/v1/devices/%s/rotate", device.DeviceID), "")
-	rotateResp, err := httpServer.Client().Do(rotateReq)
-	if err != nil {
-		t.Fatalf("Do rotate device: %v", err)
-	}
-	defer rotateResp.Body.Close()
-	if rotateResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected revoked rotate 400, got %d (%s)", rotateResp.StatusCode, mustReadBody(t, rotateResp.Body))
 	}
 }
 

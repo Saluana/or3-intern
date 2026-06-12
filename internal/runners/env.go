@@ -8,11 +8,11 @@ import (
 	"or3-intern/internal/tools"
 )
 
-// BuildAgentCLIEnv builds a sanitized child process environment for external CLI runs.
+// BuildRunnerEnv builds a sanitized child process environment for external runner runs.
 // It uses the existing tools.BuildChildEnv allowlist pattern while adding NO_COLOR=1
 // and TERM=dumb. OR3 internal secrets are stripped automatically by not being in the
 // allowlist.
-func BuildAgentCLIEnv(base []string, allowlist []string, additionalEnv map[string]string) []string {
+func BuildRunnerEnv(base []string, allowlist []string, additionalEnv map[string]string) []string {
 	overlay := map[string]string{
 		"NO_COLOR": "1",
 		"TERM":     "dumb",
@@ -31,7 +31,7 @@ func BuildAgentCLIEnv(base []string, allowlist []string, additionalEnv map[strin
 	}
 	pathAppend := ""
 	if envAllowlistIncludes(allowlist, "PATH") {
-		pathAppend = defaultAgentCLIPathAppend()
+		pathAppend = defaultRunnerPathAppend()
 	}
 	env := tools.BuildChildEnv(base, allowlist, overlay, pathAppend)
 
@@ -60,9 +60,9 @@ func BuildAgentCLIEnv(base []string, allowlist []string, additionalEnv map[strin
 }
 
 // SecretStrippedEnv returns the system environment with OR3 internals removed,
-// suitable as base input for BuildAgentCLIEnv.
+// suitable as base input for BuildRunnerEnv.
 func SecretStrippedEnv() []string {
-	return BuildAgentCLIEnv(os.Environ(), nil, nil)
+	return BuildRunnerEnv(os.Environ(), nil, nil)
 }
 
 func envAllowlistIncludes(allowlist []string, key string) bool {
@@ -74,7 +74,7 @@ func envAllowlistIncludes(allowlist []string, key string) bool {
 	return false
 }
 
-func defaultAgentCLIPathAppend() string {
+func defaultRunnerPathAppend() string {
 	var dirs []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		dirs = append(dirs,

@@ -141,7 +141,7 @@ func TestServiceFindingsRequireEffectiveProfileForExposedIngress(t *testing.T) {
 	cfg.Security.Profiles.Enabled = true
 	cfg.Security.Profiles.Default = "service-safe"
 	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
-		"service-safe": {MaxCapability: "safe", DeclaredTools: []string{"search"}},
+		"service-safe": {MaxCapability: "safe"},
 	}
 	report = Evaluate(cfg, Options{Mode: ModeStartupService})
 	if doctorReportHasFinding(report, "service.effective_profile_missing") {

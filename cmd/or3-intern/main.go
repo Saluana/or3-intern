@@ -33,7 +33,6 @@ import (
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/runners"
-	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/skills"
@@ -97,14 +96,6 @@ func newProviderClient(cfg config.Config) *providers.Client {
 
 func newConsolidationProviderClient(cfg config.Config) *providers.Client {
 	return newRoleProviderClientWithTimeout(cfg, config.ModelRoleSummarization, effectiveConsolidationTimeout(cfg))
-}
-
-func newContextManagerProviderClient(cfg config.Config) *providers.Client {
-	timeout := time.Duration(cfg.ContextManager.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
-	return newRoleProviderClientWithTimeout(cfg, config.ModelRoleContextManager, timeout)
 }
 
 func newEmbeddingProviderClient(cfg config.Config) *providers.Client {
@@ -446,44 +437,7 @@ func main() {
 	ret.EmbedFingerprint = currentEmbedFingerprint(cfg)
 	ret.VectorScanLimit = cfg.VectorScanLimit
 
-	var docIndexer *memory.DocIndexer
 	var docRetriever *memory.DocRetriever
-	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) > 0 {
-		docIndexer = &memory.DocIndexer{
-			DB: d,
-			Config: memory.DocIndexConfig{
-				Roots:          cfg.DocIndex.Roots,
-				MaxFiles:       cfg.DocIndex.MaxFiles,
-				MaxFileBytes:   cfg.DocIndex.MaxFileBytes,
-				MaxChunks:      cfg.DocIndex.MaxChunks,
-				EmbedMaxBytes:  cfg.DocIndex.EmbedMaxBytes,
-				RefreshSeconds: cfg.DocIndex.RefreshSeconds,
-				RetrieveLimit:  cfg.DocIndex.RetrieveLimit,
-			},
-		}
-		docRetriever = &memory.DocRetriever{DB: d}
-		// Initial sync in background (don't block startup)
-		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
-				log.Printf("doc index sync failed: %v", err)
-			}
-		}()
-	}
-	if docIndexer != nil && cfg.DocIndex.RefreshSeconds > 0 {
-		go func() {
-			ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
-					log.Printf("doc index refresh failed: %v", err)
-				}
-				cancel()
-			}
-		}()
-	}
 
 	serviceHost := serviceHostDeps{
 		DB:            d,
@@ -495,10 +449,10 @@ func main() {
 	}
 	serviceJobs := buildServiceJobRegistry(cmd)
 
-	runnerManager = buildRuntimeAgentCLIManager(cfg, d, serviceJobs)
+	runnerManager = buildRuntimeRunnerManager(cfg, d, serviceJobs)
 	if runnerManager != nil {
-		if err := startRuntimeAgentCLIManager(ctx, runnerManager); err != nil {
-			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
+		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
+			fmt.Fprintln(os.Stderr, "runner manager error:", err)
 			os.Exit(1)
 		}
 	}
@@ -523,13 +477,13 @@ func main() {
 	switch cmd {
 	case "chat":
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: runnerManager, Channels: channelManager, CLI: del})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager, CLI: del})
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: runnerManager, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -554,7 +508,7 @@ func main() {
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
 	case "service":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, AgentCLIManager: runnerManager, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -645,29 +599,6 @@ func main() {
 			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 				fmt.Fprintln(os.Stderr, "approvals error:", err)
 			}
-			os.Exit(1)
-		}
-	case "devices":
-		if err := runDevicesCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "devices error:", err)
-			os.Exit(1)
-		}
-	case "pairing":
-		if err := runPairingCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "pairing error:", err)
-			os.Exit(1)
-		}
-	case "connect-device":
-		if err := runConnectDeviceCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			if translated := translateAndPrintError(err, os.Stderr); translated == nil {
-				os.Exit(1)
-			}
-			fmt.Fprintln(os.Stderr, "connect-device error:", err)
-			os.Exit(1)
-		}
-	case "pair":
-		if err := runPairCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "pair error:", err)
 			os.Exit(1)
 		}
 	default:

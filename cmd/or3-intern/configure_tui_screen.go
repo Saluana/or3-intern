@@ -67,8 +67,6 @@ func configureFormScreenForSection(section string) configureScreenAdapter {
 		return configureSafetyScreen{}
 	case "service":
 		return configureServiceScreen{}
-	case "docindex":
-		return configureDocIndexScreen{}
 	default:
 		return configureFormScreen{}
 	}

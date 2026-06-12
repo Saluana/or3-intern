@@ -155,7 +155,7 @@ type SkillMeta struct {
 
 	Metadata         SkillRuntimeMeta
 	Permissions      SkillPermissions
-	AllowedTools     []string
+	DeclaredTools    []string
 	PermissionState  string
 	PermissionNotes  []string
 	Publisher        string
@@ -407,7 +407,7 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	}
 	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
 	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
-	meta.AllowedTools = declaredTools
+	meta.DeclaredTools = declaredTools
 
 	manifest, err := loadManifest(dir)
 	if err != nil {
@@ -415,7 +415,7 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 		meta.Hidden = true
 	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
 		meta.Entrypoints = manifest.Entrypoints
-		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
+		meta.DeclaredTools = mergeStringLists(meta.DeclaredTools, compactStrings(manifest.Tools))
 		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
 			meta.Permissions = requested
 		}
@@ -895,7 +895,7 @@ func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts 
 			unsupported = append(unsupported, "requires exec tool for local binary: "+strings.Join(meta.Metadata.Requires.Bins, ", "))
 		}
 	}
-	for _, toolName := range meta.AllowedTools {
+	for _, toolName := range meta.DeclaredTools {
 		if len(opts.AvailableTools) == 0 {
 			continue
 		}

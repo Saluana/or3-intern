@@ -24,7 +24,7 @@ func buildServiceJobRegistry(cmd string) *jobs.Registry {
 	return jobs.NewRegistry(0, 0)
 }
 
-func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *jobs.Registry) *runners.Manager {
+func buildRuntimeRunnerManager(cfg config.Config, database *db.DB, jobs *jobs.Registry) *runners.Manager {
 	return &runners.Manager{
 		DB:                          database,
 		Jobs:                        jobs,
@@ -39,7 +39,7 @@ func buildRuntimeAgentCLIManager(cfg config.Config, database *db.DB, jobs *jobs.
 	}
 }
 
-func startRuntimeAgentCLIManager(ctx context.Context, manager *runners.Manager) error {
+func startRuntimeRunnerManager(ctx context.Context, manager *runners.Manager) error {
 	if manager == nil {
 		return nil
 	}
@@ -72,7 +72,7 @@ func buildRunnerTurnOrchestrator(cfg config.Config, chatManager *runners.ChatMan
 		VectorK:          cfg.VectorK,
 		FTSK:             cfg.FTSK,
 		TopK:             cfg.MemoryRetrieve,
-		DocLimit:         cfg.DocIndex.RetrieveLimit,
+		DocLimit:         0,
 		Cache:            runners.NewRunnerContextCache(0),
 	}
 	return app.NewRunnerTurnOrchestrator(cfg, chatManager, app.LoadRunnerBootstrapContext(cfg), deps)

@@ -1,12 +1,11 @@
 # Migration notes
 
-These notes cover the current core-simplification compatibility boundary for app clients, operators, and deploy scripts.
+These notes cover current app clients, operators, and deploy scripts.
 
 ## Service request payloads
 
-- `/internal/v1` remains backward compatible: snake_case request and response keys are canonical, and existing camelCase aliases are still accepted.
-- If a request sends both snake_case and camelCase fields with different values, the snake_case value wins. The response includes `X-Or3-Request-Warning` so clients can log or surface the conflict without breaking the request.
-- App-facing identifiers such as `session_key`, `parent_session_key`, `child_session_key`, `job_id`, `approval_id`, `timeout_seconds`, and `tool_policy` remain unchanged.
+- `/internal/v1` request and response keys are snake_case.
+- App-facing identifiers include `session_key`, `parent_session_key`, `child_session_key`, `job_id`, `approval_id`, and `timeout_seconds`.
 
 ## Environment and compose deployments
 

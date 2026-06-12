@@ -28,11 +28,11 @@ func clearConfigEnvForTest(t *testing.T) {
 }
 
 func TestParseConfigureArgs(t *testing.T) {
-	parsed, err := parseConfigureArgs([]string{"--section", "provider", "--section", "docindex", "--section", "provider"})
+	parsed, err := parseConfigureArgs([]string{"--section", "provider", "--section", "runtime", "--section", "provider"})
 	if err != nil {
 		t.Fatalf("parseConfigureArgs: %v", err)
 	}
-	if len(parsed.Sections) != 2 || parsed.Sections[0] != "provider" || parsed.Sections[1] != "docindex" {
+	if len(parsed.Sections) != 2 || parsed.Sections[0] != "provider" || parsed.Sections[1] != "runtime" {
 		t.Fatalf("unexpected sections: %#v", parsed.Sections)
 	}
 	if _, err := parseConfigureArgs([]string{"--section", "nope"}); err == nil {
@@ -79,9 +79,7 @@ func TestRunConfigureWithIO_TargetedSections(t *testing.T) {
 	}, "\n"))
 	var out strings.Builder
 
-	// In runner-first mode, the `tools` section is gone. Targeting just
-	// `provider` and `docindex` should still complete.
-	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "docindex"}); err != nil {
+	if err := runConfigureWithIO(input, &out, configPath, "/workspace/project", []string{"--section", "provider", "--section", "runtime"}); err != nil {
 		t.Fatalf("runConfigureWithIO: %v", err)
 	}
 
@@ -349,34 +347,4 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 		}
 	}
 
-	// Runner-first contract: legacy agent / docindex / service-max-capability
-	// fields must NOT appear in any section.
-	hidden := []string{
-		"tools_exec_timeout", "tools_path_append", "tools_exec_allowed_programs",
-		"tools_brave",
-		"provider_model", "provider_vision",
-		"routing_chat_provider", "routing_chat_model", "routing_chat_fallbacks",
-		"routing_agents_provider", "routing_agents_model", "routing_agents_fallbacks",
-		"routing_context_provider", "routing_context_model", "routing_context_fallbacks",
-		"context_max_input_tokens", "context_dynamic_tools", "context_manager_enabled",
-		"hardening_guarded_tools", "hardening_privileged_tools",
-		"hardening_enable_exec_shell", "hardening_exec_allowed_programs",
-		"security_approval_exec_mode", "security_approval_skill_mode",
-		"service_max_capability",
-		"docindex_enabled", "docindex_max_files", "docindex_max_chunks",
-		"docindex_refresh_seconds", "docindex_retrieve_limit",
-		"runners_enabled", "runners_default", "runners_max_concurrent",
-		"runners_max_queued", "runners_allow_sandbox_auto", "runners_disabled_runners",
-	}
-	for _, section := range []string{
-		"provider", "tools", "skills", "security", "hardening", "service", "automation", "context", "workspace", "docindex", "runners",
-	} {
-		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
-			for _, h := range hidden {
-				if field.Key == h {
-					t.Fatalf("field %q should be hidden in runner-first mode but appeared in %s section", h, section)
-				}
-			}
-		}
-	}
 }

@@ -1,6 +1,4 @@
 # cron
 Use the `cron` tool to add/list/remove/run/status scheduled jobs.
 
-For normal OR3 turns, create jobs with `payload.kind="agent_cli_run"` and a `payload.agent_run` runner/task payload.
-
-For external agent CLI jobs, create jobs with `payload.kind="agent_cli_run"` and `payload.agent_run` containing `runner_id` and `task`. Scheduled external agent runs default to `mode="review"` and `isolation="host_readonly"` when those fields are omitted.
+Create scheduled runner jobs with `payload.kind="runner_run"` and `payload.runner_run` containing `runner_id` and `task`. Scheduled runner jobs default to `mode="review"` and `isolation="host_readonly"` when those fields are omitted.

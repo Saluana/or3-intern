@@ -14,7 +14,7 @@ const DefaultEventChunkMaxBytes = 16384
 // DefaultPreviewMaxBytes is the maximum retained preview for stdout/stderr.
 const DefaultPreviewMaxBytes = 65536
 
-// ProcessManager launches external CLI processes and streams output events.
+// ProcessManager launches external runner processes and streams output events.
 type ProcessManager struct {
 	ChunkMaxBytes   int
 	PreviewMaxBytes int

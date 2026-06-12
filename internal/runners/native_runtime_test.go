@@ -639,7 +639,7 @@ func TestCodexAuthRefreshFailureMessageIsActionable(t *testing.T) {
 }
 
 func TestManagerDoesNotFallbackToCLIForCodexAuthRefreshFailure(t *testing.T) {
-	database := openAgentCLITestDB(t)
+	database := openRunnerTestDB(t)
 	t.Cleanup(func() { _ = database.Close() })
 	runtime := &fakeRuntime{
 		id:  RunnerCodex,
@@ -681,7 +681,7 @@ func TestManagerDoesNotFallbackToCLIForCodexAuthRefreshFailure(t *testing.T) {
 }
 
 func TestManagerDoesNotFallbackToCLIForCodexNativeAppServerFailure(t *testing.T) {
-	database := openAgentCLITestDB(t)
+	database := openRunnerTestDB(t)
 	t.Cleanup(func() { _ = database.Close() })
 	runtime := &fakeRuntime{
 		id:  RunnerCodex,

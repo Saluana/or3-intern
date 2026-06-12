@@ -20,7 +20,7 @@ import (
 )
 
 // ChatManager owns runner-backed chat turn lifecycle on top of the existing
-// agent CLI Manager. It builds replay prompts, persists chat session/turn/
+// runner Manager. It builds replay prompts, persists chat session/turn/
 // event rows, and mirrors normalized user/assistant messages into the shared
 // `messages` table.
 type ChatManager struct {
@@ -121,7 +121,7 @@ func (cm *ChatManager) defaultContinuationMode(runnerID string) ContinuationMode
 
 // StartTurn creates a new runner_chat_turn for `sessionID`, builds the replay
 // prompt, persists the user message into `messages`, enqueues the underlying
-// agent CLI run, and wires event mirroring + finalization into the
+// runner run, and wires event mirroring + finalization into the
 // runner_chat_events / runner_chat_turns / messages tables.
 //
 // Native continuation mode is used for runners that advertise resumable native
@@ -237,7 +237,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		maxTurns = sess.MaxTurns
 	}
 
-	// Enqueue the underlying agent CLI run.
+	// Enqueue the underlying runner run.
 	agentMeta := make(map[string]any, len(req.Meta)+6)
 	for key, value := range req.Meta {
 		agentMeta[key] = value

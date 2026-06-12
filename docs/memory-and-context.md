@@ -41,20 +41,9 @@ Three markdown files are especially important:
 
 `HEARTBEAT.md` is reread for each autonomous turn so edits apply without restarting `serve`.
 
-## Document index
+## Runner Context
 
-The optional document index lets the runtime retrieve relevant excerpts from local files and inject them into the prompt.
-
-Supported configuration keys include:
-
-- `docIndex.enabled`
-- `docIndex.roots`
-- `docIndex.maxFiles`
-- `docIndex.maxFileBytes`
-- `docIndex.maxChunks`
-- `docIndex.embedMaxBytes`
-- `docIndex.refreshSeconds`
-- `docIndex.retrieveLimit`
+Runner prompt assembly uses bounded memory snippets and explicit trusted context sections.
 
 Supported file types in the README include:
 

@@ -671,7 +671,7 @@ func (s *Service) canRemovePasskey(ctx context.Context, userID, removingCredenti
 			}
 		}
 	}
-	return strings.TrimSpace(s.cfg.Service.Secret) != "" || s.cfg.Auth.AllowPairedTokenFallback
+	return strings.TrimSpace(s.cfg.Service.Secret) != ""
 }
 
 func (s *Service) mustCredentials(records []db.PasskeyCredentialRecord) []libwebauthn.Credential {

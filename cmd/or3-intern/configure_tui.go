@@ -991,8 +991,6 @@ func sectionStatus(cfg config.Config, section string) string {
 		return fmt.Sprintf("mode=%s · maxInput=%d", cfg.Context.Mode, cfg.Context.MaxInputTokens)
 	case "workspace":
 		return fmt.Sprintf("%s", emptyAsNone(cfg.WorkspaceDir))
-	case "docindex":
-		return fmt.Sprintf("enabled=%t · roots=%d · retrieve=%d", cfg.DocIndex.Enabled, len(cfg.DocIndex.Roots), cfg.DocIndex.RetrieveLimit)
 	case "skills":
 		return fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault)
 	case "auth":
@@ -1062,9 +1060,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "routing_summarization_provider", Label: "Summarization provider", Description: "Provider used for memory consolidation and summaries.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Summarization.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Summarization.Primary.Provider)},
 			{Key: "routing_summarization_model", Label: "Summarization model", Description: "Model used for memory consolidation and summaries.", Kind: configureFieldText, Value: cfg.ModelRouting.Summarization.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
 			{Key: "routing_summarization_fallbacks", Label: "Summarization fallbacks", Description: "Comma-separated provider/model entries tried after transient summarization failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Summarization.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
-			{Key: "routing_context_provider", Label: "Context manager provider", Description: "Provider used for context-manager maintenance proposals.", Kind: configureFieldChoice, Value: cfg.ModelRouting.ContextManager.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.ContextManager.Primary.Provider)},
-			{Key: "routing_context_model", Label: "Context manager model", Description: "Model used for context-manager maintenance proposals.", Kind: configureFieldText, Value: cfg.ModelRouting.ContextManager.Primary.Model, EmptyHint: cfg.ModelRouting.Summarization.Primary.Model},
-			{Key: "routing_context_fallbacks", Label: "Context manager fallbacks", Description: "Comma-separated provider/model entries tried after transient context-manager failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.ContextManager.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_embeddings_provider", Label: "Embeddings provider", Description: "Provider used for memory and document embeddings.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Embeddings.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Embeddings.Primary.Provider)},
 			{Key: "routing_embeddings_model", Label: "Embeddings model", Description: "Model used for memory and document embeddings.", Kind: configureFieldText, Value: cfg.ModelRouting.Embeddings.Primary.Model, EmptyHint: "text-embedding-3-small"},
 			{Key: "routing_embeddings_fallbacks", Label: "Embeddings fallbacks", Description: "Comma-separated provider/model entries tried after transient embedding failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Embeddings.Fallbacks), EmptyHint: "openai/text-embedding-3-small"},
@@ -1137,15 +1132,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
 			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
 			{Key: "context_artifact_summary_chars", Label: "Artifact summary chars", Description: "Bounded artifact/tool-output summary size stored for retrieval.", Kind: configureFieldText, Value: formatInt(cfg.Context.Artifacts.SummaryMaxChars), EmptyHint: "500"},
-			{Key: "context_manager_enabled", Label: "Context manager", Description: "Enable optional low-cost maintenance-model proposals.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.Enabled)},
-			{Key: "context_manager_provider", Label: "Context manager provider", Description: "Optional provider override for context-manager proposals. Blank uses the main provider.", Kind: configureFieldText, Value: cfg.ContextManager.Provider, EmptyHint: cfg.Provider.APIBase},
-			{Key: "context_manager_model", Label: "Context manager model", Description: "Optional model for context-manager proposals. Blank uses deterministic pruning only.", Kind: configureFieldText, Value: cfg.ContextManager.Model, EmptyHint: "gpt-4.1-mini"},
-			{Key: "context_manager_timeout", Label: "Context manager timeout", Description: "Timeout for optional context-manager calls, in seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.TimeoutSeconds), EmptyHint: "15"},
-			{Key: "context_manager_idle_prune", Label: "Idle prune seconds", Description: "Inactivity period before automatic context pruning runs. Default is 300 seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.IdlePruneSeconds), EmptyHint: "300"},
-			{Key: "context_manager_max_input", Label: "Context manager max input", Description: "Input-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxInputTokens), EmptyHint: "1200"},
-			{Key: "context_manager_max_output", Label: "Context manager max output", Description: "Output-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxOutputTokens), EmptyHint: "600"},
-			{Key: "context_manager_allow_task_updates", Label: "Allow task updates", Description: "Allow context-manager proposals to update active task metadata.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowTaskUpdates)},
-			{Key: "context_manager_allow_stale_propose", Label: "Allow stale proposals", Description: "Allow proposals even when the manager works from slightly stale state.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowStalePropose)},
 		}
 	case "workspace":
 		workspace := cfg.WorkspaceDir
@@ -1155,17 +1141,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "workspace_dir", Label: "Workspace directory", Description: "Project root for workspace-restricted file tools.", Kind: configureFieldText, Value: workspace, EmptyHint: cwd},
 			{Key: "workspace_allowed_dir", Label: "Allowed directory", Description: "Optional additional allowed root used by some flows and integrations.", Kind: configureFieldText, Value: cfg.AllowedDir, EmptyHint: cwd},
-		}
-	case "docindex":
-		return []configureField{
-			{Key: "docindex_enabled", Label: "Enable doc index", Description: "Index workspace files for retrieval-augmented prompts.", Kind: configureFieldToggle, Value: onOff(cfg.DocIndex.Enabled)},
-			{Key: "docindex_roots", Label: "Roots", Description: "Comma-separated directories to index.", Kind: configureFieldText, Value: strings.Join(cfg.DocIndex.Roots, ","), EmptyHint: "docs,src"},
-			{Key: "docindex_max_files", Label: "Max files", Description: "Maximum files indexed in one scope.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.MaxFiles), EmptyHint: "100"},
-			{Key: "docindex_max_file_bytes", Label: "Max file bytes", Description: "Largest file size to index.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.MaxFileBytes), EmptyHint: "65536"},
-			{Key: "docindex_max_chunks", Label: "Max chunks", Description: "Upper bound on indexed chunks.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.MaxChunks), EmptyHint: "500"},
-			{Key: "docindex_embed_max_bytes", Label: "Embed max bytes", Description: "Max content bytes embedded per indexed file.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.EmbedMaxBytes), EmptyHint: "8192"},
-			{Key: "docindex_refresh_seconds", Label: "Refresh seconds", Description: "Periodic refresh cadence for indexed roots.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.RefreshSeconds), EmptyHint: "300"},
-			{Key: "docindex_retrieve_limit", Label: "Retrieve limit", Description: "How many indexed doc hits are injected into prompts.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.RetrieveLimit), EmptyHint: "5"},
 		}
 	case "skills":
 		return []configureField{
@@ -1188,7 +1163,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 	case "auth":
 		modeChoices := []string{"off", "warn", "enforce-sensitive", "enforce-session"}
-		fallbackChoices := []string{"paired-token-only", "paired-token-plus-warning", "admin-recovery-only"}
+		fallbackChoices := []string{"admin-recovery-only"}
 		return []configureField{
 			{Key: "auth_enabled", Label: "Enable auth", Description: "Enable passkey/session auth support for the service API.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.Enabled)},
 			{Key: "auth_rp_id", Label: "RP ID", Description: "WebAuthn relying-party ID.", Kind: configureFieldText, Value: cfg.Auth.RPID, EmptyHint: "or3.chat"},
@@ -1198,9 +1173,8 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "auth_session_idle_ttl", Label: "Session idle TTL seconds", Description: "Idle expiration for auth sessions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.SessionIdleTTLSeconds), EmptyHint: "1800"},
 			{Key: "auth_session_absolute_ttl", Label: "Session absolute TTL seconds", Description: "Absolute expiration for auth sessions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.SessionAbsoluteTTLSeconds), EmptyHint: "43200"},
 			{Key: "auth_step_up_ttl", Label: "Step-up TTL seconds", Description: "Recent-auth window for sensitive actions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.StepUpTTLSeconds), EmptyHint: "300"},
-			{Key: "auth_fallback_policy", Label: "Fallback policy", Description: "Compatibility policy for pairing-only clients.", Kind: configureFieldChoice, Value: cfg.Auth.FallbackPolicy, Choices: fallbackChoices, ChoiceIndex: indexOfChoice(fallbackChoices, cfg.Auth.FallbackPolicy)},
+			{Key: "auth_fallback_policy", Label: "Fallback policy", Description: "Recovery policy for unauthenticated admin setup.", Kind: configureFieldChoice, Value: cfg.Auth.FallbackPolicy, Choices: fallbackChoices, ChoiceIndex: indexOfChoice(fallbackChoices, cfg.Auth.FallbackPolicy)},
 			{Key: "auth_enforcement_mode", Label: "Enforcement mode", Description: "Auth rollout enforcement level.", Kind: configureFieldChoice, Value: string(cfg.Auth.EnforcementMode), Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, string(cfg.Auth.EnforcementMode))},
-			{Key: "auth_allow_paired_token_fallback", Label: "Allow paired-token fallback", Description: "Permit paired-device token compatibility when policy allows it.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.AllowPairedTokenFallback)},
 			{Key: "auth_require_passkey_for_sensitive", Label: "Require passkey for sensitive routes", Description: "Require recent passkey verification for high-risk routes.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.RequirePasskeyForSensitive)},
 		}
 	case "security":
@@ -1292,13 +1266,13 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		disabledRunners := strings.Join(cfg.Runners.Disabled, ",")
 		return []configureField{
 			{Key: "runners_default", Label: "Default runner", Description: "Runner used for new chat sessions and automation when none is selected.", Kind: configureFieldChoice, Value: defaultRunner, Choices: runnerChoices, ChoiceIndex: indexOfChoice(runnerChoices, defaultRunner)},
-			{Key: "runners_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxConcurrent), EmptyHint: "1"},
-			{Key: "runners_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxQueued), EmptyHint: "16"},
-			{Key: "runners_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.Runners.DefaultTimeoutSeconds), EmptyHint: "900"},
+			{Key: "runners_max_concurrent", Label: "Max concurrent external runs", Description: "How many external runner agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxConcurrent), EmptyHint: "1"},
+			{Key: "runners_max_queued", Label: "Max queued external runs", Description: "How many external runner jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxQueued), EmptyHint: "16"},
+			{Key: "runners_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external runner run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.Runners.DefaultTimeoutSeconds), EmptyHint: "900"},
 			{Key: "runners_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxTimeoutSeconds), EmptyHint: "7200"},
 			{Key: "runners_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.Runners.AllowSandboxAuto)},
-			{Key: "runners_default_mode", Label: "Default run mode", Description: "Default permission mode for external CLI runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.Runners.DefaultMode)},
-			{Key: "runners_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external CLI runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.Runners.DefaultIsolation)},
+			{Key: "runners_default_mode", Label: "Default run mode", Description: "Default permission mode for external runner runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.Runners.DefaultMode)},
+			{Key: "runners_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external runner runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.Runners.DefaultIsolation)},
 			{Key: "runners_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
 		}
 	}
@@ -1390,9 +1364,6 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"routing_summarization_provider":        "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
 	"routing_summarization_model":           "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
 	"routing_summarization_fallbacks":       "Comma-separated provider/model fallbacks tried after transient summarization failures. Leave blank to use only the primary.",
-	"routing_context_provider":              "Provider used for context-manager cleanup proposals. This can be a small reliable model because outputs are guarded before use.",
-	"routing_context_model":                 "Model used for context-manager cleanup proposals. Leave near the summarization model unless context cleanup needs different behavior.",
-	"routing_context_fallbacks":             "Comma-separated provider/model fallbacks tried after transient context-manager failures. Leave blank to use only the primary.",
 	"routing_embeddings_provider":           "Provider used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
 	"routing_embeddings_model":              "Model used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
 	"routing_embeddings_fallbacks":          "Comma-separated provider/model fallbacks tried after transient embedding failures. Warning: fallback embeddings should produce compatible vectors.",
@@ -1446,25 +1417,8 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
 	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
 	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
-	"context_manager_enabled":               "The context manager is an optional helper that suggests what to keep, trim, or update in OR3's working context. Leave off unless you want experimental automatic context maintenance.",
-	"context_manager_provider":              "Optional AI provider URL for the context manager helper. Leave blank to use the main provider. Warning: a wrong URL can break context-manager calls.",
-	"context_manager_model":                 "Optional model for the context manager helper. It should be cheap and reliable because it only helps organize context, not answer the user.",
-	"context_manager_timeout":               "How long OR3 waits for the context manager helper. Shorter timeouts avoid delays; longer timeouts give slow providers more time.",
-	"context_manager_idle_prune":            "How many idle seconds OR3 waits before archiving recent chat into memory and clearing the live context window. Default: 300 seconds.",
-	"context_manager_max_input":             "Maximum input size sent to the context manager helper. This is not the main chat budget; it is only for the helper that reviews context.",
-	"context_manager_max_output":            "Maximum output size allowed from the context manager helper. Keep this small so helper suggestions do not become noisy.",
-	"context_manager_allow_task_updates":    "Allows the context manager helper to suggest updates to the active task card. Warning: bad suggestions can make the task summary less accurate.",
-	"context_manager_allow_stale_propose":   "Allows context-manager suggestions even if they may be based on slightly older state. Leave on for responsiveness; turn off if you prefer stricter freshness.",
 	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
 	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
-	"docindex_enabled":                      "Indexes selected workspace files so OR3 can find relevant project docs. This improves answers but uses storage and embedding calls.",
-	"docindex_roots":                        "Folders, relative to the workspace, that OR3 should index. Warning: avoid private or huge folders unless you want them searchable by OR3.",
-	"docindex_max_files":                    "Maximum files indexed per root. Lower values are faster; higher values cover more of a large project.",
-	"docindex_max_file_bytes":               "Largest file OR3 will index. Lower values skip big generated files; higher values may slow indexing.",
-	"docindex_max_chunks":                   "Maximum text chunks stored from indexed files. Higher values improve coverage but use more storage and embeddings.",
-	"docindex_embed_max_bytes":              "Maximum text from one file sent for embeddings. Higher values improve search for large files but cost more.",
-	"docindex_refresh_seconds":              "How often OR3 refreshes the document index while running. Lower values update faster but do more background work.",
-	"docindex_retrieve_limit":               "How many document snippets OR3 may add to a prompt. Higher values give more project context but can crowd out conversation.",
 	"skills_enable_exec":                    "Allows installed skills to run commands when policy permits. Warning: only enable this for skills you trust.",
 	"skills_max_run_seconds":                "Maximum time a skill command may run. Lower values stop stuck skills sooner; higher values help long-running skills finish.",
 	"skills_managed_dir":                    "Folder where OR3 stores installed or managed skills. Changing it can make installed skills seem missing unless you move them too.",
@@ -1489,9 +1443,8 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"auth_session_idle_ttl":                 "How long an auth session may sit idle before OR3 requires another passkey login.",
 	"auth_session_absolute_ttl":             "Maximum lifetime of an auth session even if the app stays active.",
 	"auth_step_up_ttl":                      "How long recent verification stays valid for sensitive actions such as terminal, files, and settings changes.",
-	"auth_fallback_policy":                  "Controls what older pairing-only clients may do while auth is enabled.",
+	"auth_fallback_policy":                  "Controls admin recovery behavior when auth is enabled.",
 	"auth_enforcement_mode":                 "Controls rollout behavior: off, warn, enforce-sensitive, or enforce-session.",
-	"auth_allow_paired_token_fallback":      "Allows paired-device tokens to keep working for compatibility when policy permits.",
 	"auth_require_passkey_for_sensitive":    "Marks high-risk routes as requiring recent passkey verification when auth is active.",
 	"security_secret_store_enabled":         "Stores sensitive secrets encrypted in the local database instead of only in config files. Recommended when using service mode or channels.",
 	"security_secret_store_required":        "Refuses to start if encrypted secret storage is unavailable. Safer, but warning: misconfigured keys can block startup.",

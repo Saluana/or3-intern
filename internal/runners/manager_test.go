@@ -40,7 +40,7 @@ func (a *stubRunnerAdapter) BuildCommand(RunnerRunRequest) (CommandSpec, error) 
 
 func newTestManager(t *testing.T) (*Manager, *db.DB, *jobs.Registry) {
 	t.Helper()
-	database := openAgentCLITestDB(t)
+	database := openRunnerTestDB(t)
 	jobs := jobs.NewRegistry(0, 0)
 	manager := &Manager{
 		DB:       database,
@@ -112,7 +112,7 @@ func TestManagerStartStopAndReconcile(t *testing.T) {
 		t.Fatalf("expected db error, got %v", err)
 	}
 
-	database := openAgentCLITestDB(t)
+	database := openRunnerTestDB(t)
 	jobs := jobs.NewRegistry(0, 0)
 	run := mustInsertRunnerRun(t, database, db.RunnerRun{
 		ID:             "acr-reconcile",
@@ -122,7 +122,7 @@ func TestManagerStartStopAndReconcile(t *testing.T) {
 		StartedAt:      db.NowMS(),
 		TimeoutSeconds: 30,
 	})
-	jobs.RegisterWithID(run.JobID, "agent_cli:opencode")
+	jobs.RegisterWithID(run.JobID, "runner:opencode")
 
 	manager := &Manager{
 		DB:   database,
@@ -188,7 +188,7 @@ func TestManagerRecoverRunPanicFinalizesRun(t *testing.T) {
 }
 
 func TestManagerStopTimeout(t *testing.T) {
-	manager := &Manager{DB: openAgentCLITestDB(t), started: true, cancel: func() {}}
+	manager := &Manager{DB: openRunnerTestDB(t), started: true, cancel: func() {}}
 	unblock := make(chan struct{})
 	manager.wg.Add(1)
 	go func() {
@@ -323,7 +323,7 @@ func TestManagerEnqueueQueueFullAndAbortLifecycle(t *testing.T) {
 	}
 
 	cancelled := make(chan struct{}, 1)
-	jobs.RegisterWithID("job-running-cancel", "agent_cli:test")
+	jobs.RegisterWithID("job-running-cancel", "runner:test")
 	jobs.AttachCancel("job-running-cancel", func() { cancelled <- struct{}{} })
 	if err := manager.Abort(ctx, "job-running-cancel"); err != nil {
 		t.Fatalf("Abort running: %v", err)
@@ -350,7 +350,7 @@ func TestManagerEnqueueQueueFullAndAbortLifecycle(t *testing.T) {
 }
 
 func TestManagerExecuteRunBuildFailureFinalizesRun(t *testing.T) {
-	database := openAgentCLITestDB(t)
+	database := openRunnerTestDB(t)
 	jobs := jobs.NewRegistry(0, 0)
 	run := mustInsertRunnerRun(t, database, db.RunnerRun{
 		ID:        "acr-build-failure",
@@ -359,7 +359,7 @@ func TestManagerExecuteRunBuildFailureFinalizesRun(t *testing.T) {
 		Status:    db.RunnerRunStatusRunning,
 		StartedAt: db.NowMS(),
 	})
-	jobs.RegisterWithID(run.JobID, "agent_cli:opencode")
+	jobs.RegisterWithID(run.JobID, "runner:opencode")
 	manager := &Manager{
 		DB:          database,
 		Jobs:        jobs,
@@ -387,7 +387,7 @@ func TestManagerExecuteRunHonorsDeadlineAndCancellation(t *testing.T) {
 		{name: "cancelled", timeout: 10, cancelFunc: func(cancel context.CancelFunc) { time.AfterFunc(100*time.Millisecond, cancel) }, wantStatus: db.RunnerRunStatusAborted, wantErr: "aborted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			database := openAgentCLITestDB(t)
+			database := openRunnerTestDB(t)
 			jobs := jobs.NewRegistry(0, 0)
 			binary := writeFakeBinary(t, t.TempDir(), "sleepy-runner", `sleep 2`)
 			adapter := &stubRunnerAdapter{
@@ -405,7 +405,7 @@ func TestManagerExecuteRunHonorsDeadlineAndCancellation(t *testing.T) {
 				TimeoutSeconds: tc.timeout,
 				Cwd:            filepath.Dir(binary),
 			})
-			jobs.RegisterWithID(run.JobID, "agent_cli:sleepy")
+			jobs.RegisterWithID(run.JobID, "runner:sleepy")
 			runCtx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.cancelFunc != nil {

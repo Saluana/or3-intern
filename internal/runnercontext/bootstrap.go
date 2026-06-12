@@ -34,7 +34,7 @@ Work rules:
 // DefaultRunnerNotes documents runner-native behavior and OR3 platform memory hooks.
 // It does not describe removed built-in OR3 model-callable tools.
 const DefaultRunnerNotes = `# Runner Notes
-You run on an external agent CLI (OpenCode, Codex, Claude Code, Gemini CLI, etc.). Use that runner's native file, shell, web, and skill tools.
+You run on an external runner (OpenCode, Codex, Claude Code, Gemini CLI, etc.). Use that runner's native file, shell, web, and skill tools.
 
 OR3 platform context (injected automatically when relevant):
 - Pinned memory, memory digest, and retrieved memory blocks may appear in the prompt.

@@ -529,7 +529,7 @@ func (o *serviceObserver) emptyFinalTextFallback() (string, bool) {
 	}
 }
 
-func (s *serviceServer) handleAgentRunners(w http.ResponseWriter, r *http.Request) {
+func (s *serviceServer) handleRunnerRunners(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
@@ -537,7 +537,7 @@ func (s *serviceServer) handleAgentRunners(w http.ResponseWriter, r *http.Reques
 	appSvc := s.app()
 	detected, err := appSvc.DetectRunnerRunners(r.Context())
 	if err != nil {
-		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runner detection unavailable", err)
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner detection unavailable", err)
 		return
 	}
 	writeServiceValue(w, http.StatusOK, map[string]any{"runners": detected})
@@ -607,7 +607,6 @@ func (s *serviceServer) handleRunnerRunsStart(w http.ResponseWriter, r *http.Req
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	writeServiceRequestWarnings(w, req.Warnings)
 	runReq := runners.RunnerRunRequest{
 		ParentSessionKey: req.ParentSessionKey,
 		RunnerID:         req.RunnerID,

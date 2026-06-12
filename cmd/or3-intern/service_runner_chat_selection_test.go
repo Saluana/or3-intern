@@ -293,26 +293,26 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 		t.Fatalf("expected OpenCode native session capability to remain enabled, got %#v", openCodeCaps)
 	}
 
-	agentReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/agent-runners", "")
-	agentResp, err := fixture.httpServer.Client().Do(agentReq)
+	runnerReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/runner-runners", "")
+	runnerResp, err := fixture.httpServer.Client().Do(runnerReq)
 	if err != nil {
-		t.Fatalf("Do agent-runners: %v", err)
+		t.Fatalf("Do runner-runners: %v", err)
 	}
-	if agentResp.StatusCode != http.StatusOK {
-		defer agentResp.Body.Close()
-		t.Fatalf("expected 200, got %d (%s)", agentResp.StatusCode, mustReadBody(t, agentResp.Body))
+	if runnerResp.StatusCode != http.StatusOK {
+		defer runnerResp.Body.Close()
+		t.Fatalf("expected 200, got %d (%s)", runnerResp.StatusCode, mustReadBody(t, runnerResp.Body))
 	}
-	agentPayload := decodeServiceResponseMap(t, agentResp)
-	rawOpenCode := findRunnerByID(t, agentPayload, string(runners.RunnerOpenCode))
+	runnerPayload := decodeServiceResponseMap(t, runnerResp)
+	rawOpenCode := findRunnerByID(t, runnerPayload, string(runners.RunnerOpenCode))
 	if rawOpenCode["status"] != string(runners.RunnerStatusAuthMissing) {
-		t.Fatalf("expected raw agent-runners status passthrough, got %#v", rawOpenCode)
+		t.Fatalf("expected raw runner-runners status passthrough, got %#v", rawOpenCode)
 	}
 	if _, ok := rawOpenCode["chat_capabilities"]; ok {
-		t.Fatalf("expected raw agent-runners contract without chat_capabilities, got %#v", rawOpenCode)
+		t.Fatalf("expected raw runner-runners contract without chat_capabilities, got %#v", rawOpenCode)
 	}
 }
 
-func TestServiceChatRunners_HidesExternalWhenAgentCLIDisabled(t *testing.T) {
+func TestServiceChatRunners_HidesExternalWhenRunnerDisabled(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
 
@@ -352,8 +352,8 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 			t.Fatalf("expected 503, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
 		}
 		payload := mustDecodeJSONBody(t, resp.Body)
-		if payload["code"] != "agent_cli_disabled" {
-			t.Fatalf("expected agent_cli_disabled, got %#v", payload)
+		if payload["code"] != "runner_disabled" {
+			t.Fatalf("expected runner_disabled, got %#v", payload)
 		}
 	})
 
@@ -674,7 +674,7 @@ func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 		t.Fatalf("expected replayed event list from seq 2, got %#v", events)
 	}
 	if items[0].(map[string]any)["job_id"] != "job-stream" {
-		t.Fatalf("expected agent_cli linkage in event payload, got %#v", events)
+		t.Fatalf("expected runner linkage in event payload, got %#v", events)
 	}
 
 	read := mustServiceDoJSON(t, fixture, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s", sess.ID), "")

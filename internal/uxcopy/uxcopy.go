@@ -96,9 +96,7 @@ func TranslateError(err error) UserError {
 	case strings.Contains(lower, "runtime unavailable"):
 		return UserError{Title: "The assistant engine did not start", WhatHappened: "OR3 could not start its runtime safely.", Fix: "Check your provider settings and local runtime setup.", Command: "or3-intern status", Advanced: raw}
 	case strings.Contains(lower, "service auth missing") || strings.Contains(lower, "service secret"):
-		return UserError{Title: "Connections are not protected yet", WhatHappened: "A device or service connection needs a shared secret before it can be used safely.", Fix: "Create a connection password.", Command: "or3-intern connect-device", Advanced: raw}
-	case strings.Contains(lower, "unknown tool in tool_policy"):
-		return UserError{Title: "A saved tool rule is out of date", WhatHappened: "One of your saved settings refers to a tool that no longer exists.", Fix: "Review and update the saved tool settings.", Command: "or3-intern settings", Advanced: raw}
+		return UserError{Title: "Connections are not protected yet", WhatHappened: "A device or service connection needs a shared secret before it can be used safely.", Fix: "Create a connection password.", Command: "or3-intern settings --section channels", Advanced: raw}
 	case strings.Contains(lower, "audit logger unavailable"):
 		return UserError{Title: "Safety log is not ready", WhatHappened: "OR3 is trying to use the safety log, but the logger could not start.", Fix: "Repair the safety log settings or generate its key.", Command: "or3-intern status", Advanced: raw}
 	case strings.Contains(lower, "config error") || strings.Contains(lower, "validation"):

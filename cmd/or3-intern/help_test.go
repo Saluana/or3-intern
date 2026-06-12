@@ -79,17 +79,14 @@ func TestPrintHelpTopic_Root(t *testing.T) {
 	if !strings.Contains(got, "config-path") {
 		t.Fatalf("expected complete root help to include advanced commands, got %q", got)
 	}
-	if !strings.Contains(got, "connect-device") {
-		t.Fatalf("expected connect-device command in root help, got %q", got)
-	}
-	if !strings.Contains(got, "doctor") || !strings.Contains(got, "pairing") {
+	if !strings.Contains(got, "doctor") || !strings.Contains(got, "approvals") {
 		t.Fatalf("expected complete root help to include operator tools, got %q", got)
 	}
 }
 
 func TestHelpTopicPath_IgnoresFlagsAfterCommandPath(t *testing.T) {
-	path := helpTopicPath([]string{"pairing", "request", "--channel", "slack", "-h"})
-	if len(path) != 2 || path[0] != "pairing" || path[1] != "request" {
+	path := helpTopicPath([]string{"approvals", "allowlist", "--domain", "exec", "-h"})
+	if len(path) != 2 || path[0] != "approvals" || path[1] != "allowlist" {
 		t.Fatalf("unexpected help topic path: %#v", path)
 	}
 }
@@ -139,53 +136,6 @@ func TestPrintHelpTopic_SettingsIsCanonicalConfigEntrypoint(t *testing.T) {
 	}
 	if !strings.Contains(got, "Setup, init, configure, and doctor --fix stay available") {
 		t.Fatalf("expected alias guidance in settings help, got %q", got)
-	}
-}
-
-func TestPrintHelpTopic_DeviceCommandsUsePairingLanguage(t *testing.T) {
-	var connectOut bytes.Buffer
-	if err := printHelpTopic(&connectOut, []string{"connect-device"}); err != nil {
-		t.Fatalf("printHelpTopic connect-device: %v", err)
-	}
-	if !strings.Contains(connectOut.String(), "Start the device pairing flow") {
-		t.Fatalf("expected connect-device to describe pairing flow, got %q", connectOut.String())
-	}
-
-	var devicesOut bytes.Buffer
-	if err := printHelpTopic(&devicesOut, []string{"devices"}); err != nil {
-		t.Fatalf("printHelpTopic devices: %v", err)
-	}
-	got := devicesOut.String()
-	if !strings.Contains(got, "List and manage already paired devices") || !strings.Contains(got, "or3-intern pairing approve-code <code>") {
-		t.Fatalf("expected devices help to separate management from pairing, got %q", got)
-	}
-}
-
-func TestPrintHelpTopic_PairingExplainsBrowserApprovalFlow(t *testing.T) {
-	var out bytes.Buffer
-	if err := printHelpTopic(&out, []string{"pairing"}); err != nil {
-		t.Fatalf("printHelpTopic pairing: %v", err)
-	}
-	got := out.String()
-	if !strings.Contains(got, "tap 'Get pairing code'") {
-		t.Fatalf("expected step-by-step browser pairing guidance, got %q", got)
-	}
-	if !strings.Contains(got, "or3-intern pairing approve-code 123456") {
-		t.Fatalf("expected approve-code guidance, got %q", got)
-	}
-	if !strings.Contains(got, "should finish connecting by itself") {
-		t.Fatalf("expected auto-finish explanation in help, got %q", got)
-	}
-}
-
-func TestPrintHelpTopic_ApprovalsPointsDeviceUsersToPairing(t *testing.T) {
-	var out bytes.Buffer
-	if err := printHelpTopic(&out, []string{"approvals"}); err != nil {
-		t.Fatalf("printHelpTopic approvals: %v", err)
-	}
-	got := out.String()
-	if !strings.Contains(got, "use `or3-intern pairing`") {
-		t.Fatalf("expected approvals help to redirect device pairing users, got %q", got)
 	}
 }
 

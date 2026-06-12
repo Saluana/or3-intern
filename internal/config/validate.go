@@ -26,10 +26,9 @@ func validateProviderRouting(cfg Config) error {
 		}
 	}
 	roles := map[string]ModelRoleConfig{
-		"chat":           cfg.ModelRouting.Chat,
-		"summarization":  cfg.ModelRouting.Summarization,
-		"contextManager": cfg.ModelRouting.ContextManager,
-		"embeddings":     cfg.ModelRouting.Embeddings,
+		"chat":          cfg.ModelRouting.Chat,
+		"summarization": cfg.ModelRouting.Summarization,
+		"embeddings":    cfg.ModelRouting.Embeddings,
 	}
 	for roleName, role := range roles {
 		if err := validateModelRef(cfg, roleName, "primary", role.Primary); err != nil {
@@ -258,10 +257,6 @@ func normalizeAuthEnforcementMode(mode AuthEnforcementMode) AuthEnforcementMode 
 
 func normalizeAuthFallbackPolicy(policy string) string {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
-	case AuthFallbackPairedTokenOnly:
-		return AuthFallbackPairedTokenOnly
-	case AuthFallbackPairedTokenPlusWarn:
-		return AuthFallbackPairedTokenPlusWarn
 	case AuthFallbackAdminRecoveryOnly:
 		return AuthFallbackAdminRecoveryOnly
 	default:
@@ -283,7 +278,7 @@ func validateAuthConfig(cfg AuthConfig) error {
 		return errors.New("auth.stepUpTtlSeconds must be greater than zero")
 	}
 	if normalizeAuthFallbackPolicy(cfg.FallbackPolicy) == "" {
-		return errors.New("auth.fallbackPolicy must be paired-token-only, paired-token-plus-warning, or admin-recovery-only")
+		return errors.New("auth.fallbackPolicy must be admin-recovery-only")
 	}
 	if normalizeAuthEnforcementMode(cfg.EnforcementMode) == "" {
 		return errors.New("auth.enforcementMode must be off, warn, enforce-sensitive, or enforce-session")

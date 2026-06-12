@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"strings"
 
 	"or3-intern/internal/config"
-	"or3-intern/internal/db"
 	"or3-intern/internal/safetymode"
 	"or3-intern/internal/uxcopy"
 	"or3-intern/internal/uxstate"
@@ -135,16 +133,14 @@ func runSettingsSection(reader *bufio.Reader, out io.Writer, cfgPath, cwd string
 		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "tools")
 	case "memory":
 		if interactive {
-			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "docindex"}, settingsConfigureOptions("Memory"))
+			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "runtime"}, settingsConfigureOptions("Memory"))
 		}
-		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "docindex")
+		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "runtime")
 	case "context":
 		if interactive {
 			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "context"}, settingsConfigureOptions("Context"))
 		}
 		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "context")
-	case "devices":
-		return runSettingsDevices(reader, out, cfgPath, &cfg, interactive)
 	case "safety":
 		if interactive {
 			return runSettingsSafetyWithTUI(cfgPath, cfg)
@@ -177,68 +173,6 @@ func runSettingsSection(reader *bufio.Reader, out io.Writer, cfgPath, cwd string
 		return runConfigureWithIO(reader, out, cfgPath, cwd, nil)
 	default:
 		return fmt.Errorf("unknown settings section %q", section)
-	}
-}
-
-func runSettingsDevices(reader *bufio.Reader, out io.Writer, cfgPath string, cfg *config.Config, interactive bool) error {
-	fmt.Fprintln(out, "Connected Devices")
-	if strings.TrimSpace(cfg.DBPath) == "" {
-		return fmt.Errorf("device storage is not available")
-	}
-	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
-		return err
-	}
-	database, err := db.Open(cfg.DBPath)
-	if err != nil {
-		return err
-	}
-	defer database.Close()
-	ctx := context.Background()
-	if !interactive {
-		return runConnectDeviceList(ctx, database, out)
-	}
-	choice, err := promptMenuChoice(reader, out, "Choose an action", []string{
-		"1) Review connected devices",
-		"2) Pair a new device",
-		"3) Change device access",
-		"4) Disconnect a device",
-	}, "1")
-	if err != nil {
-		return err
-	}
-	switch choice {
-	case "2":
-		broker, err := ensureConnectDevicePrereqs(cfgPath, cfg, database, nil)
-		if err != nil {
-			return err
-		}
-		return runConnectDeviceCommand(ctx, cfgPath, cfg, database, broker, nil, out, out)
-	case "3":
-		deviceID, err := promptString(reader, out, "Device ID", "")
-		if err != nil {
-			return err
-		}
-		broker, err := ensureConnectDevicePrereqs(cfgPath, cfg, database, nil)
-		if err != nil {
-			return err
-		}
-		return runConnectDeviceRole(ctx, database, broker, deviceID, reader, out)
-	case "4":
-		deviceID, err := promptString(reader, out, "Device ID", "")
-		if err != nil {
-			return err
-		}
-		broker, err := ensureConnectDevicePrereqs(cfgPath, cfg, database, nil)
-		if err != nil {
-			return err
-		}
-		if err := broker.RevokeDevice(ctx, strings.TrimSpace(deviceID), "cli"); err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "Disconnected %s\n", strings.TrimSpace(deviceID))
-		return nil
-	default:
-		return runConnectDeviceList(ctx, database, out)
 	}
 }
 

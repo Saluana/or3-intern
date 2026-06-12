@@ -19,7 +19,6 @@ func ApplyEnvOverrides(cfg *Config) {
 		cfg.Provider.APIBase = v
 		cfg.ModelRouting.Chat.Primary.Provider = providerKey
 		cfg.ModelRouting.Summarization.Primary.Provider = providerKey
-		cfg.ModelRouting.ContextManager.Primary.Provider = providerKey
 		cfg.ModelRouting.Embeddings.Primary.Provider = providerKey
 		updateProviderProfile(cfg, providerKey, func(profile *ProviderProfileConfig) { profile.APIBase = v })
 	}
@@ -101,7 +100,6 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_AUTH_ENFORCEMENT_MODE"); v != "" {
 		cfg.Auth.EnforcementMode = AuthEnforcementMode(v)
 	}
-	applyEnvBool("OR3_AUTH_ALLOW_PAIRED_TOKEN_FALLBACK", &cfg.Auth.AllowPairedTokenFallback)
 	applyEnvBool("OR3_AUTH_REQUIRE_PASSKEY_FOR_SENSITIVE", &cfg.Auth.RequirePasskeyForSensitive)
 	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
 		cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(v)))

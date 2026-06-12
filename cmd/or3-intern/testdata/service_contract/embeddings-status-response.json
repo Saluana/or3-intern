@@ -2,8 +2,6 @@
   "status": "ok",
   "memoryVectorDims": 0,
   "currentEmbedFingerprint": "http://provider.example|text-embedding-3-small",
-  "docIndexEnabled": false,
-  "docRootsConfigured": false,
   "noteCount": 0,
   "embeddedNoteCount": 0,
   "vectorRowCount": 0,

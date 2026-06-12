@@ -24,9 +24,8 @@ var configureSections = []struct {
 	{Key: "provider", Label: "Providers", Description: "Provider profiles, model routing, favorites, fallbacks, embeddings, and secrets"},
 	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
 	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, and consolidation"},
-	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, dynamic tools, task card, and context manager"},
+	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, retrieval, and task card"},
 	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
-	{Key: "docindex", Label: "Doc Index", Description: "Workspace indexing and retrieval controls"},
 	{Key: "skills", Label: "Skills", Description: "Managed skills, trust policy, watch settings, and ClawHub"},
 	{Key: "auth", Label: "Auth", Description: "Passkeys, WebAuthn origins, sessions, step-up, and fallback policy"},
 	{Key: "security", Label: "Security", Description: "Secret store, audit, approvals, profiles, and network policy"},
@@ -278,7 +277,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "docindex", "skills", "auth", "security", "hardening", "session", "automation", "service", "runners":
+	case "provider", "storage", "runtime", "context", "workspace", "skills", "auth", "security", "hardening", "session", "automation", "service", "runners":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)

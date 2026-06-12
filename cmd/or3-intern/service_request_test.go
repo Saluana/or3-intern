@@ -68,27 +68,17 @@ func TestDecodeServiceRunnerRunRequest_Minimal(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceRunnerRunRequest_AcceptsCamelAliasesWithWarnings(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_RejectsCamelCaseAliases(t *testing.T) {
 	body := `{
-		"parent_session_key": "session-snake",
 		"parentSessionKey": "session-camel",
 		"runnerId": "codex",
 		"task": "fix the tests",
 		"timeoutSeconds": 30,
 		"maxTurns": 4
 	}`
-	req, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ParentSessionKey != "session-snake" {
-		t.Fatalf("expected canonical parent_session_key to win, got %q", req.ParentSessionKey)
-	}
-	if req.RunnerID != "codex" || req.TimeoutSeconds != 30 || req.MaxTurns != 4 {
-		t.Fatalf("expected camel aliases to decode, got %#v", req)
-	}
-	if len(req.Warnings) != 1 || !strings.Contains(req.Warnings[0], "parent_session_key") {
-		t.Fatalf("expected parent_session_key conflict warning, got %#v", req.Warnings)
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
+	if err == nil {
+		t.Fatal("expected error for camelCase aliases")
 	}
 }
 

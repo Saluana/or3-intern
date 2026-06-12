@@ -2,10 +2,7 @@
 // rules for or3-intern.
 package config
 
-import (
-	"encoding/json"
-	"strings"
-)
+import "strings"
 
 // RuntimeProfile names the intended execution posture for this instance.
 type RuntimeProfile string
@@ -126,7 +123,6 @@ type Config struct {
 
 	IdentityFile string         `json:"identityFile"`
 	MemoryFile   string         `json:"memoryFile"`
-	DocIndex     DocIndexConfig `json:"docIndex"`
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
 	Session      SessionConfig  `json:"session"`
@@ -143,7 +139,6 @@ type Config struct {
 	Heartbeat           HeartbeatConfig         `json:"heartbeat"`
 	Channels            ChannelsConfig          `json:"channels"`
 	Context             ContextConfig           `json:"context"`
-	ContextManager      ContextManagerConfig    `json:"contextManager"`
 	ContextConfigured   bool                    `json:"-"`
 	IntegrationWarnings []IntegrationQuarantine `json:"-"`
 
@@ -204,18 +199,6 @@ type ContextTaskCardConfig struct {
 	MaxPlanItems int  `json:"maxPlanItems"`
 }
 
-type ContextManagerConfig struct {
-	Enabled           bool   `json:"enabled"`
-	Provider          string `json:"provider"`
-	Model             string `json:"model"`
-	TimeoutSeconds    int    `json:"timeoutSeconds"`
-	IdlePruneSeconds  int    `json:"idlePruneSeconds"`
-	MaxInputTokens    int    `json:"maxInputTokens"`
-	MaxOutputTokens   int    `json:"maxOutputTokens"`
-	AllowTaskUpdates  bool   `json:"allowTaskUpdates"`
-	AllowStalePropose bool   `json:"allowStalePropose"`
-}
-
 // HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
 type HardeningConfig struct {
 	GuardedTools        bool     `json:"guardedTools"`
@@ -268,11 +251,10 @@ type ProviderProfileConfig struct {
 }
 
 type ModelRoutingConfig struct {
-	Chat           ModelRoleConfig `json:"chat,omitempty"`
-	Summarization  ModelRoleConfig `json:"summarization,omitempty"`
-	ContextManager ModelRoleConfig `json:"contextManager,omitempty"`
-	Embeddings     ModelRoleConfig `json:"embeddings,omitempty"`
-	Fallback       ModelRoleConfig `json:"fallback,omitempty"`
+	Chat          ModelRoleConfig `json:"chat,omitempty"`
+	Summarization ModelRoleConfig `json:"summarization,omitempty"`
+	Embeddings    ModelRoleConfig `json:"embeddings,omitempty"`
+	Fallback      ModelRoleConfig `json:"fallback,omitempty"`
 }
 
 type ModelRoleConfig struct {
@@ -295,19 +277,16 @@ type FavoriteModelConfig struct {
 }
 
 const (
-	ModelRoleChat           = "chat"
-	ModelRoleSummarization  = "summarization"
-	ModelRoleContextManager = "contextManager"
-	ModelRoleEmbeddings     = "embeddings"
-	ModelRoleFallback       = "fallback"
+	ModelRoleChat          = "chat"
+	ModelRoleSummarization = "summarization"
+	ModelRoleEmbeddings    = "embeddings"
+	ModelRoleFallback      = "fallback"
 )
 
 func (cfg Config) ModelRole(role string) ModelRoleConfig {
 	switch strings.TrimSpace(role) {
 	case ModelRoleSummarization:
 		return cfg.ModelRouting.Summarization
-	case ModelRoleContextManager:
-		return cfg.ModelRouting.ContextManager
 	case ModelRoleEmbeddings:
 		return cfg.ModelRouting.Embeddings
 	case ModelRoleFallback:
@@ -475,18 +454,6 @@ type ChannelsConfig struct {
 	Email    EmailChannelConfig    `json:"email"`
 }
 
-// DocIndexConfig controls workspace document indexing for retrieval.
-type DocIndexConfig struct {
-	Enabled        bool     `json:"enabled"`
-	Roots          []string `json:"roots"`
-	MaxFiles       int      `json:"maxFiles"`
-	MaxFileBytes   int      `json:"maxFileBytes"`
-	MaxChunks      int      `json:"maxChunks"`
-	EmbedMaxBytes  int      `json:"embedMaxBytes"`
-	RefreshSeconds int      `json:"refreshSeconds"`
-	RetrieveLimit  int      `json:"retrieveLimit"`
-}
-
 // SkillsConfig controls managed skill loading, policy, and runtime behavior.
 type SkillsConfig struct {
 	EnableExec    bool                        `json:"enableExec"`
@@ -568,13 +535,11 @@ type SessionIdentityLink struct {
 type AuthEnforcementMode string
 
 const (
-	AuthEnforcementOff              AuthEnforcementMode = "off"
-	AuthEnforcementWarn             AuthEnforcementMode = "warn"
-	AuthEnforcementSensitive        AuthEnforcementMode = "enforce-sensitive"
-	AuthEnforcementSession          AuthEnforcementMode = "enforce-session"
-	AuthFallbackPairedTokenOnly     string              = "paired-token-only"
-	AuthFallbackPairedTokenPlusWarn string              = "paired-token-plus-warning"
-	AuthFallbackAdminRecoveryOnly   string              = "admin-recovery-only"
+	AuthEnforcementOff            AuthEnforcementMode = "off"
+	AuthEnforcementWarn           AuthEnforcementMode = "warn"
+	AuthEnforcementSensitive      AuthEnforcementMode = "enforce-sensitive"
+	AuthEnforcementSession        AuthEnforcementMode = "enforce-session"
+	AuthFallbackAdminRecoveryOnly string              = "admin-recovery-only"
 )
 
 // AuthConfig configures passkey, session, and recent-auth behavior for the service API.
@@ -589,7 +554,6 @@ type AuthConfig struct {
 	StepUpTTLSeconds           int                 `json:"stepUpTtlSeconds"`
 	FallbackPolicy             string              `json:"fallbackPolicy"`
 	EnforcementMode            AuthEnforcementMode `json:"enforcementMode"`
-	AllowPairedTokenFallback   bool                `json:"allowPairedTokenFallback"`
 	RequirePasskeyForSensitive bool                `json:"requirePasskeyForSensitive"`
 }
 
@@ -660,36 +624,8 @@ type AccessProfilesConfig struct {
 // the operator has declared.
 type AccessProfileConfig struct {
 	MaxCapability string   `json:"maxCapability"`
-	DeclaredTools []string `json:"declaredTools"`
 	AllowedHosts  []string `json:"allowedHosts"`
 	WritablePaths []string `json:"writablePaths"`
-}
-
-// UnmarshalJSON accepts both the new `declaredTools` JSON key and the legacy
-// `allowedTools` key (used before the runner-only cleanup). If both are
-// present, `declaredTools` wins; if only `allowedTools` is present, the value
-// is migrated into `DeclaredTools` so old configs continue to load cleanly.
-func (p *AccessProfileConfig) UnmarshalJSON(data []byte) error {
-	type alias struct {
-		MaxCapability string   `json:"maxCapability"`
-		DeclaredTools []string `json:"declaredTools"`
-		LegacyAllowed []string `json:"allowedTools"`
-		AllowedHosts  []string `json:"allowedHosts"`
-		WritablePaths []string `json:"writablePaths"`
-	}
-	var a alias
-	if err := json.Unmarshal(data, &a); err != nil {
-		return err
-	}
-	tools := a.DeclaredTools
-	if len(tools) == 0 {
-		tools = a.LegacyAllowed
-	}
-	p.MaxCapability = a.MaxCapability
-	p.DeclaredTools = tools
-	p.AllowedHosts = a.AllowedHosts
-	p.WritablePaths = a.WritablePaths
-	return nil
 }
 
 // NetworkPolicyConfig defines outbound network restrictions.

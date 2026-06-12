@@ -14,6 +14,6 @@ Run these checks before cutting a release that includes service/app contract cha
 
 - Pair the app, start a session, and send a foreground turn.
 - Start an agent-run flow and confirm `job_id`, `parent_session_key`, and `child_session_key` remain snake_case in app state.
-- Trigger or mock bootstrap warnings for `integration_quarantined`, `legacy_context_mode`, and `embedding_fingerprint_mismatch` and confirm they are visible but non-blocking for warning severity.
-- Exercise `settings`, `connect-device`, `pairing approve-code`, and `devices list` to confirm canonical CLI guidance is consistent.
+- Trigger or mock bootstrap warnings for `integration_quarantined` and `embedding_fingerprint_mismatch` and confirm they are visible but non-blocking for warning severity.
+- Exercise `settings`, secure QR enrollment, and trusted-device revocation in OR3 App.
 - Confirm non-2xx service responses include `error`, `code`, and `request_id`.

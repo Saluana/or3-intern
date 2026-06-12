@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-func TestResolveAgentCLICwd_NoRestriction(t *testing.T) {
+func TestResolveRunnerCwd_NoRestriction(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Empty request + empty restrict → current working dir
-	got, err := resolveAgentCLICwd("", "")
+	got, err := resolveRunnerCwd("", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestResolveAgentCLICwd_NoRestriction(t *testing.T) {
 	}
 
 	// Absolute path with no restriction → passed through
-	got, err = resolveAgentCLICwd("/tmp", "")
+	got, err = resolveRunnerCwd("/tmp", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestResolveAgentCLICwd_NoRestriction(t *testing.T) {
 	}
 
 	// Relative path with no restriction → resolved from cwd
-	got, err = resolveAgentCLICwd("foo", "")
+	got, err = resolveRunnerCwd("foo", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestResolveAgentCLICwd_NoRestriction(t *testing.T) {
 	}
 }
 
-func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
+func TestResolveRunnerCwd_WithRestriction(t *testing.T) {
 	tmp := t.TempDir()
 	restrictDir, err := filepath.EvalSymlinks(tmp)
 	if err != nil {
@@ -50,7 +50,7 @@ func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
 	}
 
 	// Empty request → defaults to restrict dir
-	got, err := resolveAgentCLICwd("", restrictDir)
+	got, err := resolveRunnerCwd("", restrictDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
 	}
 
 	// Relative path → resolved below restrict dir
-	got, err = resolveAgentCLICwd("sub/dir", restrictDir)
+	got, err = resolveRunnerCwd("sub/dir", restrictDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
 	}
 
 	// Absolute path inside restrict dir → allowed
-	got, err = resolveAgentCLICwd(filepath.Join(restrictDir, "project"), restrictDir)
+	got, err = resolveRunnerCwd(filepath.Join(restrictDir, "project"), restrictDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
 	}
 
 	// Absolute path outside restrict dir → rejected
-	_, err = resolveAgentCLICwd("/etc", restrictDir)
+	_, err = resolveRunnerCwd("/etc", restrictDir)
 	if err == nil {
 		t.Fatal("expected error for cwd outside restrict dir")
 	}
@@ -88,7 +88,7 @@ func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
 	}
 
 	// Relative path escaping restrict dir via .. → rejected
-	_, err = resolveAgentCLICwd("../escape", restrictDir)
+	_, err = resolveRunnerCwd("../escape", restrictDir)
 	if err == nil {
 		t.Fatal("expected error for cwd escaping restrict dir")
 	}
@@ -97,10 +97,10 @@ func TestResolveAgentCLICwd_WithRestriction(t *testing.T) {
 	}
 }
 
-func TestResolveAgentCLICwd_Whitespace(t *testing.T) {
+func TestResolveRunnerCwd_Whitespace(t *testing.T) {
 	restrictDir := t.TempDir()
 
-	got, err := resolveAgentCLICwd("  ", restrictDir)
+	got, err := resolveRunnerCwd("  ", restrictDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

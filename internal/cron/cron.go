@@ -62,7 +62,7 @@ type CronPayload struct {
 	AgentRun   *CronAgentRunPayload `json:"agent_run,omitempty"`
 }
 
-// CronAgentRunPayload describes an external agent CLI run started by cron.
+// CronAgentRunPayload describes an external runner run started by cron.
 type CronAgentRunPayload struct {
 	RunnerID       string         `json:"runner_id"`
 	Task           string         `json:"task"`

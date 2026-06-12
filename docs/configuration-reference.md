@@ -1,473 +1,67 @@
-# Configuration reference
+# Configuration Reference
 
-`or3-intern` loads its primary configuration from `config.json`, usually under `~/.or3-intern/config.json` after `or3-intern init`.
+`or3-intern` loads `config.json`, usually from `~/.or3-intern/config.json`. Environment overrides are applied after `.env` loading; already-exported shell variables win.
 
-Environment overrides are applied after loading `.env` from the current directory or parent directory. Existing shell variables are not overwritten by `.env`; set `OR3_LOAD_DOTENV=false` to disable `.env` loading.
+Use `or3-intern settings` for normal edits and `or3-intern configure` for section-focused advanced edits.
 
-## Compatibility notes
+## Top-Level Sections
 
-- `settings` is the canonical user-facing configuration entrypoint. `setup`, `init`, `configure`, and `doctor --fix` remain supported workflow wrappers for first-run setup, advanced section edits, and safe repairs.
-- Service request payloads under `/internal/v1` keep snake_case field names canonical. camelCase aliases remain accepted for compatibility, but when both are supplied with different values, the snake_case field wins and the service returns `X-Or3-Request-Warning`.
-- `.env` remains additive: checked-in config should not rely on environment-only keys unless deploy scripts also set them. Shell variables win over `.env` values, so local overrides can safely shadow compose defaults.
-- Quarantined integrations are surfaced as warnings instead of preventing the service from starting. Fix the integration config, then restart or rerun readiness checks to clear the warning.
-- Legacy context mode means the loaded config did not include the modern `context` section. The runtime still works, but saving through `settings` or `configure` writes the current context defaults explicitly.
+| Key | Purpose |
+| --- | --- |
+| `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage and workspace boundaries. |
+| `provider` | Embeddings, memory consolidation, doctor flows, and provider credentials. |
+| `runners` | External runner selection, discovery, worker pool, timeouts, and isolation. |
+| `runtime` | Runtime memory and compaction settings. |
+| `context` | Runner prompt context packing. |
+| `tools` | Web proxy, PATH additions, workspace read policy, and MCP servers. |
+| `hardening` | Program allowlists, sandboxing, child environment controls, and isolation. |
+| `skills` | Managed skill loading, trust policy, registry, and quarantine state. |
+| `triggers`, `heartbeat`, `cron` | Automation inputs and scheduled runner jobs. |
+| `service` | Internal authenticated HTTP API settings. |
+| `channels` | Telegram, Slack, Discord, WhatsApp bridge, and Email configuration. |
+| `security` | Secret store, audit, access profiles, approvals, auth, and network policy. |
+| `session` | Session naming and shared-history scope behavior. |
 
-## Top-level sections
-
-| Key                                                    | Purpose                                                                                              |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `dbPath`, `artifactsDir`, `workspaceDir`, `allowedDir` | Storage locations and workspace boundaries                                                           |
-| `defaultSessionKey`, `session`, `consolidationModel`   | Session naming, cross-session identity/scope behavior, and optional memory-compaction model override |
-| `identityFile`, `memoryFile`                           | Prompt bootstrap files                                                                               |
-| `provider`                                             | Compatibility model defaults plus embedding settings, provider keys, temperature, and timeouts       |
-| `tools`                                                | Local tool compatibility settings, proxying, workspace restrictions, PATH, and MCP servers           |
-| `hardening`                                            | Tool capability tiers, program allowlists, child environment controls, quotas, and sandboxing        |
-| `skills`                                               | Managed skill loading, per-skill config, policy, and registry settings                               |
-| `triggers`                                             | Webhook and file-watch automation                                                                    |
-| `heartbeat`                                            | Timer-driven autonomous turns                                                                        |
-| `cron`                                                 | Scheduled job storage and execution                                                                  |
-| `service`                                              | Internal authenticated HTTP API settings                                                             |
-| `channels`                                             | Telegram, Slack, Discord, WhatsApp bridge, and Email configuration                                   |
-| `security`                                             | Secret store, audit, access profiles, and outbound network policy                                    |
-| `runtimeProfile`                                       | Named execution posture (`local-dev`, `hosted-service`, `hosted-no-exec`, etc.)                      |
-| `docIndex`                                             | Opt-in document indexing for prompt-time retrieval                                                   |
-| `subagents`                                            | Legacy compatibility bucket retained for older configs; runner-first builds do not create subagent work |
-| `runners`                                              | External agent CLI delegation: runner discovery, worker pool, timeouts, and sandboxing               |
-| `context`, `contextManager`                            | Memory/retrieval knobs plus legacy prompt/context-manager compatibility settings                     |
-
-## Minimal shape
+## Minimal Shape
 
 ```json
 {
-    "provider": {},
-    "tools": {},
-    "hardening": {},
-    "skills": {},
-    "triggers": {},
-    "heartbeat": {},
-    "cron": {},
-    "service": {},
-    "channels": {},
-    "security": {},
-    "context": {},
-    "contextManager": {},
-    "docIndex": {},
-    "subagents": {},
-    "runners": {},
-    "session": {}
+  "provider": {},
+  "runners": {},
+  "runtime": {},
+  "context": {},
+  "tools": {},
+  "hardening": {},
+  "skills": {},
+  "triggers": {},
+  "heartbeat": {},
+  "cron": {},
+  "service": {},
+  "channels": {},
+  "security": {},
+  "session": {}
 }
 ```
 
-## Important sections
+## Runner Selection
 
-### `provider`
+Set the default runner with:
 
-Controls compatibility LLM defaults and embedding provider settings. In
-runner-first mode, external runners choose their own chat/agent models; these
-chat model fields remain for embeddings, memory consolidation, doctor flows, and
-older config compatibility.
+- `runners.default`
+- `OR3_RUNNERS_DEFAULT`
 
-- `apiBase`
-- `apiKey`
-- `model`
-- `embedModel`
-- `embedDimensions` — optional embedding-vector size override; `0` means use the provider/model default
-- `temperature`
-- `enableVision` — legacy compatibility toggle; runner-first attachment handling is not gated by this field
-- `timeoutSeconds`
+Supported runners include OpenCode, Codex, Claude Code, and Gemini.
 
-### `tools`
+## API Shape
 
-Controls local tool compatibility settings and optional MCP registration:
+Service request payloads use snake_case. Unknown fields are rejected.
 
-- `braveApiKey`
-- `webProxy`
-- `execTimeoutSeconds` — legacy built-in exec-tool timeout; runner-first CLI runners use runner-specific timeout settings
-- `restrictToWorkspace`
-- `allowFullFileRead`
-- `pathAppend`
-- `mcpServers`
+## Controls That Affect Runner Execution
 
-`allowFullFileRead` keeps write/edit operations restricted to the workspace while allowing read/list/search file tools to inspect paths outside the workspace. It is off by default and only takes effect when `restrictToWorkspace` remains enabled.
-
-Manage `tools.mcpServers` with `or3-intern configure --section mcp` or the OR3 app at **Settings → Add-ons**. MCP server changes are saved to config and take effect after restarting `or3-intern`.
-
-See [mcp-tool-integrations.md](mcp-tool-integrations.md) for the MCP-specific settings and API workflow.
-
-### `hardening`
-
-Core runtime safety controls:
-
-- `guardedTools`
-- `privilegedTools`
-- `enableExecShell`
-- `execAllowedPrograms`
-- `childEnvAllowlist`
-- `isolateChannelPeers`
-- `sandbox`
-- `quotas`
-
-See [security-and-hardening.md](security-and-hardening.md) for rollout guidance.
-
-#### `hardening.quotas`
-
-`hardening.quotas` is retained for config compatibility with pre-runner-first installs. Runner-first builds do not enforce host-local model tool quotas; use runner-specific limits, service capability ceilings, access profiles, and approvals for current runtime control.
-
-Legacy per-message settings use these keys:
-
-- `maxToolCalls`
-- `maxExecCalls`
-- `maxWebCalls`
-
-Per-session settings use:
-
-- `maxSessionToolCalls`
-- `maxSessionExecCalls`
-- `maxSessionWebCalls`
-
-`exceededAction` is also retained for compatibility, but current runner-first execution does not create `tool_quota` approval requests from these fields.
-
-### `skills`
-
-Skill loading and trust policy:
-
-- `enableExec`
-- `maxRunSeconds`
-- `managedDir`
-- `load`
-- `entries`
-- `policy`
-- `clawHub`
-
-See [skills.md](skills.md).
-
-### `triggers`, `heartbeat`, and `cron`
-
-These sections control autonomous execution:
-
-- `triggers.webhook`
-- `triggers.fileWatch`
-- `heartbeat`
-- `cron`
-
-See [triggers-and-automation.md](triggers-and-automation.md).
-
-### `service`
-
-Internal service mode settings:
-
-- `enabled`
-- `listen`
-- `secret`
-- `trustedBrowserOrigins` — exact browser origins allowed for non-loopback service API calls
-- `trustedBrowserCIDRs` — remote client IPs or CIDR ranges allowed with trusted browser origins
-
-See [api-reference.md](api-reference.md).
-
-### `channels`
-
-Non-CLI integrations:
-
-- `telegram`
-- `slack`
-- `discord`
-- `whatsApp`
-- `email`
-
-Each external channel now supports `inboundPolicy` in addition to the legacy `openAccess` flag:
-
-- `allowlist` — require the channel-specific allowlist field (`allowedChatIds`, `allowedUserIds`, `allowedFrom`, `allowedSenders`)
-- `pairing` — require a matching paired identity from the approval broker/device store
-- `deny` — enable outbound delivery while rejecting inbound traffic
-
-When `inboundPolicy` is omitted, the runtime preserves the existing `openAccess` / allowlist behavior for backward compatibility.
-
-See [channels.md](channels.md).
-
-### `security`
-
-Phase 3 security controls:
-
-- `secretStore`
-- `audit`
-- `profiles`
-- `network`
-
-See [security-and-hardening.md](security-and-hardening.md).
-
-### `security.approvals`
-
-The approval and pairing system adds a small `approvals` block inside the `security` section. All fields have safe defaults; existing installs that omit this block continue to work unchanged.
-
-```json
-{
-    "security": {
-        "approvals": {
-            "enabled": false,
-            "hostId": "local",
-            "keyFile": "",
-            "pairingCodeTtlSeconds": 300,
-            "pendingTtlSeconds": 3600,
-            "approvalTokenTtlSeconds": 300,
-            "localAutoPairLoopback": false,
-            "pairing": { "mode": "ask" },
-            "exec": { "mode": "trusted" },
-            "skillExecution": { "mode": "trusted" },
-            "secretAccess": { "mode": "trusted" },
-            "messageSend": { "mode": "trusted" }
-        }
-    }
-}
-```
-
-#### Top-level approval fields
-
-| Field                     | Type   | Default   | Description                                                                                                                                                      |
-| ------------------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                 | bool   | `false`   | Activates the approval broker. When `false`, all approval checks pass through without enforcement.                                                               |
-| `hostId`                  | string | `"local"` | Stable identifier for this host. Included in approval tokens and audit events so future sandboxes and remote nodes can verify provenance.                        |
-| `keyFile`                 | string | `""`      | Path to a 32-byte key file used to sign and verify approval tokens. Required when any domain uses `ask` or `allowlist` mode.                                     |
-| `pairingCodeTtlSeconds`   | int    | `300`     | How long a pairing code remains valid before automatic expiry.                                                                                                   |
-| `pendingTtlSeconds`       | int    | `3600`    | How long a pending approval request waits before expiring automatically.                                                                                         |
-| `approvalTokenTtlSeconds` | int    | `300`     | How long an issued approval token remains valid after the operator resolves the request.                                                                         |
-| `localAutoPairLoopback`   | bool   | `false`   | When `true`, automatically approves pairing requests from loopback addresses without requiring operator action. Intended for single-node local development only. |
-
-#### `security.approvals.moderator`
-
-AI-assisted review runs after policy/allowlist checks and before surfacing a pending request. It is inert unless `security.approvals.enabled` is true and a provider API key is available.
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Turn on moderator review for eligible approval requests. |
-| `preset` | string | `balanced` | Built-in mapping: `balanced`, `cautious`, `hands_off`, or `manual`. |
-| `provider` | string | `""` | Provider profile key for review calls. Empty reuses the chat primary provider. |
-| `model` | string | `""` | Chat model for review. Empty reuses the chat primary model. |
-| `timeoutSeconds` | int | `8` | Per-review timeout (1–120). |
-| `maxPromptChars` | int | `12000` | Upper bound on moderator prompt size. |
-| `maxSubjectChars` | int | `4000` | Upper bound on redacted subject facts. |
-| `failureAction` | string | `escalate` | `escalate` or `deny` when review fails; `approve` is rejected at validation. |
-| `userPolicy` | string | `""` | Extra plain-language rules appended to built-in policy. |
-| `actions.low` | string | `approve` | Action for low risk (`approve`, `escalate`, `deny`). |
-| `actions.medium` | string | `approve` | Action for medium risk. |
-| `actions.high` | string | `escalate` | Action for high risk. |
-| `actions.extreme` | string | `deny` | Action for extreme risk. |
-| `requireUserAuthHigh` | bool | `false` | When true, never auto-approve high/extreme even if the model suggests approval. |
-
-Preset summaries:
-
-- `balanced`: low/medium auto-approve, high escalate, extreme deny.
-- `cautious`: low auto-approve, medium+ escalate or deny.
-- `hands_off`: low/medium/high may auto-approve unless hard-deny matches; extreme escalate/deny.
-- `manual`: all levels escalate to the operator.
-
-#### Approval modes
-
-Each domain under `security.approvals` accepts a `mode` field with one of these values:
-
-| Mode        | Behaviour                                                                                                                                                                        |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deny`      | All execution in this domain is blocked unconditionally. Suitable for `exec` on headless hosts that should never run subprocesses.                                               |
-| `ask`       | Every execution attempt creates a pending approval request and is blocked until an operator resolves it.                                                                         |
-| `allowlist` | Execution is allowed if a matching allowlist rule exists; otherwise a pending request is created. Use this to pre-approve recurring safe patterns while still gating novel ones. |
-| `trusted`   | Execution is allowed without prompting an operator. An audit event is still recorded. This is the default for all domains.                                                       |
-
-#### Domain fields
-
-Configure each of these independently under `security.approvals`:
-
-| Domain key       | Controls                                                                   |
-| ---------------- | -------------------------------------------------------------------------- |
-| `pairing`        | Whether new device pairing requests are auto-approved, gated, or denied.   |
-| `exec`           | Shell and program execution via the `exec` tool.                           |
-| `skillExecution` | Legacy skill-execution approval domain retained for config compatibility; runner-first builds do not expose host-local `run_skill` tools. |
-| `secretAccess`   | (Future) Gate on decrypting or reading a named secret.                     |
-| `messageSend`    | (Future) Gate on sending an outbound message through a channel.            |
-
-#### Upgrade notes
-
-- Existing installs do not need any approval config. All domains default to `trusted` when `enabled` is `false` or absent.
-- When you add `"enabled": true` for the first time, set every domain you want to gate explicitly; domains left unset keep `trusted` behavior.
-- `keyFile` must exist before the service starts when any domain uses `ask` or `allowlist`. Run `or3-intern doctor` to detect missing keys.
-- `hostId` should be stable and unique per host. Changing it invalidates all outstanding approval tokens issued under the old value.
-
-### `runtimeProfile`
-
-Selects the named execution posture enforced at startup. Valid values:
-
-- `local-dev` — permissive; no additional security requirements.
-- `single-user-hardened` — tighter defaults for self-hosted personal use.
-- `hosted-service` — requires `security.secretStore`, `security.audit`, and `security.network` to be enabled.
-- `hosted-no-exec` — like `hosted-service` but also forbids `hardening.enableExecShell` and `hardening.privilegedTools`.
-- `hosted-remote-sandbox-only` — requires a sandbox when exec is enabled.
-
-Override with the `OR3_RUNTIME_PROFILE` environment variable.
-
-See [security-and-hardening.md](security-and-hardening.md) for startup validation details.
-
-### `docIndex`
-
-Opt-in file indexing and retrieval:
-
-- `enabled`
-- `roots`
-- `maxFiles`
-- `maxFileBytes`
-- `maxChunks`
-- `embedMaxBytes`
-- `refreshSeconds`
-- `retrieveLimit`
-
-See [memory-and-context.md](memory-and-context.md).
-
-### Runtime and consolidation
-
-The top-level runtime knobs include conversation history, retrieval, tool-loop limits, and memory consolidation behavior:
-
-- `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`
-- `maxToolLoops`, `maxToolLoopsExceededAction`, `maxToolBytes`, `maxMediaBytes`
-- `consolidationEnabled`, `consolidationWindowSize`, `consolidationMaxMessages`, `consolidationMaxInputChars`, `consolidationAsyncTimeoutSeconds`
-- `consolidationModel` — optional model used for memory consolidation and `/new` archival; blank falls back to `provider.model`
-
-When `maxToolLoops` is exhausted, `maxToolLoopsExceededAction` controls whether the runtime pauses for approval (`ask`, default) or stops immediately (`fail`). If approvals are unavailable, `ask` falls back to the existing hard-stop/degraded response path.
-
-Override `consolidationModel` with the `OR3_CONSOLIDATION_MODEL` environment variable.
-
-### `context`
-
-Memory/retrieval controls plus legacy prompt assembly budgets. In runner-first
-mode, runner bootstrap/context paths decide what is sent to the external CLI;
-the legacy token-budget fields are retained for compatibility until the old
-built-in prompt loop is fully removed.
-
-- `mode`
-- `maxInputTokens`
-- `outputReserveTokens`
-- `safetyMarginTokens`
-- `sections`
-- `retrieval`
-- `pressure`
-- `tools`
-- `artifacts`
-- `taskCard`
-
-Backward-compatibility note:
-
-- When an older `config.json` has no top-level `context` block at all, the runtime preserves the legacy prompt knobs as authoritative defaults: `historyMaxMessages`, `memoryRetrieveLimit`, `vectorSearchK`, `ftsSearchK`, `bootstrapMaxChars`, `bootstrapTotalMaxChars`, and `maxToolBytes`.
-- `or3-intern status --advanced` and the app bootstrap endpoint report this as legacy context mode so it is visible during debugging.
-- When a `context` block is present, those explicit context budgets are applied to prompt packing while the legacy fields continue to drive adjacent runtime behavior that still uses them directly.
-
-### `contextManager`
-
-Legacy optional maintenance-model controls. Runner-first chat does not call the
-context-manager provider client. Background memory consolidation is still active
-when enabled, but it uses the summarization/consolidation path instead.
-
-- `enabled`
-- `provider`
-- `model`
-- `timeoutSeconds`
-- `maxInputTokens`
-- `maxOutputTokens`
-- `allowTaskUpdates`
-- `allowStalePropose`
-
-### `runners`
-
-Controls the external agent CLI delegation subsystem. All fields are under the `runners` key in `config.json`.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `defaultRunner` | string | `"opencode"` | Default runner for new chat/automation turns (`opencode`, `codex`, `claude`, `gemini`). |
-| `disabledRunners` | string[] | `[]` | Runner IDs to block from discovery and execution (e.g. `["opencode", "gemini"]`). |
-| `maxConcurrent` | int | `1` | Maximum worker goroutines running external CLIs simultaneously. |
-| `maxQueued` | int | `16` | Maximum queued runs before the endpoint returns `429`. |
-| `defaultTimeoutSeconds` | int | `900` | Per-run timeout when the request omits `timeout_seconds`. Minimum 30, default 900. |
-| `maxTimeoutSeconds` | int | `7200` | Hard server-side cap on any requested timeout. Minimum 30, default 7200. |
-| `allowSandboxAuto` | bool | `false` | If `true`, permits `sandbox_auto` mode when isolation is `sandbox_dangerous`. |
-| `defaultMode` | string | `"safe_edit"` | Mode used when the request omits `mode`. Must be `review`, `safe_edit`, or `sandbox_auto`. |
-| `defaultIsolation` | string | `"host_workspace_write"` | Isolation used when the request omits `isolation`. Must be `host_readonly`, `host_workspace_write`, `sandbox_workspace_write`, or `sandbox_dangerous`. |
-| `eventChunkMaxBytes` | int | `16384` | Maximum size of a single output event chunk (16 KiB). |
-| `previewMaxBytes` | int | `65536` | Retained stdout/stderr ring-buffer preview size (64 KiB). |
-| `maxPersistedOutputBytes` | int64 | `10485760` | Total persisted output cap before truncation (10 MiB). |
-| `childEnvAllowlist` | string[] | `["PATH","HOME","TMPDIR","TMP","TEMP"]` | Environment variables passed through to child CLI processes. |
-
-Environment variable overrides follow the existing `OR3_*` pattern:
-
-| Env var | Maps to |
-|---------|---------|
-| `OR3_RUNNERS_DEFAULT` | `runners.default` (string) |
-| `OR3_RUNNERS_DISABLED` | `runners.disabledRunners` (comma-separated string) |
-| `OR3_RUNNERS_MAX_CONCURRENT` | `runners.maxConcurrent` (int) |
-| `OR3_RUNNERS_MAX_QUEUED` | `runners.maxQueued` (int) |
-| `OR3_RUNNERS_DEFAULT_TIMEOUT_SECONDS` | `runners.defaultTimeoutSeconds` (int) |
-| `OR3_RUNNERS_MAX_TIMEOUT_SECONDS` | `runners.maxTimeoutSeconds` (int) |
-| `OR3_RUNNERS_ALLOW_SANDBOX_AUTO` | `runners.allowSandboxAuto` (bool) |
-| `OR3_RUNNERS_DEFAULT_MODE` | `runners.defaultMode` (string) |
-| `OR3_RUNNERS_DEFAULT_ISOLATION` | `runners.defaultIsolation` (string) |
-
-Example minimal enablement:
-
-```json
-{
-  "runners": {
-    "default": "opencode",
-    "maxConcurrent": 2
-  }
-}
-```
-
-## Environment overrides called out in the README
-
-The codebase documents these direct environment overrides for service and channel setup:
-
-- `OR3_SERVICE_ENABLED`
-- `OR3_SERVICE_LISTEN`
-- `OR3_SERVICE_SECRET`
-- `OR3_SERVICE_TRUSTED_BROWSER_ORIGINS`
-- `OR3_SERVICE_TRUSTED_BROWSER_CIDRS`
-- `OR3_CONSOLIDATION_MODEL`
-- `OR3_TELEGRAM_TOKEN`
-- `OR3_SLACK_APP_TOKEN`
-- `OR3_SLACK_BOT_TOKEN`
-- `OR3_DISCORD_TOKEN`
-- `OR3_WHATSAPP_BRIDGE_URL`
-- `OR3_WHATSAPP_BRIDGE_TOKEN`
-- `OR3_EMAIL_IMAP_HOST`
-- `OR3_EMAIL_IMAP_PORT`
-- `OR3_EMAIL_IMAP_USERNAME`
-- `OR3_EMAIL_IMAP_PASSWORD`
-- `OR3_EMAIL_SMTP_HOST`
-- `OR3_EMAIL_SMTP_PORT`
-- `OR3_EMAIL_SMTP_USERNAME`
-- `OR3_EMAIL_SMTP_PASSWORD`
-- `OR3_EMAIL_FROM_ADDRESS`
-
-## Doctor config metadata
-
-`or3-intern service` exposes backend-owned config metadata at:
-
-```http
-GET /internal/v1/doctor/config-metadata
-```
-
-This metadata is the authoritative app-facing source for first-slice setting labels, descriptions, risk level, restart requirement, approval requirement, rollback behavior, validation hints, and user-intent examples. The app uses it to preview settings plans before writes instead of relying only on local risk rules.
-
-Covered first-slice areas include provider keys and routing, runner/Admin Brain availability, generic installable skill credential/config fields, tool exec policy, allowed programs, service restart behavior, and credential/config paths. Uncovered fields continue to use the existing configure field labels and app-local warning fallback until they are migrated.
-
-Plan-based settings writes use:
-
-```http
-POST /internal/v1/doctor/plans
-POST /internal/v1/doctor/plans/{id}/apply
-POST /internal/v1/doctor/plans/{id}/rollback
-POST /internal/v1/doctor/plans/{id}/post-checks
-```
-
-The older `/internal/v1/configure/apply` route remains compatible for callers that do not yet use Doctor plans.
-
-## Related code
-
-- `internal/config/config.go`
-- `internal/configmeta/`
-- `internal/adminflow/`
-- `cmd/or3-intern/init.go`
+- runner selection
+- mode and isolation
+- cwd/path policy
+- approvals
+- network policy
+- writable paths
+- auth and service access

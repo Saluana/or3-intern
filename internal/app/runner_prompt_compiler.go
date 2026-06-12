@@ -44,7 +44,7 @@ type RunnerPromptCompileResult struct {
 	TriggerKind        string
 }
 
-// RunnerPromptCompiler assembles cache-friendly runner prompts for external CLIs.
+// RunnerPromptCompiler assembles cache-friendly runner prompts for external runners.
 type RunnerPromptCompiler struct {
 	cfg        config.Config
 	bootstrap  RunnerBootstrapContext

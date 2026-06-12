@@ -789,7 +789,7 @@ func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
 	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
-		return RunResult{EnqueuedJobID: "job-agentcli-123", EnqueuedRunID: "acr_123"}, nil
+		return RunResult{EnqueuedJobID: "job-runner-123", EnqueuedRunID: "rr_123"}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -809,10 +809,10 @@ func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
 	_ = mustRunNow(t, svc, "agent-run", false)
 
 	jobs, _ := svc.List()
-	if jobs[0].State.LastEnqueuedJobID != "job-agentcli-123" {
+	if jobs[0].State.LastEnqueuedJobID != "job-runner-123" {
 		t.Fatalf("expected enqueued job id, got %#v", jobs[0].State)
 	}
-	if jobs[0].State.LastEnqueuedRunID != "acr_123" {
+	if jobs[0].State.LastEnqueuedRunID != "rr_123" {
 		t.Fatalf("expected enqueued run id, got %#v", jobs[0].State)
 	}
 }

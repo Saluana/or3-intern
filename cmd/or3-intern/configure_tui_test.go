@@ -89,17 +89,8 @@ func TestConfigureTUIAppliesContextFields(t *testing.T) {
 	if changed, err := applyFieldValue(&cfg, "context", "", "context_max_input_tokens", "12345"); err != nil || !changed {
 		t.Fatalf("apply context max input: changed=%v err=%v", changed, err)
 	}
-	if changed := setToggleFieldValue(&cfg, "context", "", "context_manager_enabled", true); !changed {
-		t.Fatal("expected context manager toggle to apply")
-	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_model", "mini-context"); err != nil || !changed {
-		t.Fatalf("apply context manager model: changed=%v err=%v", changed, err)
-	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_idle_prune", "120"); err != nil || !changed {
-		t.Fatalf("apply context manager idle prune: changed=%v err=%v", changed, err)
-	}
-	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 || !cfg.ContextManager.Enabled || cfg.ContextManager.Model != "mini-context" || cfg.ContextManager.IdlePruneSeconds != 120 {
-		t.Fatalf("unexpected context config: %+v manager=%+v", cfg.Context, cfg.ContextManager)
+	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 {
+		t.Fatalf("unexpected context config: %+v", cfg.Context)
 	}
 }
 
@@ -127,11 +118,9 @@ func TestConfigureTUIDiscordEnableDefaultsClosedInboundAccess(t *testing.T) {
 
 func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	cfg := config.Default()
-	sections := []string{"provider", "storage", "runtime", "context", "workspace", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "skills", "security", "hardening", "session", "automation", "service"}
 	for _, section := range sections {
 		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
-			// In runner-first mode, some fields are marked deprecated and have shorter
-			// descriptions. Accept any description with at least 5 words.
 			if len(strings.Fields(field.Description)) < 5 {
 				t.Fatalf("expected helpful description for %s/%s, got %q", section, field.Key, field.Description)
 			}
@@ -154,7 +143,6 @@ func TestConfigureTUIScreenAdaptersImplementInterface(t *testing.T) {
 		configureContextScreen{},
 		configureSafetyScreen{},
 		configureServiceScreen{},
-		configureDocIndexScreen{},
 		configureReviewScreen{},
 		configureSuccessScreen{},
 	}
@@ -194,7 +182,7 @@ func TestConfigureTUIScreenAdaptersHandleScreenUpdates(t *testing.T) {
 
 func TestConfigureTUISectionSmokeRendersWithoutPanic(t *testing.T) {
 	cfg := config.Default()
-	sections := []string{"provider", "storage", "runtime", "context", "workspace", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "skills", "security", "hardening", "session", "automation", "service"}
 	for _, section := range sections {
 		t.Run(section, func(t *testing.T) {
 			model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{Restricted: []string{section}})

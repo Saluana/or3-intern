@@ -107,7 +107,6 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 	return SettingsHomeView{Sections: []SettingsSectionView{
 		settingsSection("provider", providerSummary(cfg), "or3-intern settings --section provider", false),
 		settingsSection("workspace", workspaceSummary(cfg), "or3-intern settings --section workspace", false),
-		settingsSection("devices", deviceSummary(cfg, 0, 0), "or3-intern connect-device", false),
 		{Key: "safety", Title: "Safety", Summary: uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode), Action: "or3-intern settings --section safety"},
 		settingsSection("channels", channelsSummary(cfg), "or3-intern settings --section channels", false),
 		settingsSection("tools", toolsSummary(cfg), "or3-intern settings --section tools", false),
@@ -161,7 +160,7 @@ func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, device
 		{Name: "Commands", Status: commandSummary(cfg), Risk: commandRisk, Detail: "Shows whether local command execution is blocked, asks first, or follows tool defaults.", Action: "or3-intern settings --section safety"},
 		{Name: "Internet", Status: internetSummary(cfg), Risk: internetRisk, Detail: "Covers web/proxy/network-policy posture for outbound access.", Action: "or3-intern settings --section tools"},
 		{Name: "Connected Apps", Status: channelsSummary(cfg), Risk: channelsRisk(cfg), Detail: "External channel adapters stay optional and hidden until enabled.", Action: "or3-intern settings --section channels"},
-		{Name: "Connected Devices", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether phones, apps, or service clients can connect.", Action: "or3-intern connect-device list"},
+		{Name: "Secure Connections", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether service clients can connect through the secure protocol.", Action: "or3-intern settings --section channels"},
 		{Name: "Memory", Status: memorySummary(cfg), Risk: "yellow", Detail: "Summarizes standing memory, document indexing, and prompt context packing.", Action: "or3-intern settings --section memory"},
 		{Name: "Activity Log", Status: activitySummary(cfg), Risk: logRisk, Detail: "Shows whether important actions are recorded for review.", Action: "or3-intern status --advanced"},
 	}}
@@ -246,8 +245,8 @@ func BuildDeviceViews(records []db.PairedDeviceRecord) []DeviceView {
 			RoleLabel:        uxcopy.DeviceRoleLabel(record.Role),
 			Status:           humanStatus(record.Status),
 			LastUsed:         lastUsed(record.LastSeenAt),
-			ChangeAccessHint: "Change access: or3-intern connect-device role " + record.DeviceID,
-			DisconnectHint:   "Disconnect: or3-intern connect-device disconnect " + record.DeviceID,
+			ChangeAccessHint: "Manage access in OR3 App settings for " + record.DeviceID,
+			DisconnectHint:   "Revoke trust in OR3 App settings for " + record.DeviceID,
 		})
 	}
 	return out
@@ -306,19 +305,12 @@ func toolsSummary(cfg config.Config) string {
 }
 
 func memorySummary(cfg config.Config) string {
-	if cfg.DocIndex.Enabled {
-		return fmt.Sprintf("Standing memory on; document indexing on for %d root(s)", len(cfg.DocIndex.Roots))
-	}
-	return "Standing memory on; document indexing off"
+	return "Standing memory on"
 }
 
 func contextSummary(cfg config.Config) string {
-	manager := "manager off"
-	if cfg.ContextManager.Enabled {
-		manager = "manager on"
-	}
 	mode := firstNonEmpty(strings.TrimSpace(cfg.Context.Mode), "quality")
-	return fmt.Sprintf("%s mode; %d max input tokens; %s", mode, cfg.Context.MaxInputTokens, manager)
+	return fmt.Sprintf("%s mode; %d max input tokens", mode, cfg.Context.MaxInputTokens)
 }
 
 func headline(report intdoctor.Report) string {

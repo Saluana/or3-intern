@@ -9,14 +9,14 @@ import (
 	"or3-intern/internal/tools"
 )
 
-// resolveAgentCLICwd validates and canonicalizes the requested working directory
+// resolveRunnerCwd validates and canonicalizes the requested working directory
 // against the manager's RestrictDir. It follows these rules:
 //
 //   - Empty requested → defaults to RestrictDir (or os.Getwd if unrestricted)
 //   - Relative requested → resolved below RestrictDir
 //   - Absolute requested → must be inside RestrictDir, rejected otherwise
 //   - Empty RestrictDir → allow any cwd (no restriction)
-func resolveAgentCLICwd(requested, restrictDir string) (string, error) {
+func resolveRunnerCwd(requested, restrictDir string) (string, error) {
 	requested = strings.TrimSpace(requested)
 
 	if requested == "" {

@@ -16,11 +16,11 @@ func TestBuildServiceJobRegistryOnlyForService(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeAgentCLIManagerAlwaysAvailable(t *testing.T) {
-	// Runner-only mode is always on; the agent CLI manager is always built.
+func TestBuildRuntimeRunnerManagerAlwaysAvailable(t *testing.T) {
+	// Runner-only mode is always on; the runner manager is always built.
 	cfg := config.Default()
-	if manager := buildRuntimeAgentCLIManager(cfg, nil, nil); manager == nil {
-		t.Fatalf("expected agent CLI manager to be built")
+	if manager := buildRuntimeRunnerManager(cfg, nil, nil); manager == nil {
+		t.Fatalf("expected runner manager to be built")
 	}
 }
 

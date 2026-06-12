@@ -1263,7 +1263,7 @@ func codexItemType(item map[string]any) string {
 		return runtimeItemMCPToolCall
 	case "websearch", "search":
 		return runtimeItemWebSearch
-	case "task", "agent", "subagent":
+	case "task", "agent":
 		return runtimeItemCollabAgentToolCall
 	case "tool", "dynamictoolcall":
 		return runtimeItemDynamicToolCall
@@ -1516,7 +1516,7 @@ func classifyToolName(name string) string {
 		return runtimeItemMCPToolCall
 	case strings.Contains(lower, "search"), strings.Contains(lower, "web"):
 		return runtimeItemWebSearch
-	case strings.Contains(lower, "task"), strings.Contains(lower, "agent"), strings.Contains(lower, "subagent"):
+	case strings.Contains(lower, "task"), strings.Contains(lower, "agent"):
 		return runtimeItemCollabAgentToolCall
 	case lower == "":
 		return runtimeItemUnknown

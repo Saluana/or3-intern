@@ -161,7 +161,7 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 
 func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	limitServiceRequestBody(w, r, serviceRunnerChatBodyLimit)
@@ -232,7 +232,7 @@ func (s *serviceServer) handleRunnerChatTurnsList(w http.ResponseWriter, r *http
 
 func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http.Request, sessionID string) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	limitServiceRequestBody(w, r, serviceRunnerChatBodyLimit)
@@ -510,7 +510,7 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 
 func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID string) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	if _, ok := s.loadRunnerChatTurnForSession(w, r, store, sessionID, turnID); !ok {
@@ -529,7 +529,7 @@ func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http
 
 func (s *serviceServer) handleRunnerChatTurnDecision(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID, decision string) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	if _, ok := s.loadRunnerChatTurnForSession(w, r, store, sessionID, turnID); !ok {

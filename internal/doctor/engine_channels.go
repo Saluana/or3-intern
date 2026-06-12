@@ -99,14 +99,6 @@ func publicChannelExposureFindings(cfg config.Config, opts Options, ch ChannelSn
 			Summary:  fmt.Sprintf("open-access channel resolves to profile %q with privileged capability", profileName),
 		})
 	}
-	if cfg.Hardening.GuardedTools && !profileHasMeaningfulToolRestriction(profile) {
-		findings = append(findings, Finding{
-			ID:       "channels.open_access_no_tool_boundary",
-			Area:     ch.Name,
-			Severity: SeverityWarn,
-			Summary:  fmt.Sprintf("open-access channel resolves to profile %q without a meaningful tool restriction", profileName),
-		})
-	}
 	return findings
 }
 

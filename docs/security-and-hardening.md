@@ -104,7 +104,6 @@ Use runner-specific limits, service capability ceilings, access profiles, and ap
 Each named profile can control:
 
 - `maxCapability`
-- `allowedTools`
 - `allowedHosts`
 - `writablePaths`
 
@@ -190,13 +189,10 @@ Token rotation (`or3-intern devices rotate <device-id>`) replaces the current to
 
 #### Offline CLI operation
 
-All approval and device management commands operate directly against the local SQLite database. The HTTP service listener does not need to be running. This means:
+Approval commands operate directly against the local SQLite database. The HTTP service listener does not need to be running. This means:
 
 - `or3-intern approvals list/approve/deny` works without `or3-intern service`
-- `or3-intern devices list/revoke/rotate` works without `or3-intern service`
-- pairing requests created via the HTTP API can still be resolved offline via CLI
-
-When the HTTP service is not running, the exchange step (`/internal/v1/pairing/exchange`) is unavailable to remote clients. Remote clients must wait until the service restarts.
+- secure device enrollment requires the HTTP service to be running
 
 ### Startup validation
 

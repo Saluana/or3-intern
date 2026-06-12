@@ -11,69 +11,21 @@ const (
 )
 
 // BuiltinAccessProfiles returns the simple product-level access profiles used
-// by channel and device setup. Tool names use runner/service permission
-// language (e.g. "shell_exec" instead of "exec") so configs stay portable
-// across different runner backends. DeclaredTools is metadata only — the
-// runner enforces its own tool policy, this list is for visibility.
+// by channel and device setup.
 func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 	return map[string]AccessProfileConfig{
 		AccessLevelReader: {
 			MaxCapability: "safe",
-			DeclaredTools: []string{
-				"read_files",
-				"search_files",
-				"list_dirs",
-				"read_artifacts",
-				"memory_search",
-				"memory_recent",
-				"memory_get_pinned",
-			},
 			AllowedHosts:  []string{},
 			WritablePaths: []string{},
 		},
 		AccessLevelOperator: {
 			MaxCapability: "guarded",
-			DeclaredTools: []string{
-				"read_files",
-				"search_files",
-				"list_dirs",
-				"read_artifacts",
-				"write_files",
-				"edit_files",
-				"delete_files",
-				"memory_search",
-				"memory_recent",
-				"memory_get_pinned",
-				"web_search",
-				"web_fetch",
-				"web_fetch_markdown",
-				"shell_exec",
-			},
 			AllowedHosts:  []string{},
 			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},
 		AccessLevelAdmin: {
 			MaxCapability: "privileged",
-			DeclaredTools: []string{
-				"read_files",
-				"search_files",
-				"list_dirs",
-				"read_artifacts",
-				"write_files",
-				"edit_files",
-				"delete_files",
-				"memory_set_pinned",
-				"memory_add_note",
-				"memory_search",
-				"memory_recent",
-				"memory_get_pinned",
-				"web_search",
-				"web_fetch",
-				"web_fetch_markdown",
-				"shell_exec",
-				"send_messages",
-				"schedule_cron",
-			},
 			AllowedHosts:  []string{},
 			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},

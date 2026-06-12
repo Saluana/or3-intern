@@ -1,35 +1,17 @@
-# Runner-first execution
+# Runner-First Execution
 
-`or3-intern` is a runner-first host: external agent CLIs (OpenCode by default)
-execute turns while OR3 handles orchestration, memory, channels, approvals,
-artifacts, and persistence.
+External runners execute model reasoning, tool use, and workspace edits. OR3 handles orchestration, memory, channels, approvals, artifacts, secure connections, cron, and persistence.
 
-## What runs where
+## Turn Flow
 
-| Layer | Responsibility |
-| --- | --- |
-| **Runners** (OpenCode, Codex, Claude Code, Gemini) | Model reasoning, tools, workspace edits inside runner isolation |
-| **OR3** (`RunnerTurnOrchestrator`, `agentcli.ChatManager`) | Session keys, prompts, queueing, history, delivery, memory/doc context |
-| **Built-in `agent.Runtime`** | Compatibility only: doctor internal admin brain, tests, legacy tooling |
+1. Ingress arrives from CLI, service, channel, cron, heartbeat, webhook, or file-watch.
+2. `RunnerTurnOrchestrator` resolves runner, session, and trigger metadata.
+3. OR3 builds bounded trusted context and delimited user task text.
+4. `ChatManager.StartTurn` persists messages and enqueues a runner run.
+5. Runner events stream to runner event tables and mirror into messages.
+6. Memory consolidation reads persisted messages.
 
-## Turn flow
-
-1. Ingress (CLI, service, channel, cron bus event, heartbeat, webhook, file-watch)
-2. `RunnerTurnOrchestrator` resolves runner, session, and trigger metadata
-3. Bounded prompt built with trusted bootstrap blocks, memory/doc snippets, and delimited user task text
-4. `ChatManager.StartTurn` persists messages and enqueues `runner_runs`
-5. Runner events stream to `runner_events` / `runner_chat_events` and mirror into `messages`
-6. Memory consolidation continues from `messages` (including `transport=runner_chat`)
-
-## Default runner
-
-New configs set `runners.default=opencode`. Runner orchestration is always active — there is no `runners.enabled` toggle.
-
-- Override with `OR3_RUNNERS_DEFAULT`
-- `or3-intern health` / `doctor` report install/auth readiness for the default runner
-- Legacy `or3-intern` runner IDs in session metadata remain readable but are not selectable; new turns migrate to the configured default runner
-
-## Trusted prompt shape
+## Prompt Shape
 
 Runner prompts use explicit sections:
 
@@ -39,29 +21,6 @@ Runner prompts use explicit sections:
 <user_task>...</user_task>
 ```
 
-Bootstrap files (`SOUL.md`, `AGENTS.md`, `IDENTITY.md`, `MEMORY.md`, `TOOLS.md`) feed trusted instructions. `HEARTBEAT.md` is included only for autonomous triggers (heartbeat, cron, webhook, file-watch).
+## Cron Payloads
 
-## Context caching
-
-OR3 caches safe fragments (bootstrap file content by mtime/size, runner detection TTL). Approval tokens, secrets, and raw credentials are never cached. Provider-native prompt caching is not used for runner turns.
-
-## Cron payloads
-
-| Kind | Behavior |
-| --- | --- |
-| `runner_run` | Direct runner background job via `agentcli.Manager` |
-| Legacy scheduled chat payloads (`agent_turn` / `system_event`) | Published to the bus for runner chat; if not yet migrated, rejected with guidance to recreate as `runner_run` |
-
-## Related documentation
-
-- [Memory and context](memory-and-context.md)
-- [Configuration reference](configuration-reference.md)
-- [CLI reference](cli-reference.md)
-- [Migration: runner-first](migration-runner-first.md)
-
-## Related code
-
-- `internal/app/turn_orchestrator.go`
-- `internal/agentcli/chat_manager.go`
-- `cmd/or3-intern/main.go`
-- `internal/agent/QUARANTINE.md` (built-in runtime inventory)
+Scheduled runner work uses `runner_run`.

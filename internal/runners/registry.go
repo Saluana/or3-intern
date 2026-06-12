@@ -14,7 +14,7 @@ type runnerDetectCacheEntry struct {
 	refreshing bool
 }
 
-// AllRunners returns the standard runner specs for supported external CLIs.
+// AllRunners returns the standard runner specs for supported external runners.
 func AllRunners() []RunnerSpec {
 	return []RunnerSpec{
 		{

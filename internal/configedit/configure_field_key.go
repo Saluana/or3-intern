@@ -21,8 +21,8 @@ var configureFieldKeysByPath = map[string]string{
 	"service.enabled":                      "service_enabled",
 	"service.listen":                       "service_listen",
 	"service.secret":                       "service_secret",
-	"agentCLI.defaultRunner":               "agentCLI_default_runner",
-	"agentCLI.disabledRunners":             "agentCLI_disabled_runners",
+	"runner.defaultRunner":                 "runner_default_runner",
+	"runner.disabledRunners":               "runner_disabled_runners",
 	"context.taskCard.enabled":             "context_task_card_enabled",
 }
 

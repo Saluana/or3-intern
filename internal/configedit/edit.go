@@ -47,7 +47,6 @@ func ApplyProviderPreset(cfg *config.Config, choice string) {
 	if cfg.ModelRouting.Chat.Primary.Provider == "" || choice != "3" {
 		cfg.ModelRouting.Chat.Primary = config.ModelRef{Provider: providerKey, Model: preset.model}
 		cfg.ModelRouting.Summarization.Primary = cfg.ModelRouting.Chat.Primary
-		cfg.ModelRouting.ContextManager.Primary = cfg.ModelRouting.Chat.Primary
 		cfg.ModelRouting.Embeddings.Primary = config.ModelRef{Provider: providerKey, Model: preset.embedModel}
 	}
 	SetProviderProfileAPIBase(cfg, providerKey, preset.apiBase)
@@ -156,14 +155,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.ConsolidationEnabled = value
 	case "context_task_card_enabled":
 		cfg.Context.TaskCard.Enabled = value
-	case "context_manager_enabled":
-		cfg.ContextManager.Enabled = value
-	case "context_manager_allow_task_updates":
-		cfg.ContextManager.AllowTaskUpdates = value
-	case "context_manager_allow_stale_propose":
-		cfg.ContextManager.AllowStalePropose = value
-	case "docindex_enabled":
-		cfg.DocIndex.Enabled = value
 	case "skills_enable_exec":
 		cfg.Skills.EnableExec = value
 		if value {
@@ -177,8 +168,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Skills.Load.Watch = value
 	case "auth_enabled":
 		cfg.Auth.Enabled = value
-	case "auth_allow_paired_token_fallback":
-		cfg.Auth.AllowPairedTokenFallback = value
 	case "auth_require_passkey_for_sensitive":
 		cfg.Auth.RequirePasskeyForSensitive = value
 	case "security_secret_store_enabled":
@@ -597,16 +586,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "routing_summarization_fallbacks":
 		cfg.ModelRouting.Summarization.Fallbacks = parseModelRefs(value)
 		return true, nil
-	case "routing_context_provider":
-		cfg.ModelRouting.ContextManager.Primary.Provider = value
-		return true, nil
-	case "routing_context_model":
-		cfg.ModelRouting.ContextManager.Primary.Model = value
-		cfg.ContextManager.Model = value
-		return true, nil
-	case "routing_context_fallbacks":
-		cfg.ModelRouting.ContextManager.Fallbacks = parseModelRefs(value)
-		return true, nil
 	case "routing_embeddings_provider":
 		cfg.ModelRouting.Embeddings.Primary.Provider = value
 		return true, nil
@@ -728,20 +707,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Context.TaskCard.MaxPlanItems, value, fieldKey)
 	case "context_artifact_summary_chars":
 		return setIntValue(&cfg.Context.Artifacts.SummaryMaxChars, value, fieldKey)
-	case "context_manager_provider":
-		cfg.ContextManager.Provider = value
-		return true, nil
-	case "context_manager_model":
-		cfg.ContextManager.Model = value
-		return true, nil
-	case "context_manager_timeout":
-		return setIntValue(&cfg.ContextManager.TimeoutSeconds, value, fieldKey)
-	case "context_manager_idle_prune":
-		return setIntValue(&cfg.ContextManager.IdlePruneSeconds, value, fieldKey)
-	case "context_manager_max_input":
-		return setIntValue(&cfg.ContextManager.MaxInputTokens, value, fieldKey)
-	case "context_manager_max_output":
-		return setIntValue(&cfg.ContextManager.MaxOutputTokens, value, fieldKey)
 	case "workspace_dir":
 		cfg.WorkspaceDir = value
 		return true, nil
@@ -755,21 +720,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		}
 		cfg.Hardening.GuardedTools = enabled
 		return true, nil
-	case "docindex_roots":
-		cfg.DocIndex.Roots = splitAndCompact(value)
-		return true, nil
-	case "docindex_max_files":
-		return setIntValue(&cfg.DocIndex.MaxFiles, value, fieldKey)
-	case "docindex_max_file_bytes":
-		return setIntValue(&cfg.DocIndex.MaxFileBytes, value, fieldKey)
-	case "docindex_max_chunks":
-		return setIntValue(&cfg.DocIndex.MaxChunks, value, fieldKey)
-	case "docindex_embed_max_bytes":
-		return setIntValue(&cfg.DocIndex.EmbedMaxBytes, value, fieldKey)
-	case "docindex_refresh_seconds":
-		return setIntValue(&cfg.DocIndex.RefreshSeconds, value, fieldKey)
-	case "docindex_retrieve_limit":
-		return setIntValue(&cfg.DocIndex.RetrieveLimit, value, fieldKey)
 	case "skills_max_run_seconds":
 		return setIntValue(&cfg.Skills.MaxRunSeconds, value, fieldKey)
 	case "skills_managed_dir":

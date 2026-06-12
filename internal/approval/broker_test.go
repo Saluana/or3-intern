@@ -334,7 +334,7 @@ func TestBroker_ExchangePairingCodeAcceptsFormattedCode(t *testing.T) {
 	pairingReq, code, err := broker.CreatePairingRequest(context.Background(), PairingRequestInput{
 		Role:        RoleOperator,
 		DisplayName: "Phone",
-		Origin:      "connect-device",
+		Origin:      "secure-enrollment-test",
 	})
 	if err != nil {
 		t.Fatalf("CreatePairingRequest: %v", err)
@@ -594,8 +594,8 @@ func TestBroker_IsPairedChannelIdentity_FindsMatchBeyond200Rows(t *testing.T) {
 	broker, cleanup := newTestBroker(t, nil)
 	defer cleanup()
 
-	if _, _, err := broker.RotateDeviceToken(context.Background(), "legacy-device", RoleOperator, "Legacy Slack User", map[string]any{"channel": "slack", "identity": "U-old"}); err != nil {
-		t.Fatalf("RotateDeviceToken legacy: %v", err)
+	if _, _, err := broker.RotateDeviceToken(context.Background(), "channel-device", RoleOperator, "Slack User", map[string]any{"channel": "slack", "identity": "U-old"}); err != nil {
+		t.Fatalf("RotateDeviceToken channel device: %v", err)
 	}
 	for i := 0; i < 205; i++ {
 		if _, _, err := broker.RotateDeviceToken(context.Background(), filepath.Join("device", strconv.Itoa(i)), RoleOperator, "Noise", map[string]any{"channel": "slack", "identity": "noise"}); err != nil {

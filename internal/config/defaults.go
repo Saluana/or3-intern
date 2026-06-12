@@ -40,10 +40,6 @@ const (
 	defaultContextMaxInputTokens          = 16000
 	defaultContextOutputReserveTokens     = 1200
 	defaultContextSafetyMarginTokens      = 400
-	defaultContextManagerTimeoutSeconds   = 15
-	defaultContextManagerIdlePruneSeconds = 300
-	defaultContextManagerMaxInputTokens   = 1200
-	defaultContextManagerMaxOutputTokens  = 600
 	defaultEmailPollIntervalSeconds       = 30
 	defaultEmailMaxBodyChars              = 4000
 	defaultEmailSubjectPrefix             = "Re: "
@@ -102,7 +98,6 @@ func Default() Config {
 		ConsolidationMaxInputChars:       defaultConsolidationMaxInputChars,
 		ConsolidationAsyncTimeoutSeconds: defaultConsolidationAsyncTimeoutSecs,
 		Runners:                          defaultRunnersConfig(),
-		DocIndex:                         defaultDocIndexConfig(),
 		Skills:                           defaultSkillsConfig(home, root),
 		Triggers:                         defaultTriggerConfig(),
 		Session:                          defaultSessionConfig(),
@@ -121,9 +116,8 @@ func Default() Config {
 			TasksFile:       filepath.Join(root, "HEARTBEAT.md"),
 			SessionKey:      DefaultHeartbeatSessionKey,
 		},
-		Channels:       defaultChannelsConfig(),
-		Context:        defaultContextConfig(),
-		ContextManager: defaultContextManagerConfig(),
+		Channels: defaultChannelsConfig(),
+		Context:  defaultContextConfig(),
 	}
 }
 
@@ -148,10 +142,6 @@ func defaultRunnersConfig() RunnersConfig {
 		MaxPersistedOutputBytes:    10485760,
 		ChildEnvAllowlist:          append([]string{}, defaultChildEnvAllowlist...),
 	}
-}
-
-func defaultDocIndexConfig() DocIndexConfig {
-	return DocIndexConfig{Enabled: false, MaxFiles: 100, MaxFileBytes: 64 * 1024, MaxChunks: 500, EmbedMaxBytes: 8 * 1024, RefreshSeconds: 300, RetrieveLimit: 5}
 }
 
 func defaultSkillsConfig(home, root string) SkillsConfig {
@@ -201,9 +191,8 @@ func defaultAuthConfig() AuthConfig {
 		SessionIdleTTLSeconds:      defaultAuthSessionIdleTTLSeconds,
 		SessionAbsoluteTTLSeconds:  defaultAuthSessionAbsoluteTTLSeconds,
 		StepUpTTLSeconds:           defaultAuthStepUpTTLSeconds,
-		FallbackPolicy:             AuthFallbackPairedTokenPlusWarn,
+		FallbackPolicy:             AuthFallbackAdminRecoveryOnly,
 		EnforcementMode:            AuthEnforcementOff,
-		AllowPairedTokenFallback:   false,
 		RequirePasskeyForSensitive: true,
 	}
 }
@@ -245,10 +234,9 @@ func defaultProviderProfiles() ProviderProfiles {
 func defaultModelRoutingConfig() ModelRoutingConfig {
 	chat := ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIChatModel}}
 	return ModelRoutingConfig{
-		Chat:           chat,
-		Summarization:  chat,
-		ContextManager: chat,
-		Embeddings:     ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIEmbedModel}},
+		Chat:          chat,
+		Summarization: chat,
+		Embeddings:    ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIEmbedModel}},
 	}
 }
 
@@ -326,10 +314,6 @@ func defaultContextConfig() ContextConfig {
 		Artifacts: ContextArtifactConfig{SummaryMaxChars: 500},
 		TaskCard:  ContextTaskCardConfig{Enabled: true, MaxRefs: 12, MaxPlanItems: 8},
 	}
-}
-
-func defaultContextManagerConfig() ContextManagerConfig {
-	return ContextManagerConfig{Enabled: false, Provider: "", Model: "", TimeoutSeconds: defaultContextManagerTimeoutSeconds, IdlePruneSeconds: defaultContextManagerIdlePruneSeconds, MaxInputTokens: defaultContextManagerMaxInputTokens, MaxOutputTokens: defaultContextManagerMaxOutputTokens, AllowTaskUpdates: true, AllowStalePropose: true}
 }
 
 // DefaultPath returns the default on-disk config file path.

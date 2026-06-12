@@ -574,9 +574,6 @@ func TestWebEnrollmentRestrictionsAndPrivacyHelpers(t *testing.T) {
 	if expiresAt.After(now.Add(25 * time.Hour)) {
 		t.Fatalf("expected web enrollment expiry to be capped, got %s", expiresAt)
 	}
-	if LegacyPairingAllowedForRemote(true, false) {
-		t.Fatal("expected remote legacy pairing to require explicit override")
-	}
 	redacted := RedactSecureConnectionLogValue(map[string]any{
 		"route_id":        "route-1",
 		"pairing_secret":  "secret",
@@ -602,7 +599,7 @@ func TestWebEnrollmentRestrictionsAndPrivacyHelpers(t *testing.T) {
 		t.Fatalf("expected telemetry payload redaction, got %#v", event)
 	}
 	discovery := CurrentCapabilityDiscovery()
-	if !discovery.QRPairingV2 || !discovery.EnrollmentCertificates || discovery.LegacyPairingRemote {
+	if !discovery.QRPairingV2 || !discovery.EnrollmentCertificates {
 		t.Fatalf("unexpected discovery flags: %#v", discovery)
 	}
 }

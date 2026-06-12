@@ -32,10 +32,8 @@ var rootHelpSections = []struct {
 			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
 			{Name: "chat", Description: "Start chatting with OR3"},
 			{Name: "health", Description: "Check if OR3 is ready to work"},
-			{Name: "pair --auto", Description: "Pair a device with automatic readiness checks"},
 			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
 			{Name: "settings", Description: "Review and update your settings"},
-			{Name: "connect-device", Description: "Start the device pairing flow"},
 			{Name: "help", Description: "Show help for simple or advanced commands"},
 		},
 	},
@@ -63,8 +61,6 @@ var rootHelpSections = []struct {
 			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
 			{Name: "skills", Description: "List, inspect, search, install, update, check, and remove skills"},
 			{Name: "approvals", Description: "Inspect and resolve approval requests and allowlists"},
-			{Name: "devices", Description: "List and manage already paired devices"},
-			{Name: "pairing", Description: "Manage first-class pairing workflows"},
 			{Name: "scope", Description: "Link session keys to a shared history scope"},
 			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
 			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
@@ -121,15 +117,6 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--fix <number|all|finding-id>", Description: "Apply a safe automatic repair"},
 		},
 		Examples: []string{"or3-intern status", "or3-intern status --fix 1", "or3-intern status --fix all"},
-	},
-	"connect-device": {
-		Usage:   "or3-intern connect-device [list|disconnect <device-id> [--force]|role <device-id>]",
-		Summary: "Start the device pairing flow with a short code and simple access levels.",
-		Description: []string{
-			"Use connect-device when you are sitting at this computer and want to add a phone, browser, or app.",
-			"For app-generated codes, use `or3-intern pairing approve-code <code>`. For already connected devices, use `or3-intern devices list`.",
-		},
-		Examples: []string{"or3-intern connect-device", "or3-intern connect-device list"},
 	},
 	"init": {
 		Usage:   "or3-intern init",
@@ -326,77 +313,6 @@ var helpTopics = map[string]helpCommand{
 		},
 		Examples: []string{"or3-intern approvals allowlist add --domain exec --program /usr/bin/git", "or3-intern approvals allowlist add --domain skill_execution --skill demo --version 1.0.0"},
 	},
-	"devices": {
-		Usage:   "or3-intern devices <list|requests|approve|deny|rotate|revoke> ...",
-		Summary: "List and manage already paired devices.",
-		Description: []string{
-			"Use `devices list` after pairing is complete to review, rotate, or revoke connected phones, tablets, browsers, or apps.",
-			"Use `or3-intern connect-device` to start a pairing flow from this computer, or `or3-intern pairing approve-code <code>` when the app already shows a code.",
-		},
-		Subcommands: []helpItem{
-			{Name: "list", Description: "List paired devices"},
-			{Name: "requests [status]", Description: "List pairing requests, optionally filtered by status"},
-			{Name: "approve <pairing-request-id>", Description: "Approve a pairing request"},
-			{Name: "deny <pairing-request-id>", Description: "Deny a pairing request"},
-			{Name: "rotate <device-id>", Description: "Rotate a device token and print the new token"},
-			{Name: "revoke <device-id> [--force]", Description: "Revoke a paired device immediately"},
-		},
-		Examples: []string{"or3-intern devices list", "or3-intern devices rotate dev_123"},
-	},
-	"pairing": {
-		Usage:   "or3-intern pairing <list|request|approve-code|approve|deny|exchange> ...",
-		Summary: "Manage first-class pairing workflows, including channel-bound identities.",
-		Description: []string{
-			"Use this when the OR3 app or another device asks to connect.",
-			"Easiest browser/app approval flow:",
-			"1) In the app, tap 'Get pairing code'.",
-			"2) On the computer, run `or3-intern pairing approve-code 123456` using the code shown in the app.",
-			"3) Go back to the app. It should finish connecting by itself.",
-			"Advanced fallback: run `or3-intern pairing list pending`, then `or3-intern pairing approve <request-id>`.",
-		},
-		Subcommands: []helpItem{
-			{Name: "list [status]", Description: "List pairing requests"},
-			{Name: "request [flags]", Description: "Create a pairing request"},
-			{Name: "approve-code <6-digit-code>", Description: "Approve the waiting device using the code shown in the app"},
-			{Name: "approve <request-id>", Description: "Approve a pairing request"},
-			{Name: "deny <request-id>", Description: "Deny a pairing request"},
-			{Name: "exchange <request-id> <code>", Description: "Exchange a pairing code for a device token"},
-		},
-		Examples: []string{"or3-intern pairing approve-code 123456", "or3-intern pairing list pending", "or3-intern pairing approve 12", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
-	},
-	"pairing request": {
-		Usage:   "or3-intern pairing request [--role role] [--name text] [--origin text] [--device id] [--channel name --identity id]",
-		Summary: "Create a new pairing request.",
-		Flags: []helpItem{
-			{Name: "--role <role>", Description: "Device role; defaults to operator"},
-			{Name: "--name <text>", Description: "Display name"},
-			{Name: "--origin <text>", Description: "Origin description"},
-			{Name: "--device <id>", Description: "Explicit device ID"},
-			{Name: "--channel <name>", Description: "Channel name to bind"},
-			{Name: "--identity <id>", Description: "Channel identity to bind"},
-		},
-		Examples: []string{"or3-intern pairing request --name \"Laptop\"", "or3-intern pairing request --channel slack --identity U42 --name \"Slack User\""},
-	},
-	"pair": {
-		Usage:   "or3-intern pair --auto [--name device-name] [--role viewer|operator|admin]",
-		Summary: "Pair a device with automatic readiness checks.",
-		Description: []string{
-			"Pair is the normal device pairing command. It checks readiness, applies safe fixes, and creates a pairing code.",
-			"Use --auto to run the automatic pairing flow with health checks.",
-			"Use --manual to fall back to the legacy connect-device flow.",
-			"Use --name to set the device display name.",
-			"Use --role to set the device access level: viewer, operator, or admin.",
-		},
-		Flags: []helpItem{
-			{Name: "--auto", Description: "Run automatic pairing with readiness checks"},
-			{Name: "--name <name>", Description: "Device display name"},
-			{Name: "--role <role>", Description: "Device role: viewer, operator, admin"},
-			{Name: "--manual", Description: "Use manual pairing flow"},
-			{Name: "--json", Description: "Emit JSON output"},
-			{Name: "--no-fix", Description: "Skip automatic fixes"},
-		},
-		Examples: []string{"or3-intern pair --auto", "or3-intern pair --auto --name \"Brendon's iPhone\"", "or3-intern pair --auto --role operator"},
-	},
 	"skills": {
 		Usage:   "or3-intern skills <list|info|check|search|install|update|remove> ...",
 		Summary: "List, inspect, search, install, update, check, and remove skills.",
@@ -587,7 +503,7 @@ func printRootHelpMode(w io.Writer) {
 	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Accepted for compatibility; root help is always complete"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern health", "or3-intern status", "or3-intern connect-device"} {
+	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern health", "or3-intern status", "or3-intern settings"} {
 		_, _ = fmt.Fprintf(w, "  %s\n", example)
 	}
 }

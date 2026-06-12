@@ -7,11 +7,11 @@ import (
 	"or3-intern/internal/config"
 )
 
-func TestDetectAgentCLIRunnersWithoutManager(t *testing.T) {
-	svc := NewServiceAppWithAgentCLI(config.Default(), nil, nil, nil)
-	runners, err := svc.DetectAgentCLIRunners(context.Background())
+func TestDetectRunnerRunnersWithoutManager(t *testing.T) {
+	svc := NewServiceAppWithRunner(config.Default(), nil, nil, nil)
+	runners, err := svc.DetectRunnerRunners(context.Background())
 	if err != nil {
-		t.Fatalf("DetectAgentCLIRunners: %v", err)
+		t.Fatalf("DetectRunnerRunners: %v", err)
 	}
 	if len(runners) == 0 {
 		t.Fatal("expected default registry to detect at least one runner without manager")

@@ -12,7 +12,7 @@ import (
 )
 
 func startMemoryConsolidation(ctx context.Context, cfg config.Config, d *db.DB, del *cli.Deliverer) (*memory.Consolidator, *memory.Scheduler) {
-	if !cfg.ConsolidationEnabled && !cfg.ContextManager.Enabled {
+	if !cfg.ConsolidationEnabled {
 		return nil, nil
 	}
 	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)

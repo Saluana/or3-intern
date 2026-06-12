@@ -14,7 +14,7 @@ import (
 
 func openChatManagerTestDB(t *testing.T) *db.DB {
 	t.Helper()
-	return openAgentCLITestDB(t)
+	return openRunnerTestDB(t)
 }
 
 func testChatManager(database *db.DB) *ChatManager {

@@ -15,7 +15,6 @@ type CapabilityDiscovery struct {
 	RelayRendezvous           bool     `json:"relay_rendezvous"`
 	EnrollmentCertificates    bool     `json:"enrollment_certificates"`
 	SecureFrames              bool     `json:"secure_frames"`
-	LegacyPairingRemote       bool     `json:"legacy_pairing_remote"`
 	Capabilities              []string `json:"capabilities"`
 }
 
@@ -46,7 +45,6 @@ func CurrentCapabilityDiscovery() CapabilityDiscovery {
 		RelayRendezvous:           true,
 		EnrollmentCertificates:    true,
 		SecureFrames:              true,
-		LegacyPairingRemote:       false,
 		Capabilities:              []string{CapabilityChat, CapabilityFiles, CapabilityTerminal, CapabilityTools, CapabilityDevices},
 	}
 }
@@ -134,13 +132,6 @@ func IsSensitiveLogKey(key string) bool {
 		}
 	}
 	return false
-}
-
-func LegacyPairingAllowedForRemote(remote bool, explicitOverride bool) bool {
-	if remote && !explicitOverride {
-		return false
-	}
-	return true
 }
 
 func stringField(fields map[string]any, key string) string {

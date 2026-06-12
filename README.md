@@ -72,8 +72,8 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 ## Core features
 
 - Runner-first execution (OpenCode by default) with OR3 orchestration for CLI, service, channels, and automation
-- External runners: OpenCode, Codex, Claude Code, Gemini (`agentCLI.defaultRunner`)
-- SQLite-backed history with hybrid memory retrieval and document indexing
+- External runners: OpenCode, Codex, Claude Code, Gemini (`runners.default`)
+- SQLite-backed history with hybrid memory retrieval
 - Connected apps for Telegram, Slack, Discord, Email, and a local WhatsApp bridge
 - ClawHub/OpenClaw-compatible skills with trust and quarantine controls
 - Webhook, file-watch, heartbeat, and cron-based automation
@@ -88,10 +88,8 @@ Root help shows the full command catalog by default:
 - `or3-intern setup` guided first-run setup using scenario and safety choices
 - `or3-intern chat` interactive CLI
 - `or3-intern health [--check|--fix|--json]` normal readiness checks and safe repairs
-- `or3-intern pair --auto [--name ...] [--role viewer|operator|admin]` pair a phone or other device with readiness checks
 - `or3-intern status [--advanced]` plain-language safety and access summary
 - `or3-intern settings [--section ...] [--export path|-]` review setup, jump to focused task sections, or export config
-- `or3-intern connect-device [list|disconnect <device-id>|role <device-id>]` legacy/manual computer-started pairing flow and device shortcuts
 - `or3-intern configure [--section ...]` interactive setup and reconfiguration wizard
 - `or3-intern init` guided first-run setup
 - `or3-intern config-path` print the resolved config.json path

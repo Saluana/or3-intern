@@ -17,7 +17,6 @@ import (
 	"or3-intern/internal/jobs"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 )
 
@@ -55,7 +54,6 @@ type ApprovalFilter struct {
 type CapabilitiesProfileSummary struct {
 	Name          string   `json:"name,omitempty"`
 	MaxCapability string   `json:"maxCapability,omitempty"`
-	DeclaredTools []string `json:"declaredTools,omitempty"`
 	AllowedHosts  []string `json:"allowedHosts,omitempty"`
 	WritablePaths []string `json:"writablePaths,omitempty"`
 }
@@ -106,8 +104,6 @@ type EmbeddingStatusReport struct {
 	MemoryVectorDims         int    `json:"memoryVectorDims"`
 	StoredEmbedFingerprint   string `json:"storedEmbedFingerprint,omitempty"`
 	CurrentEmbedFingerprint  string `json:"currentEmbedFingerprint,omitempty"`
-	DocIndexEnabled          bool   `json:"docIndexEnabled"`
-	DocRootsConfigured       bool   `json:"docRootsConfigured"`
 	NoteCount                int    `json:"noteCount"`
 	EmbeddedNoteCount        int    `json:"embeddedNoteCount"`
 	VectorRowCount           int    `json:"vectorRowCount"`
@@ -412,8 +408,6 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatusReport
 		MemoryVectorDims:         dims,
 		StoredEmbedFingerprint:   storedFingerprint,
 		CurrentEmbedFingerprint:  currentFingerprint,
-		DocIndexEnabled:          s.Config.DocIndex.Enabled,
-		DocRootsConfigured:       len(s.Config.DocIndex.Roots) > 0,
 		NoteCount:                health.NoteCount,
 		EmbeddedNoteCount:        health.EmbeddedNoteCount,
 		VectorRowCount:           health.VectorRowCount,
@@ -713,28 +707,7 @@ func rebuildMemoryEmbeddings(ctx context.Context, database *db.DB, provider *pro
 }
 
 func rebuildDocEmbeddings(ctx context.Context, cfg config.Config, database *db.DB, provider *providers.Client, fingerprint string) (bool, []string, error) {
-	if !cfg.DocIndex.Enabled {
-		return false, []string{"doc_index_disabled"}, nil
-	}
-	if len(cfg.DocIndex.Roots) == 0 {
-		return false, []string{"doc_index_no_roots"}, nil
-	}
-	indexer := &memory.DocIndexer{
-		DB: database,
-		Config: memory.DocIndexConfig{
-			Roots:          cfg.DocIndex.Roots,
-			MaxFiles:       cfg.DocIndex.MaxFiles,
-			MaxFileBytes:   cfg.DocIndex.MaxFileBytes,
-			MaxChunks:      cfg.DocIndex.MaxChunks,
-			EmbedMaxBytes:  cfg.DocIndex.EmbedMaxBytes,
-			RefreshSeconds: cfg.DocIndex.RefreshSeconds,
-			RetrieveLimit:  cfg.DocIndex.RetrieveLimit,
-		},
-	}
-	if err := indexer.SyncRoots(ctx, scope.GlobalMemoryScope); err != nil {
-		return false, nil, err
-	}
-	return true, nil, nil
+	return false, []string{"doc_rebuild_unavailable"}, nil
 }
 
 func CollectCapabilitiesReport(cfg config.Config, broker *approval.Broker, channelFilter, triggerFilter string) CapabilitiesReport {
@@ -863,8 +836,6 @@ func effectiveProfileSummary(cfg config.Config, name string) *CapabilitiesProfil
 	if !ok {
 		return &CapabilitiesProfileSummary{Name: name}
 	}
-	declaredTools := append([]string{}, profile.DeclaredTools...)
-	sort.Strings(declaredTools)
 	allowedHosts := append([]string{}, profile.AllowedHosts...)
 	sort.Strings(allowedHosts)
 	writablePaths := append([]string{}, profile.WritablePaths...)
@@ -872,7 +843,6 @@ func effectiveProfileSummary(cfg config.Config, name string) *CapabilitiesProfil
 	return &CapabilitiesProfileSummary{
 		Name:          name,
 		MaxCapability: strings.TrimSpace(profile.MaxCapability),
-		DeclaredTools: declaredTools,
 		AllowedHosts:  allowedHosts,
 		WritablePaths: writablePaths,
 	}
@@ -979,7 +949,7 @@ func BuildRunnerRunResponse(run db.RunnerRun) map[string]any {
 	out := map[string]any{
 		"job_id":             run.JobID,
 		"run_id":             run.ID,
-		"kind":               "agent_cli:" + run.RunnerID,
+		"kind":               "runner:" + run.RunnerID,
 		"runner_id":          run.RunnerID,
 		"parent_session_key": run.ParentSessionKey,
 		"task":               displayTask,

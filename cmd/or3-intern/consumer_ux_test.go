@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,9 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
-	"or3-intern/internal/db"
 	intdoctor "or3-intern/internal/doctor"
 	"or3-intern/internal/safetymode"
 	"or3-intern/internal/uxstate"
@@ -439,97 +436,5 @@ func TestParseStatusArgs_AcceptsSubcommandAdvancedFlag(t *testing.T) {
 	}
 	if !detailed {
 		t.Fatal("expected detailed status output")
-	}
-}
-
-func TestRunConnectDeviceCommand_RejectsUnknownSubcommand(t *testing.T) {
-	err := runConnectDeviceCommand(context.Background(), "", &config.Config{}, nil, nil, []string{"lisst"}, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("expected unknown subcommand error")
-	}
-	if !strings.Contains(err.Error(), "usage: connect-device") {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-}
-
-func TestConnectDeviceListShowsFriendlyActions(t *testing.T) {
-	tmp := t.TempDir()
-	database, err := db.Open(filepath.Join(tmp, "devices.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	if _, _, err := (&approval.Broker{DB: database, Config: config.Default().Security.Approvals, HostID: "test", SignKey: []byte("0123456789abcdef0123456789abcdef")}).RotateDeviceToken(context.Background(), "device-1", approval.RoleOperator, "Phone", nil); err != nil {
-		t.Fatalf("RotateDeviceToken: %v", err)
-	}
-	var out bytes.Buffer
-	if err := runConnectDeviceList(context.Background(), database, &out); err != nil {
-		t.Fatalf("runConnectDeviceList: %v", err)
-	}
-	text := out.String()
-	for _, want := range []string{"Phone", "Chat and workspace files", "Last used:", "Change access:", "Disconnect:"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("expected %q in output: %s", want, text)
-		}
-	}
-}
-
-func TestConnectDeviceRoleChangesAccess(t *testing.T) {
-	tmp := t.TempDir()
-	database, err := db.Open(filepath.Join(tmp, "devices.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	broker := &approval.Broker{DB: database, Config: config.Default().Security.Approvals, HostID: "test", SignKey: []byte("0123456789abcdef0123456789abcdef")}
-	if _, _, err := broker.RotateDeviceToken(context.Background(), "device-1", approval.RoleViewer, "Phone", nil); err != nil {
-		t.Fatalf("RotateDeviceToken: %v", err)
-	}
-	var out bytes.Buffer
-	if err := runConnectDeviceRole(context.Background(), database, broker, "device-1", bufio.NewReader(strings.NewReader("2\n")), &out); err != nil {
-		t.Fatalf("runConnectDeviceRole: %v", err)
-	}
-	device, err := database.GetPairedDevice(context.Background(), "device-1")
-	if err != nil {
-		t.Fatalf("GetPairedDevice: %v", err)
-	}
-	if device.Role != approval.RoleOperator {
-		t.Fatalf("expected operator role, got %q", device.Role)
-	}
-	if !strings.Contains(out.String(), "Chat and workspace files") {
-		t.Fatalf("expected friendly role output, got %s", out.String())
-	}
-}
-
-func TestEnsureConnectDevicePrereqsRepairsConfig(t *testing.T) {
-	tmp := t.TempDir()
-	cfgPath := filepath.Join(tmp, "config.json")
-	cfg := seedConsumerConfig(t, cfgPath, tmp)
-	cfg.Service.Enabled = false
-	cfg.Service.Secret = ""
-	cfg.Security.Approvals.Enabled = false
-	cfg.Security.Approvals.Pairing.Mode = config.ApprovalModeDeny
-	if err := config.Save(cfgPath, cfg); err != nil {
-		t.Fatalf("config.Save: %v", err)
-	}
-	database, err := db.Open(filepath.Join(tmp, "devices.db"))
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	if _, err := ensureConnectDevicePrereqs(cfgPath, &cfg, database, nil); err != nil {
-		t.Fatalf("ensureConnectDevicePrereqs: %v", err)
-	}
-	if !cfg.Service.Enabled || strings.TrimSpace(cfg.Service.Secret) == "" || !cfg.Security.Approvals.Enabled || cfg.Security.Approvals.Pairing.Mode != config.ApprovalModeAsk {
-		t.Fatalf("expected repaired config, got %#v", cfg)
-	}
-	if _, err := os.Stat(cfg.Security.Approvals.KeyFile); err != nil {
-		t.Fatalf("expected approval key: %v", err)
-	}
-}
-
-func TestFormatPairingCode(t *testing.T) {
-	if got := formatPairingCode("123456"); got != "123-456" {
-		t.Fatalf("unexpected formatted code: %q", got)
 	}
 }

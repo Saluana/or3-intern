@@ -21,12 +21,12 @@ import (
 )
 
 const (
-	agentCLIClaimRetryDelay = 25 * time.Millisecond
-	agentCLIFinalizeTimeout = 5 * time.Second
-	agentCLIDetectCacheTTL  = 30 * time.Second
+	runnerClaimRetryDelay = 25 * time.Millisecond
+	runnerFinalizeTimeout = 5 * time.Second
+	runnerDetectCacheTTL  = 30 * time.Second
 )
 
-// Manager queues and runs external agent CLI jobs.
+// Manager queues and runs external runner jobs.
 type Manager struct {
 	DB       *db.DB
 	Jobs     *jobs.Registry
@@ -59,10 +59,10 @@ type Manager struct {
 // Start launches the background workers and resumes queued jobs.
 func (m *Manager) Start(ctx context.Context) error {
 	if m == nil {
-		return fmt.Errorf("agent CLI manager is nil")
+		return fmt.Errorf("runner manager is nil")
 	}
 	if m.DB == nil {
-		return fmt.Errorf("agent CLI db not configured")
+		return fmt.Errorf("runner db not configured")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -151,7 +151,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// Best-effort native runtime shutdown. Use a bounded timeout so a
 	// stuck managed process doesn't block the service indefinitely.
 	if runtimes != nil {
-		stopCtx, cancelStop := context.WithTimeout(context.Background(), agentCLIFinalizeTimeout)
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), runnerFinalizeTimeout)
 		defer cancelStop()
 		runtimes.ForEach(func(runtime NativeRunnerRuntime) {
 			if err := runtime.Stop(stopCtx); err != nil && firstErr == nil {
@@ -162,10 +162,10 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return firstErr
 }
 
-// Enqueue validates, persists, and signals a new CLI run.
+// Enqueue validates, persists, and signals a new runner run.
 func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerRun, error) {
 	if m == nil || m.DB == nil {
-		return db.RunnerRun{}, fmt.Errorf("agent CLI manager is not available")
+		return db.RunnerRun{}, fmt.Errorf("runner manager is not available")
 	}
 	cfg := m.configSnapshot()
 	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
@@ -204,7 +204,7 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 			return db.RunnerRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
 		}
 		detectOpts := m.detectOptions(cfg)
-		if info, ok := m.Registry.DetectCached(RunnerID(runnerID), agentCLIDetectCacheTTL); ok {
+		if info, ok := m.Registry.DetectCached(RunnerID(runnerID), runnerDetectCacheTTL); ok {
 			switch info.Status {
 			case RunnerStatusDisabledByConfig:
 				return db.RunnerRun{}, fmt.Errorf("runner %q is disabled by config", runnerID)
@@ -230,13 +230,13 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 	}
 
 	// Resolve and validate cwd against allowed root
-	cwd, err := resolveAgentCLICwd(req.Cwd, m.RestrictDir)
+	cwd, err := resolveRunnerCwd(req.Cwd, m.RestrictDir)
 	if err != nil {
 		return db.RunnerRun{}, fmt.Errorf("invalid cwd: %w", err)
 	}
 
-	jobID := newAgentCLIJobID()
-	runID := "acr_" + newAgentCLIJobID()[:16]
+	jobID := newRunnerJobID()
+	runID := "rr_" + newRunnerJobID()[:16]
 
 	metaJSON := "{}"
 	combined := make(map[string]any, len(req.Meta)+2)
@@ -278,7 +278,7 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 		return db.RunnerRun{}, err
 	}
 
-	kind := "agent_cli:" + runnerID
+	kind := "runner:" + runnerID
 	if m.Jobs != nil {
 		m.Jobs.RegisterWithID(jobID, kind)
 		m.Jobs.Publish(jobID, "queued", map[string]any{
@@ -294,10 +294,10 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 	return run, nil
 }
 
-// Abort cancels the running or queued agent CLI job with id.
+// Abort cancels the running or queued runner job with id.
 func (m *Manager) Abort(ctx context.Context, id string) error {
 	if m == nil || m.DB == nil {
-		return fmt.Errorf("agent CLI manager is not available")
+		return fmt.Errorf("runner manager is not available")
 	}
 	if m.Runtimes != nil {
 		m.Runtimes.ForEach(func(runtime NativeRunnerRuntime) {
@@ -341,11 +341,11 @@ func (m *Manager) workerLoop() {
 	for {
 		ran, err := m.runOnce()
 		if err != nil {
-			if agentCLIDatabaseClosed(err) {
+			if runnerDatabaseClosed(err) {
 				return
 			}
 			if !errors.Is(err, context.Canceled) {
-				log.Printf("agent CLI worker error: %v", err)
+				log.Printf("runner worker error: %v", err)
 			}
 		}
 		if ran {
@@ -355,12 +355,12 @@ func (m *Manager) workerLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-m.notifyCh:
-		case <-time.After(agentCLIClaimRetryDelay):
+		case <-time.After(runnerClaimRetryDelay):
 		}
 	}
 }
 
-func agentCLIDatabaseClosed(err error) bool {
+func runnerDatabaseClosed(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -443,7 +443,7 @@ func (m *Manager) executeRun(run db.RunnerRun) {
 	// Build child environment — use os.Environ() as the base so PATH, HOME,
 	// and TMPDIR are preserved through the allowlist filter.
 	if len(cmdSpec.Env) == 0 {
-		cmdSpec.Env = BuildAgentCLIEnv(os.Environ(), m.configSnapshot().ChildEnvAllowlist, additionalEnv)
+		cmdSpec.Env = BuildRunnerEnv(os.Environ(), m.configSnapshot().ChildEnvAllowlist, additionalEnv)
 	} else if len(additionalEnv) > 0 {
 		cmdSpec.Env = mergeEnvOverlay(cmdSpec.Env, additionalEnv)
 	}
@@ -658,8 +658,8 @@ func (m *Manager) emitCompletionWithSeq(run db.RunnerRun, finalStatus string, ou
 
 func (m *Manager) recoverRunPanic(run db.RunnerRun) {
 	if recovered := recover(); recovered != nil {
-		log.Printf("agent CLI worker recovered panic: run=%s err=%v", run.ID, recovered)
-		m.finalizeRun(context.Background(), run, db.RunnerRunStatusFailed, "agent CLI worker recovered after an internal failure", ProcessOutput{ExitCode: -1})
+		log.Printf("runner worker recovered panic: run=%s err=%v", run.ID, recovered)
+		m.finalizeRun(context.Background(), run, db.RunnerRunStatusFailed, "runner worker recovered after an internal failure", ProcessOutput{ExitCode: -1})
 	}
 }
 
@@ -679,7 +679,7 @@ func (m *Manager) pauseRunForNativeApproval(run db.RunnerRun, out ProcessOutput)
 // approval. The underlying runner_runs row must still be running.
 func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.RunnerRun) error {
 	if m == nil {
-		return errors.New("agent CLI manager not configured")
+		return errors.New("runner manager not configured")
 	}
 	chatReq, ok := buildRuntimeChatRequest(run)
 	if !ok {
@@ -748,7 +748,7 @@ func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.Runne
 }
 
 func (m *Manager) finalizeRun(ctx context.Context, run db.RunnerRun, status, errMsg string, out ProcessOutput) {
-	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCLIFinalizeTimeout)
+	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runnerFinalizeTimeout)
 	defer cancel()
 	cfg := m.configSnapshot()
 
@@ -762,7 +762,7 @@ func (m *Manager) finalizeRun(ctx context.Context, run db.RunnerRun, status, err
 		CompletedAt:      db.NowMS(),
 	}
 	if err := m.DB.FinalizeRunnerRun(finalizeCtx, run.ID, fin); err != nil {
-		log.Printf("finalize agent CLI run failed: run=%s err=%v", run.ID, err)
+		log.Printf("finalize runner run failed: run=%s err=%v", run.ID, err)
 		return
 	}
 	if m.Jobs != nil {
@@ -957,12 +957,12 @@ func firstNonEmptyStringMeta(meta map[string]any, key string, fallback string) s
 	return strings.TrimSpace(fallback)
 }
 
-func newAgentCLIJobID() string {
+func newRunnerJobID() string {
 	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("job-agentcli-%d", time.Now().UnixNano())
+		return fmt.Sprintf("job-runner-%d", time.Now().UnixNano())
 	}
-	return "job-agentcli-" + hex.EncodeToString(raw[:])
+	return "job-runner-" + hex.EncodeToString(raw[:])
 }
 
 func truncateString(s string, maxBytes int) string {
@@ -1036,7 +1036,7 @@ func (m *Manager) detectOptions(cfg config.RunnersConfig) DetectOptions {
 	}
 	return DetectOptions{
 		DisabledRunners: cfg.Disabled,
-		Env:             BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, additionalEnv),
+		Env:             BuildRunnerEnv(os.Environ(), cfg.ChildEnvAllowlist, additionalEnv),
 	}
 }
 

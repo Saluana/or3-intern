@@ -7,7 +7,7 @@ import (
 
 func TestDefaultRunnerNotesDescribeRunnerFirstBehavior(t *testing.T) {
 	for _, want := range []string{
-		"external agent CLI",
+		"external runner",
 		"runner's native",
 		"memory bridge",
 	} {

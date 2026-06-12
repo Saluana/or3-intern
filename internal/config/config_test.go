@@ -294,7 +294,7 @@ func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
 		SessionIdleTTLSeconds:     300,
 		SessionAbsoluteTTLSeconds: 3600,
 		StepUpTTLSeconds:          120,
-		FallbackPolicy:            AuthFallbackPairedTokenPlusWarn,
+		FallbackPolicy:            AuthFallbackAdminRecoveryOnly,
 		EnforcementMode:           AuthEnforcementWarn,
 	}
 	tests := []struct {
@@ -812,30 +812,6 @@ func TestLoad_ValidFile(t *testing.T) {
 	}
 	if cfg.Provider.EnableVision {
 		t.Error("expected missing EnableVision to default to false")
-	}
-}
-
-func TestLoad_DocIndexEnabledWithoutRootsDefaultsToWorkspace(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	workspace := filepath.Join(dir, "workspace")
-
-	input := Config{
-		WorkspaceDir: workspace,
-		DocIndex: DocIndexConfig{
-			Enabled: true,
-		},
-	}
-	b, _ := json.MarshalIndent(input, "", "  ")
-	mustWriteTestFile(t, path, b)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(cfg.DocIndex.Roots) != 1 || cfg.DocIndex.Roots[0] != workspace {
-		t.Fatalf("expected doc index root to default to workspace %q, got %#v", workspace, cfg.DocIndex.Roots)
 	}
 }
 
@@ -1644,8 +1620,6 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	cfg.Context.Pressure.WarningPercent = 0
 	cfg.Context.Pressure.HighPercent = 10
 	cfg.Context.Pressure.EmergencyPercent = 20
-	cfg.ContextManager.TimeoutSeconds = 0
-	cfg.ContextManager.IdlePruneSeconds = 0
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -1675,53 +1649,7 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	if got.Context.Pressure.WarningPercent <= 0 || got.Context.Pressure.HighPercent <= got.Context.Pressure.WarningPercent || got.Context.Pressure.EmergencyPercent <= got.Context.Pressure.HighPercent {
 		t.Fatalf("unexpected pressure thresholds: %+v", got.Context.Pressure)
 	}
-	if got.ContextManager.TimeoutSeconds <= 0 {
-		t.Fatalf("expected context manager timeout default, got %+v", got.ContextManager)
-	}
-	if got.ContextManager.IdlePruneSeconds != 300 {
-		t.Fatalf("expected context manager idle prune default, got %+v", got.ContextManager)
-	}
 	if !got.ContextConfigured {
 		t.Fatalf("expected context block written by Save(Default()) to be treated as configured")
-	}
-}
-
-func TestLoad_LegacyConfigWithoutContextBlockPreservesLegacyMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	raw := `{
-	  "historyMaxMessages": 17,
-	  "memoryRetrieveLimit": 9,
-	  "vectorSearchK": 11,
-	  "ftsSearchK": 12,
-	  "bootstrapMaxChars": 1234,
-	  "bootstrapTotalMaxChars": 5678,
-	  "maxToolBytes": 4321,
-	  "provider": {"apiBase": "https://api.openai.com/v1", "model": "gpt-4.1-mini"},
-	  "tools": {},
-	  "hardening": {},
-	  "skills": {},
-	  "triggers": {},
-	  "heartbeat": {},
-	  "cron": {},
-	  "service": {},
-	  "channels": {},
-	  "security": {},
-	  "docIndex": {},
-	  "subagents": {},
-	  "session": {}
-	}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got.ContextConfigured {
-		t.Fatalf("expected legacy config without context block to leave ContextConfigured=false")
-	}
-	if got.HistoryMax != 17 || got.MemoryRetrieve != 9 || got.VectorK != 11 || got.FTSK != 12 || got.BootstrapMaxChars != 1234 || got.BootstrapTotalMaxChars != 5678 || got.MaxToolBytes != 4321 {
-		t.Fatalf("expected legacy runtime knobs preserved, got %+v", got)
 	}
 }

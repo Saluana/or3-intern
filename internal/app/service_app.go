@@ -32,10 +32,10 @@ type ServiceApp struct {
 }
 
 func NewServiceApp(cfg config.Config, jobs *jobs.Registry, control *controlplane.Service) *ServiceApp {
-	return NewServiceAppWithAgentCLI(cfg, jobs, nil, control)
+	return NewServiceAppWithRunner(cfg, jobs, nil, control)
 }
 
-func NewServiceAppWithAgentCLI(cfg config.Config, jobs *jobs.Registry, runnerManager *runners.Manager, control *controlplane.Service) *ServiceApp {
+func NewServiceAppWithRunner(cfg config.Config, jobs *jobs.Registry, runnerManager *runners.Manager, control *controlplane.Service) *ServiceApp {
 	return NewServiceAppWithRunnerTurns(cfg, jobs, runnerManager, nil, control)
 }
 
@@ -67,19 +67,6 @@ func (a *ServiceApp) SetRunnerRuntime(runnerManager *runners.Manager, turnOrches
 	}
 	a.runnerManager = runnerManager
 	a.turnOrchestrator = turnOrchestrator
-}
-
-// DetectRunnerRunners returns a snapshot of available external runners, using
-// the runner manager's registry when one is attached. Returns an empty slice
-// when the runner host is not configured.
-func (a *ServiceApp) DetectRunnerRunners(ctx context.Context) ([]runners.RunnerInfo, error) {
-	if a == nil {
-		return nil, errors.New("service app not initialized")
-	}
-	if a.runnerManager == nil || a.runnerManager.Registry == nil {
-		return nil, nil
-	}
-	return a.runnerManager.Registry.DetectAll(ctx, a.runnerManager.DetectOptions()), nil
 }
 
 type TurnRequest struct {
@@ -197,8 +184,8 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 	return false, "not_abortable", nil
 }
 
-// DetectAgentCLIRunners returns runner info for all registered external CLIs.
-func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]runners.RunnerInfo, error) {
+// DetectRunnerRunners returns runner info for all registered external runners.
+func (a *ServiceApp) DetectRunnerRunners(ctx context.Context) ([]runners.RunnerInfo, error) {
 	if a == nil {
 		return nil, fmt.Errorf("service app is not available")
 	}
@@ -207,14 +194,14 @@ func (a *ServiceApp) DetectAgentCLIRunners(ctx context.Context) ([]runners.Runne
 			return nil, fmt.Errorf("runner registry is not configured")
 		}
 		detected := a.runnerManager.Registry.DetectAll(ctx, a.runnerManager.DetectOptions())
-		return a.decorateAgentCLIRuntimeInfo(ctx, detected), nil
+		return a.decorateRunnerRuntimeInfo(ctx, detected), nil
 	}
 	detectManager := &runners.Manager{Cfg: a.cfg.Runners}
 	detected := runners.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions())
-	return a.decorateAgentCLIRuntimeInfo(ctx, detected), nil
+	return a.decorateRunnerRuntimeInfo(ctx, detected), nil
 }
 
-func (a *ServiceApp) decorateAgentCLIRuntimeInfo(ctx context.Context, detected []runners.RunnerInfo) []runners.RunnerInfo {
+func (a *ServiceApp) decorateRunnerRuntimeInfo(ctx context.Context, detected []runners.RunnerInfo) []runners.RunnerInfo {
 	if len(detected) == 0 {
 		return detected
 	}
@@ -225,7 +212,7 @@ func (a *ServiceApp) decorateAgentCLIRuntimeInfo(ctx context.Context, detected [
 	} else {
 		runtimes = runners.NewDefaultRuntimeRegistry()
 	}
-	env := runners.BuildAgentCLIEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
+	env := runners.BuildRunnerEnv(os.Environ(), cfg.ChildEnvAllowlist, nil)
 	for i := range detected {
 		id := runners.RunnerID(detected[i].ID)
 		if runtime, ok := runtimes.Get(id); ok {
@@ -243,7 +230,7 @@ func (a *ServiceApp) decorateAgentCLIRuntimeInfo(ctx context.Context, detected [
 // StartRunnerRun enqueues a new runner run.
 func (a *ServiceApp) StartRunnerRun(ctx context.Context, req runners.RunnerRunRequest) (db.RunnerRun, error) {
 	if a == nil || a.runnerManager == nil {
-		return db.RunnerRun{}, fmt.Errorf("agent CLI manager is not available")
+		return db.RunnerRun{}, fmt.Errorf("runner manager is not available")
 	}
 	if a.turnOrchestrator != nil {
 		req = a.turnOrchestrator.PrepareRunnerRunRequest(ctx, req)
@@ -254,7 +241,7 @@ func (a *ServiceApp) StartRunnerRun(ctx context.Context, req runners.RunnerRunRe
 // GetRunnerRun reads a persisted runner run by run ID or job ID.
 func (a *ServiceApp) GetRunnerRun(ctx context.Context, id string) (db.RunnerRun, bool, error) {
 	if a == nil || a.runnerManager == nil || a.runnerManager.DB == nil {
-		return db.RunnerRun{}, false, fmt.Errorf("agent CLI manager is not available")
+		return db.RunnerRun{}, false, fmt.Errorf("runner manager is not available")
 	}
 	return a.runnerManager.DB.GetRunnerRun(ctx, id)
 }
@@ -262,7 +249,7 @@ func (a *ServiceApp) GetRunnerRun(ctx context.Context, id string) (db.RunnerRun,
 // ListRunnerRunEvents lists persisted events for a job.
 func (a *ServiceApp) ListRunnerRunEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.RunnerRunEvent, error) {
 	if a == nil || a.runnerManager == nil || a.runnerManager.DB == nil {
-		return nil, fmt.Errorf("agent CLI manager is not available")
+		return nil, fmt.Errorf("runner manager is not available")
 	}
 	return a.runnerManager.DB.ListRunnerRunEvents(ctx, jobID, afterSeq, limit)
 }
@@ -270,7 +257,7 @@ func (a *ServiceApp) ListRunnerRunEvents(ctx context.Context, jobID string, afte
 // AbortRunnerRun cancels a runner run.
 func (a *ServiceApp) AbortRunnerRun(ctx context.Context, jobID string) error {
 	if a == nil || a.runnerManager == nil {
-		return fmt.Errorf("agent CLI manager is not available")
+		return fmt.Errorf("runner manager is not available")
 	}
 	return a.runnerManager.Abort(ctx, jobID)
 }

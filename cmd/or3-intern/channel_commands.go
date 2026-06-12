@@ -18,11 +18,11 @@ import (
 )
 
 type channelCommandHandler struct {
-	Config          config.Config
-	DB              *db.DB
-	AgentCLIManager *runners.Manager
-	Channels        *rootchannels.Manager
-	CLI             *cli.Deliverer
+	Config        config.Config
+	DB            *db.DB
+	RunnerManager *runners.Manager
+	Channels      *rootchannels.Manager
+	CLI           *cli.Deliverer
 }
 
 func (h *channelCommandHandler) Handle(ctx context.Context, ev bus.Event) (bus.Event, bool, error) {
@@ -308,14 +308,14 @@ func (h *channelCommandHandler) runnerLabel(runnerID string) string {
 }
 
 func (h *channelCommandHandler) runnerModels(ctx context.Context, runnerID string) []runners.RunnerModelInfo {
-	if h == nil || h.AgentCLIManager == nil || h.AgentCLIManager.Registry == nil {
+	if h == nil || h.RunnerManager == nil || h.RunnerManager.Registry == nil {
 		return nil
 	}
 	runner := runners.RunnerID(strings.TrimSpace(runnerID))
-	if info, ok := h.AgentCLIManager.Registry.DetectCached(runner, 5*time.Minute); ok {
+	if info, ok := h.RunnerManager.Registry.DetectCached(runner, 5*time.Minute); ok {
 		return sortedRunnerModels(info.Runtime.Models)
 	}
-	info := runners.Detect(ctx, runnerSpecForID(runner), h.AgentCLIManager.DetectOptions())
+	info := runners.Detect(ctx, runnerSpecForID(runner), h.RunnerManager.DetectOptions())
 	return sortedRunnerModels(info.Runtime.Models)
 }
 

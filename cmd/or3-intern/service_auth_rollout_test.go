@@ -76,68 +76,6 @@ func TestServiceAuthMiddleware_AppBootstrapRequiresBearer(t *testing.T) {
 	}
 }
 
-func TestServiceAuthMiddleware_RolloutModesForLegacyPairedTokens(t *testing.T) {
-	ctx := context.Background()
-	database, cleanup := openServiceTestDB(t)
-	defer cleanup()
-	cfg := rolloutAuthTestConfig(config.AuthEnforcementOff)
-	broker := &approval.Broker{DB: database, Config: cfg.Security.Approvals}
-	_, token, err := broker.RotateDeviceToken(ctx, "device-1", approval.RoleAdmin, "Legacy App", nil)
-	if err != nil {
-		t.Fatalf("RotateDeviceToken: %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		mode       config.AuthEnforcementMode
-		path       string
-		method     string
-		wantStatus int
-		wantCode   string
-		wantWarn   string
-	}{
-		{name: "off allows sensitive paired token workflow", mode: config.AuthEnforcementOff, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusOK},
-		{name: "warn allows sensitive paired token workflow with header", mode: config.AuthEnforcementWarn, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusOK, wantWarn: auth.CodeSessionRequired},
-		{name: "enforce sensitive blocks paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive keeps doctor status paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/status", method: http.MethodGet, wantStatus: http.StatusOK},
-		{name: "enforce sensitive blocks doctor skill diagnostics paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/skills/demo/diagnostics", method: http.MethodGet, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive blocks doctor apply paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/plans/plan-1/apply", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive keeps low risk paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/jobs/job-rollout", method: http.MethodGet, wantStatus: http.StatusOK},
-		{name: "enforce session blocks low risk paired token without session", mode: config.AuthEnforcementSession, path: "/internal/v1/jobs/job-rollout", method: http.MethodGet, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce session allows paired token for passkey login begin", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/begin", method: http.MethodPost, wantStatus: http.StatusOK},
-		{name: "enforce session allows paired token for passkey login finish", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/finish", method: http.MethodPost, wantStatus: http.StatusOK},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := rolloutAuthTestConfig(tc.mode)
-			handler := serviceAuthMiddlewareWithBroker(cfg, broker, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
-			}))
-			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
-			req.Header.Set("Authorization", "Bearer "+token)
-			rec := httptest.NewRecorder()
-
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("expected status %d, got %d (%s)", tc.wantStatus, rec.Code, rec.Body.String())
-			}
-			if tc.wantWarn != "" && rec.Header().Get("X-Or3-Auth-Warning") != tc.wantWarn {
-				t.Fatalf("expected warning %q, got %q", tc.wantWarn, rec.Header().Get("X-Or3-Auth-Warning"))
-			}
-			if tc.wantCode != "" {
-				var payload map[string]any
-				if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-					t.Fatalf("decode response: %v", err)
-				}
-				if payload["code"] != tc.wantCode {
-					t.Fatalf("expected code %q, got %#v", tc.wantCode, payload)
-				}
-			}
-		})
-	}
-}
-
 func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 	ctx := context.Background()
 	database, cleanup := openServiceTestDB(t)
@@ -307,7 +245,6 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/v1/terminal/sessions/term-1/input", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodGet, path: "/internal/v1/approvals", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/approvals/12/approve", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
-		{method: http.MethodPost, path: "/internal/v1/devices/device-1/revoke", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/configure/security", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodGet, path: "/internal/v1/doctor/status", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/doctor/run", want: serviceRouteLowRisk},
@@ -327,7 +264,6 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodGet, path: "/internal/v1/secure-connections/devices", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/intents", want: serviceRouteLowRisk, sessionOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/approve", want: serviceRouteLowRisk},
-		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/exchange", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/sessions", want: serviceRouteLowRisk},
 	}
 	for _, tc := range tests {
@@ -368,7 +304,7 @@ func rolloutAuthTestConfig(mode config.AuthEnforcementMode) config.Config {
 	cfg.Auth.SessionIdleTTLSeconds = 300
 	cfg.Auth.SessionAbsoluteTTLSeconds = 3600
 	cfg.Auth.StepUpTTLSeconds = 120
-	cfg.Auth.FallbackPolicy = config.AuthFallbackPairedTokenPlusWarn
+	cfg.Auth.FallbackPolicy = config.AuthFallbackAdminRecoveryOnly
 	cfg.Auth.EnforcementMode = mode
 	cfg.Auth.RequirePasskeyForSensitive = true
 	return cfg

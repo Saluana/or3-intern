@@ -149,17 +149,10 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		return false
 	}
 	switch fieldKey {
-	case "provider_vision":
-		cfg.Provider.EnableVision = value
 	case "runtime_consolidation_enabled":
 		cfg.ConsolidationEnabled = value
 	case "context_task_card_enabled":
 		cfg.Context.TaskCard.Enabled = value
-	case "skills_enable_exec":
-		cfg.Skills.EnableExec = value
-		if value {
-			config.EnsureSkillsExecTrustPolicy(cfg)
-		}
 	case "skills_quarantine":
 		cfg.Skills.Policy.QuarantineByDefault = value
 	case "skills_global_disabled":
@@ -192,12 +185,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Security.Network.AllowLoopback = value
 	case "security_network_allow_private":
 		cfg.Security.Network.AllowPrivate = value
-	case "hardening_guarded_tools":
-		cfg.Hardening.GuardedTools = value
-	case "hardening_privileged_tools":
-		cfg.Hardening.PrivilegedTools = value
-	case "hardening_exec_shell":
-		cfg.Hardening.EnableExecShell = value
 	case "hardening_isolate_channel_peers":
 		cfg.Hardening.IsolateChannelPeers = value
 	case "hardening_sandbox_enabled":
@@ -218,8 +205,6 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Service.Enabled = value
 	case "service_allow_unauthenticated_pairing":
 		cfg.Service.AllowUnauthenticatedPairing = value
-	case "runners_allow_sandbox_auto":
-		cfg.Runners.AllowSandboxAuto = value
 	default:
 		return false
 	}
@@ -271,37 +256,8 @@ func ApplyChoiceSelection(cfg *config.Config, section, channel, fieldKey, choice
 	case "auth_enforcement_mode":
 		cfg.Auth.EnforcementMode = config.AuthEnforcementMode(choice)
 		return true, nil
-	case "service_max_capability":
-		normalized := normalizeConfigureCapability(choice)
-		if normalized == "" {
-			return false, fmt.Errorf("service_max_capability must be safe, guarded, or privileged")
-		}
-		cfg.Service.MaxCapability = normalized
-		return true, nil
-	case "runners_default_mode":
-		switch choice {
-		case "review", "safe_edit", "sandbox_auto":
-			cfg.Runners.DefaultMode = choice
-			return true, nil
-		default:
-			return false, fmt.Errorf("runners.defaultMode must be review, safe_edit, or sandbox_auto")
-		}
-	case "runners_default_isolation":
-		switch choice {
-		case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
-			cfg.Runners.DefaultIsolation = choice
-			return true, nil
-		default:
-			return false, fmt.Errorf("runners.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
-		}
 	case "security_approval_pairing_mode":
 		cfg.Security.Approvals.Pairing.Mode = config.ApprovalMode(choice)
-		return true, nil
-	case "security_approval_exec_mode":
-		cfg.Security.Approvals.Exec.Mode = config.ApprovalMode(choice)
-		return true, nil
-	case "security_approval_skill_mode":
-		cfg.Security.Approvals.SkillExecution.Mode = config.ApprovalMode(choice)
 		return true, nil
 	case "security_approval_secret_mode":
 		cfg.Security.Approvals.SecretAccess.Mode = config.ApprovalMode(choice)
@@ -510,10 +466,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		cfg.ModelRouting.Chat.Primary.Provider = ConfigureProviderKeyFromBase(value)
 		SetProviderProfileAPIBase(cfg, cfg.ModelRouting.Chat.Primary.Provider, value)
 		return true, nil
-	case "provider_model":
-		cfg.Provider.Model = value
-		cfg.ModelRouting.Chat.Primary.Model = value
-		return true, nil
 	case "provider_embed":
 		cfg.Provider.EmbedModel = value
 		cfg.ModelRouting.Embeddings.Primary.Model = value
@@ -566,15 +518,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		if value != "" {
 			SetProviderProfileAPIKey(cfg, "custom", value)
 		}
-		return true, nil
-	case "routing_chat_provider":
-		cfg.ModelRouting.Chat.Primary.Provider = value
-		return true, nil
-	case "routing_chat_model":
-		cfg.ModelRouting.Chat.Primary.Model = value
-		return true, nil
-	case "routing_chat_fallbacks":
-		cfg.ModelRouting.Chat.Fallbacks = parseModelRefs(value)
 		return true, nil
 	case "routing_summarization_provider":
 		cfg.ModelRouting.Summarization.Primary.Provider = value
@@ -669,12 +612,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.ConsolidationMaxInputChars, value, fieldKey)
 	case "runtime_consolidation_async_timeout":
 		return setIntValue(&cfg.ConsolidationAsyncTimeoutSeconds, value, fieldKey)
-	case "context_max_input_tokens":
-		return setIntValue(&cfg.Context.MaxInputTokens, value, fieldKey)
-	case "context_output_reserve":
-		return setIntValue(&cfg.Context.OutputReserveTokens, value, fieldKey)
-	case "context_safety_margin":
-		return setIntValue(&cfg.Context.SafetyMarginTokens, value, fieldKey)
 	case "context_retrieval_multiplier":
 		return setIntValue(&cfg.Context.Retrieval.CandidateMultiplier, value, fieldKey)
 	case "context_retrieval_min_score":
@@ -685,22 +622,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return setIntValue(&cfg.Context.Pressure.HighPercent, value, fieldKey)
 	case "context_pressure_emergency":
 		return setIntValue(&cfg.Context.Pressure.EmergencyPercent, value, fieldKey)
-	case "context_section_system_core":
-		return setIntValue(&cfg.Context.Sections.SystemCore, value, fieldKey)
-	case "context_section_soul_identity":
-		return setIntValue(&cfg.Context.Sections.SoulIdentity, value, fieldKey)
-	case "context_section_active_task_card":
-		return setIntValue(&cfg.Context.Sections.ActiveTaskCard, value, fieldKey)
-	case "context_section_pinned_memory":
-		return setIntValue(&cfg.Context.Sections.PinnedMemory, value, fieldKey)
-	case "context_section_recent_history":
-		return setIntValue(&cfg.Context.Sections.RecentHistory, value, fieldKey)
-	case "context_section_retrieved_memory":
-		return setIntValue(&cfg.Context.Sections.RetrievedMemory, value, fieldKey)
-	case "context_section_memory_digest":
-		return setIntValue(&cfg.Context.Sections.MemoryDigest, value, fieldKey)
-	case "context_section_workspace":
-		return setIntValue(&cfg.Context.Sections.WorkspaceContext, value, fieldKey)
 	case "context_task_card_max_refs":
 		return setIntValue(&cfg.Context.TaskCard.MaxRefs, value, fieldKey)
 	case "context_task_card_max_plan":
@@ -712,13 +633,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 		return true, nil
 	case "workspace_allowed_dir":
 		cfg.AllowedDir = value
-		return true, nil
-	case "hardening_guarded_tools":
-		enabled, err := parseBoolValue(value, fieldKey)
-		if err != nil {
-			return false, err
-		}
-		cfg.Hardening.GuardedTools = enabled
 		return true, nil
 	case "skills_max_run_seconds":
 		return setIntValue(&cfg.Skills.MaxRunSeconds, value, fieldKey)
@@ -810,9 +724,6 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 	case "security_network_allowed_hosts":
 		cfg.Security.Network.AllowedHosts = splitAndCompact(value)
 		return true, nil
-	case "hardening_exec_allowed_programs":
-		cfg.Hardening.ExecAllowedPrograms = splitAndCompact(value)
-		return true, nil
 	case "hardening_child_env_allowlist":
 		cfg.Hardening.ChildEnvAllowlist = splitAndCompact(value)
 		return true, nil
@@ -873,35 +784,11 @@ func ApplyFieldValue(cfg *config.Config, section, channel, fieldKey, value strin
 			cfg.Service.Secret = value
 		}
 		return true, nil
-	case "service_max_capability":
-		normalized := normalizeConfigureCapability(value)
-		if normalized == "" {
-			return false, fmt.Errorf("%s must be safe, guarded, or privileged", fieldKey)
-		}
-		cfg.Service.MaxCapability = normalized
-		return true, nil
 	case "service_trusted_browser_origins":
 		cfg.Service.TrustedBrowserOrigins = splitAndCompact(value)
 		return true, nil
 	case "service_trusted_browser_cidrs":
 		cfg.Service.TrustedBrowserCIDRs = splitAndCompact(value)
-		return true, nil
-	case "runners_max_concurrent":
-		return setIntValue(&cfg.Runners.MaxConcurrent, value, fieldKey)
-	case "runners_max_queued":
-		return setIntValue(&cfg.Runners.MaxQueued, value, fieldKey)
-	case "runners_default_timeout":
-		return setIntValue(&cfg.Runners.DefaultTimeoutSeconds, value, fieldKey)
-	case "runners_max_timeout":
-		return setIntValue(&cfg.Runners.MaxTimeoutSeconds, value, fieldKey)
-	case "runners_disabled_runners":
-		cfg.Runners.Disabled = splitAndCompact(value)
-		return true, nil
-	case "runners_default":
-		cfg.Runners.Default = strings.ToLower(strings.TrimSpace(value))
-		return true, nil
-	case "runners_allow_sandbox_auto":
-		cfg.Runners.AllowSandboxAuto = value == "true" || value == "on" || value == "1"
 		return true, nil
 	default:
 		return false, nil
@@ -966,19 +853,6 @@ func parseBoolValue(value string, field string) (bool, error) {
 		return false, nil
 	default:
 		return false, fmt.Errorf("invalid boolean for %s: %q", field, value)
-	}
-}
-
-func normalizeConfigureCapability(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "safe":
-		return "safe"
-	case "guarded":
-		return "guarded"
-	case "privileged":
-		return "privileged"
-	default:
-		return ""
 	}
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -868,7 +867,7 @@ func renderSummaryPanel(styles configureStyles, cfg config.Config, hint string) 
 
 func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint string, compact bool) string {
 	if compact {
-		providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model
+		providerSummary := configureProviderLabel(cfg.Provider.APIBase)
 		if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
 			providerSummary += " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 		}
@@ -883,7 +882,7 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 			styles.section.Render("Current snapshot"),
 			fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 			fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d", cfg.DefaultSessionKey, cfg.WorkerCount))),
-			fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools))),
+			fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t", cfg.Security.Approvals.Enabled))),
 			fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.value.Render(channels)),
 		}
 		if hint != "" {
@@ -896,7 +895,7 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 	if len(channelNames) == 0 {
 		channelsLine = fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.muted.Render("none enabled"))
 	}
-	providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+	providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 	if cfg.Provider.EmbedDimensions > 0 {
 		providerSummary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
 	}
@@ -906,8 +905,8 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		fmt.Sprintf("%s %s", styles.label.Render("Storage:"), styles.value.Render(cfg.DBPath+" · "+cfg.ArtifactsDir)),
 		fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d · history=%d", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax))),
 		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(emptyAsNone(cfg.WorkspaceDir))),
-		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools, cfg.Security.Network.Enabled))),
-		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
+		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Security.Network.Enabled))),
+		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("watch=%t · quarantine=%t", cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
 		fmt.Sprintf("%s %s", styles.label.Render("Automation:"), styles.value.Render(fmt.Sprintf("cron=%t · heartbeat=%t · webhook=%t", cfg.Cron.Enabled, cfg.Heartbeat.Enabled, cfg.Triggers.Webhook.Enabled))),
 		channelsLine,
 		fmt.Sprintf("%s %s", styles.label.Render("Service:"), styles.value.Render(serviceSummary(cfg))),
@@ -978,7 +977,7 @@ func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAll
 func sectionStatus(cfg config.Config, section string) string {
 	switch section {
 	case "provider":
-		summary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+		summary := configureProviderLabel(cfg.Provider.APIBase) + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 		if cfg.Provider.EmbedDimensions > 0 {
 			summary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
 		}
@@ -988,17 +987,17 @@ func sectionStatus(cfg config.Config, section string) string {
 	case "runtime":
 		return fmt.Sprintf("session=%s · workers=%d · consolidation=%t", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.ConsolidationEnabled)
 	case "context":
-		return fmt.Sprintf("mode=%s · maxInput=%d", cfg.Context.Mode, cfg.Context.MaxInputTokens)
+		return fmt.Sprintf("mode=%s", cfg.Context.Mode)
 	case "workspace":
 		return fmt.Sprintf("%s", emptyAsNone(cfg.WorkspaceDir))
 	case "skills":
-		return fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault)
+		return fmt.Sprintf("watch=%t · quarantine=%t", cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault)
 	case "auth":
 		return fmt.Sprintf("enabled=%t · mode=%s · rp=%s", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, emptyAsNone(cfg.Auth.RPID))
 	case "security":
 		return fmt.Sprintf("approvals=%t · audit=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Security.Audit.Enabled, cfg.Security.Network.Enabled)
 	case "hardening":
-		return fmt.Sprintf("guarded=%t · privileged=%t · sandbox=%t", cfg.Hardening.GuardedTools, cfg.Hardening.PrivilegedTools, cfg.Hardening.Sandbox.Enabled)
+		return fmt.Sprintf("sandbox=%t", cfg.Hardening.Sandbox.Enabled)
 	case "session":
 		return fmt.Sprintf("sharedDM=%t · links=%d", cfg.Session.DirectMessagesShareDefault, len(cfg.Session.IdentityLinks))
 	case "automation":
@@ -1010,8 +1009,6 @@ func sectionStatus(cfg config.Config, section string) string {
 		return strings.Join(enabledChannelNames(cfg), ", ")
 	case "service":
 		return serviceSummary(cfg)
-	case "runners":
-		return fmt.Sprintf("default=%s · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", emptyAsNone(cfg.Runners.Default), cfg.Runners.MaxConcurrent, cfg.Runners.MaxQueued, cfg.Runners.DefaultTimeoutSeconds, cfg.Runners.AllowSandboxAuto)
 	default:
 		return ""
 	}
@@ -1032,7 +1029,7 @@ func (m configureTUIModel) activeFields() []configureField {
 }
 
 func buildSectionFields(cfg config.Config, section, cwd string) []configureField {
-	return filterConfigureFields(cfg, withHelpfulFieldDescriptions(section, "", buildSectionFieldsRaw(cfg, section, cwd)))
+	return withHelpfulFieldDescriptions(section, "", buildSectionFieldsRaw(cfg, section, cwd))
 }
 
 func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureField {
@@ -1043,20 +1040,15 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "provider_preset", Label: "Provider preset", Description: "Cycle through the built-in presets.", Kind: configureFieldChoice, Value: preset, Choices: []string{"OpenAI", "OpenRouter", "Custom"}, ChoiceIndex: indexOfChoice([]string{"OpenAI", "OpenRouter", "Custom"}, preset)},
 			{Key: "provider_api_base", Label: "API base", Description: "OpenAI-compatible base URL.", Kind: configureFieldText, Value: cfg.Provider.APIBase, EmptyHint: "https://api.openai.com/v1"},
-			{Key: "provider_model", Label: "Chat model", Description: "Default chat model for turns.", Kind: configureFieldText, Value: cfg.Provider.Model, EmptyHint: "gpt-4.1-mini"},
 			{Key: "provider_embed", Label: "Embedding model", Description: "Model used for embeddings and retrieval.", Kind: configureFieldText, Value: cfg.Provider.EmbedModel, EmptyHint: "text-embedding-3-small"},
 			{Key: "provider_embed_dimensions", Label: "Embedding dimensions", Description: "Optional override sent to embedding providers that support dimension truncation. Use 0 for the provider default.", Kind: configureFieldText, Value: formatInt(cfg.Provider.EmbedDimensions), EmptyHint: "0"},
-			{Key: "provider_temperature", Label: "Temperature", Description: "Sampling temperature for chat turns.", Kind: configureFieldText, Value: formatFloat(cfg.Provider.Temperature), EmptyHint: "0"},
+			{Key: "provider_temperature", Label: "Temperature", Description: "Sampling temperature for summarization and embedding provider calls.", Kind: configureFieldText, Value: formatFloat(cfg.Provider.Temperature), EmptyHint: "0"},
 			{Key: "provider_timeout", Label: "Timeout seconds", Description: "HTTP timeout for provider calls.", Kind: configureFieldText, Value: formatInt(cfg.Provider.TimeoutSeconds), EmptyHint: "60"},
-			{Key: "provider_vision", Label: "Enable vision", Description: "Allow image inputs when the model and runtime support it.", Kind: configureFieldToggle, Value: onOff(cfg.Provider.EnableVision)},
 			{Key: "provider_api_key", Label: "API key", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Provider.APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "provider_openai_api_key", Label: "OpenAI API key", Description: "Hidden OpenAI key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openai").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "provider_openrouter_api_key", Label: "OpenRouter API key", Description: "Hidden OpenRouter key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openrouter").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "provider_custom_api_base", Label: "Custom API base", Description: "OpenAI-compatible custom provider base URL for local models or another hosted service.", Kind: configureFieldText, Value: providerProfileValue(cfg, "custom").APIBase, EmptyHint: "http://127.0.0.1:8000/v1"},
 			{Key: "provider_custom_api_key", Label: "Custom API key", Description: "Hidden custom provider key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "custom").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
-			{Key: "routing_chat_provider", Label: "Chat provider", Description: "Provider used for normal chat turns.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Chat.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Chat.Primary.Provider)},
-			{Key: "routing_chat_model", Label: "Chat model", Description: "Model used for normal chat turns.", Kind: configureFieldText, Value: cfg.ModelRouting.Chat.Primary.Model, EmptyHint: "gpt-4.1-mini"},
-			{Key: "routing_chat_fallbacks", Label: "Chat fallbacks", Description: "Comma-separated provider/model entries tried after transient failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Chat.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_summarization_provider", Label: "Summarization provider", Description: "Provider used for memory consolidation and summaries.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Summarization.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Summarization.Primary.Provider)},
 			{Key: "routing_summarization_model", Label: "Summarization model", Description: "Model used for memory consolidation and summaries.", Kind: configureFieldText, Value: cfg.ModelRouting.Summarization.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
 			{Key: "routing_summarization_fallbacks", Label: "Summarization fallbacks", Description: "Comma-separated provider/model entries tried after transient summarization failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Summarization.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
@@ -1112,22 +1104,11 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 		return []configureField{
 			{Key: "context_mode", Label: "Context mode", Description: "Packet budget preset. Existing configs stay quality-leaning unless changed.", Kind: configureFieldChoice, Value: modeValue, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, modeValue)},
-			{Key: "context_max_input_tokens", Label: "Max input tokens", Description: "Approximate total input-token budget for prompt packets.", Kind: configureFieldText, Value: formatInt(cfg.Context.MaxInputTokens), EmptyHint: "16000"},
-			{Key: "context_output_reserve", Label: "Output reserve tokens", Description: "Tokens reserved for model output before packing input sections.", Kind: configureFieldText, Value: formatInt(cfg.Context.OutputReserveTokens), EmptyHint: "1200"},
-			{Key: "context_safety_margin", Label: "Safety margin tokens", Description: "Extra buffer retained below the configured model input budget.", Kind: configureFieldText, Value: formatInt(cfg.Context.SafetyMarginTokens), EmptyHint: "400"},
 			{Key: "context_retrieval_multiplier", Label: "Candidate multiplier", Description: "How many retrieval candidates to consider before budgeted packing.", Kind: configureFieldText, Value: formatInt(cfg.Context.Retrieval.CandidateMultiplier), EmptyHint: "3"},
 			{Key: "context_retrieval_min_score", Label: "Minimum retrieval score", Description: "Minimum score for memory/document candidates before packing.", Kind: configureFieldText, Value: formatFloat(cfg.Context.Retrieval.MinScore), EmptyHint: "0.03"},
 			{Key: "context_pressure_warning", Label: "Pressure warning percent", Description: "Context utilization level that starts soft pressure warnings.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.WarningPercent), EmptyHint: "70"},
 			{Key: "context_pressure_high", Label: "Pressure high percent", Description: "Context utilization level that triggers stronger compression.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.HighPercent), EmptyHint: "85"},
 			{Key: "context_pressure_emergency", Label: "Pressure emergency percent", Description: "Context utilization level that triggers emergency pruning.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.EmergencyPercent), EmptyHint: "95"},
-			{Key: "context_section_system_core", Label: "System core budget", Description: "Section budget for core system instructions.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SystemCore), EmptyHint: "1200"},
-			{Key: "context_section_soul_identity", Label: "Soul identity budget", Description: "Section budget for identity and soul bootstrap material.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SoulIdentity), EmptyHint: "1200"},
-			{Key: "context_section_active_task_card", Label: "Active task card budget", Description: "Section budget for current goal, plan, decisions, refs, and active files.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ActiveTaskCard), EmptyHint: "800"},
-			{Key: "context_section_pinned_memory", Label: "Pinned memory budget", Description: "Section budget for pinned durable memory.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.PinnedMemory), EmptyHint: "900"},
-			{Key: "context_section_recent_history", Label: "Recent history budget", Description: "Section budget for recent conversation history.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RecentHistory), EmptyHint: "2200"},
-			{Key: "context_section_retrieved_memory", Label: "Retrieved memory budget", Description: "Section budget for retrieved memory snippets.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RetrievedMemory), EmptyHint: "1500"},
-			{Key: "context_section_memory_digest", Label: "Memory digest budget", Description: "Section budget for durable memory digest lines.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.MemoryDigest), EmptyHint: "900"},
-			{Key: "context_section_workspace", Label: "Workspace context budget", Description: "Section budget for workspace context and indexed docs.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.WorkspaceContext), EmptyHint: "1200"},
 			{Key: "context_task_card_enabled", Label: "Task card", Description: "Track current goal, plan, decisions, refs, and active files across turns.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.Enabled)},
 			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
 			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
@@ -1144,7 +1125,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 	case "skills":
 		return []configureField{
-			{Key: "skills_enable_exec", Label: "Enable skill exec", Description: "Allow skills to run external commands when approved by policy.", Kind: configureFieldToggle, Value: onOff(cfg.Skills.EnableExec)},
 			{Key: "skills_max_run_seconds", Label: "Max run seconds", Description: "Timeout for skill execution.", Kind: configureFieldText, Value: formatInt(cfg.Skills.MaxRunSeconds), EmptyHint: "30"},
 			{Key: "skills_managed_dir", Label: "Managed skills directory", Description: "Where installed and local managed skills are stored.", Kind: configureFieldText, Value: cfg.Skills.ManagedDir, EmptyHint: "~/.or3-intern/skills"},
 			{Key: "skills_quarantine", Label: "Quarantine by default", Description: "Require explicit approval before new external skills are trusted.", Kind: configureFieldToggle, Value: onOff(cfg.Skills.Policy.QuarantineByDefault)},
@@ -1194,8 +1174,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "security_approvals_pending_ttl", Label: "Pending TTL seconds", Description: "Expiration for pending approval requests.", Kind: configureFieldText, Value: formatInt(cfg.Security.Approvals.PendingTTLSeconds), EmptyHint: "900"},
 			{Key: "security_approvals_token_ttl", Label: "Approval-token TTL seconds", Description: "Expiration for one-shot approval tokens.", Kind: configureFieldText, Value: formatInt(cfg.Security.Approvals.ApprovalTokenTTLSeconds), EmptyHint: "300"},
 			{Key: "security_approval_pairing_mode", Label: "Pairing mode", Description: "Approval rule for device/channel pairing.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Pairing.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.Pairing.Mode))},
-			{Key: "security_approval_exec_mode", Label: "Exec mode", Description: "Approval rule for command execution.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Exec.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.Exec.Mode))},
-			{Key: "security_approval_skill_mode", Label: "Skill execution mode", Description: "Approval rule for skill execution.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.SkillExecution.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.SkillExecution.Mode))},
 			// Note: Secret access mode is not yet implemented - approval gate not wired to secret store
 			// {Key: "security_approval_secret_mode", Label: "Secret access mode", Description: "Approval rule for reading stored secrets.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.SecretAccess.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.SecretAccess.Mode))},
 			{Key: "security_approval_message_mode", Label: "Message-send mode", Description: "Approval rule for outbound send-message actions.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.MessageSend.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.MessageSend.Mode))},
@@ -1211,11 +1189,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 	case "hardening":
 		return []configureField{
-			{Key: "hardening_guarded_tools", Label: "Enable guarded tools", Description: "Allow guarded-capability tools like file writes and web fetches.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.GuardedTools)},
-			{Key: "hardening_privileged_tools", Label: "Enable privileged tools", Description: "Allow privileged-capability tools in addition to guarded tools.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.PrivilegedTools)},
-			{Key: "hardening_exec_shell", Label: "Enable exec shell mode", Description: "Permit shell-style command execution when approvals and policy allow it.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.EnableExecShell)},
 			{Key: "hardening_isolate_channel_peers", Label: "Isolate channel peers", Description: "Prevent one channel identity from sharing another channel’s capability context.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.IsolateChannelPeers)},
-			{Key: "hardening_exec_allowed_programs", Label: "Exec allowed programs", Description: "Comma-separated allowlist of binaries available to exec-capable tools.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.ExecAllowedPrograms, ","), EmptyHint: "cat,echo,git"},
 			{Key: "hardening_child_env_allowlist", Label: "Child env allowlist", Description: "Comma-separated environment variables passed to child processes.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.ChildEnvAllowlist, ","), EmptyHint: "PATH,HOME,TMPDIR"},
 			{Key: "hardening_sandbox_enabled", Label: "Enable sandbox", Description: "Run exec-capable tools inside a restricted sandbox.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Sandbox.Enabled)},
 			{Key: "hardening_sandbox_bwrap", Label: "Bubblewrap path", Description: "Path to the bubblewrap executable.", Kind: configureFieldText, Value: cfg.Hardening.Sandbox.BubblewrapPath, EmptyHint: "bwrap"},
@@ -1245,35 +1219,13 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "automation_filewatch_debounce", Label: "File-watch debounce seconds", Description: "Debounce window before emitting a trigger.", Kind: configureFieldText, Value: formatInt(cfg.Triggers.FileWatch.DebounceSeconds), EmptyHint: "2"},
 		}
 	case "service":
-		capabilityChoices := []string{"safe", "guarded", "privileged"}
 		return []configureField{
 			{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)},
 			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
 			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current · type clear to remove", EmptyHint: "not configured"},
-			{Key: "service_max_capability", Label: "Service max capability", Description: "Highest tool capability level the app/service API may request.", Kind: configureFieldChoice, Value: cfg.Service.MaxCapability, Choices: capabilityChoices, ChoiceIndex: indexOfChoice(capabilityChoices, cfg.Service.MaxCapability)},
 			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
 			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
 			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
-		}
-	case "runners":
-		modeChoices := []string{"review", "safe_edit", "sandbox_auto"}
-		isolationChoices := []string{"host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous"}
-		runnerChoices := []string{"opencode", "codex", "claude", "gemini"}
-		defaultRunner := strings.TrimSpace(cfg.Runners.Default)
-		if defaultRunner == "" {
-			defaultRunner = "opencode"
-		}
-		disabledRunners := strings.Join(cfg.Runners.Disabled, ",")
-		return []configureField{
-			{Key: "runners_default", Label: "Default runner", Description: "Runner used for new chat sessions and automation when none is selected.", Kind: configureFieldChoice, Value: defaultRunner, Choices: runnerChoices, ChoiceIndex: indexOfChoice(runnerChoices, defaultRunner)},
-			{Key: "runners_max_concurrent", Label: "Max concurrent external runs", Description: "How many external runner agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxConcurrent), EmptyHint: "1"},
-			{Key: "runners_max_queued", Label: "Max queued external runs", Description: "How many external runner jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxQueued), EmptyHint: "16"},
-			{Key: "runners_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external runner run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.Runners.DefaultTimeoutSeconds), EmptyHint: "900"},
-			{Key: "runners_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.Runners.MaxTimeoutSeconds), EmptyHint: "7200"},
-			{Key: "runners_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.Runners.AllowSandboxAuto)},
-			{Key: "runners_default_mode", Label: "Default run mode", Description: "Default permission mode for external runner runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.Runners.DefaultMode)},
-			{Key: "runners_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external runner runs.", Kind: configureFieldChoice, Value: cfg.Runners.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.Runners.DefaultIsolation)},
-			{Key: "runners_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
 		}
 	}
 	return nil
@@ -1295,7 +1247,7 @@ func buildChannelFields(cfg config.Config, channel string) []configureField {
 		Choices:     agentChoices,
 		ChoiceIndex: indexOfChoice(agentChoices, agentChoice),
 	})
-	return filterConfigureFields(cfg, withHelpfulFieldDescriptions("channels", channel, fields))
+	return withHelpfulFieldDescriptions("channels", channel, fields)
 }
 
 func buildChannelFieldsRaw(cfg config.Config, channel string) []configureField {
@@ -1346,21 +1298,16 @@ func helpfulFieldDescription(section, channel, key string) string {
 
 var helpfulSectionFieldDescriptions = map[string]string{
 	"provider_preset":                       "Choose the company or service OR3 uses for AI. OpenAI and OpenRouter fill in known defaults. Choose Custom only if you already have a compatible API URL.",
-	"provider_api_base":                     "The web address OR3 sends AI requests to. Warning: if this is wrong, chat, memory cleanup, and embeddings can stop working.",
-	"provider_model":                        "The main AI model used to answer you. Bigger models may be smarter but slower or more expensive. Warning: a model name your provider does not support will break chat.",
+	"provider_api_base":                     "The web address OR3 sends AI requests to. Warning: if this is wrong, summarization, memory cleanup, and embeddings can stop working.",
 	"provider_embed":                        "The model used to turn text into searchable memory. This must match your provider. Warning: changing it can require rebuilding memory and document embeddings.",
 	"provider_embed_dimensions":             "Advanced: requested size for memory-search vectors. Most users should leave this at 0. Warning: changing it can make existing memory vectors incompatible until rebuilt.",
-	"provider_temperature":                  "Controls how varied the assistant's wording is. 0 is focused and repeatable; higher values are more creative but less predictable.",
-	"provider_timeout":                      "How long OR3 waits for the AI provider before giving up. Increase this for slow models; lower values fail faster when the provider hangs.",
-	"provider_vision":                       "Lets OR3 send images to the AI model when the model supports vision. Leave off if your provider or model cannot read images.",
+	"provider_temperature":                  "Sampling temperature for OR3 provider calls such as summarization helpers. External runners use their own model settings.",
+	"provider_timeout":                      "Timeout for OR3 provider calls such as summarization helpers. External runners use runner-specific timeouts.",
 	"provider_api_key":                      "Secret key used to access your AI provider. It is hidden on screen. Warning: deleting or mistyping it will prevent OR3 from contacting the provider.",
 	"provider_openai_api_key":               "Secret OpenAI key used when any model role routes to OpenAI. Leave blank to keep the existing key or type clear to remove it.",
 	"provider_openrouter_api_key":           "Secret OpenRouter key used when any model role routes to OpenRouter. Leave blank to keep the existing key or type clear to remove it.",
 	"provider_custom_api_base":              "OpenAI-compatible custom provider base URL for local models or another hosted service. Leave blank unless you have a custom endpoint ready.",
 	"provider_custom_api_key":               "Secret custom provider key used with the custom API base. Leave blank to keep the existing key or type clear to remove it.",
-	"routing_chat_provider":                 "Provider used for normal chat turns and direct replies. Choose a provider that has a valid API key and supports your selected chat model.",
-	"routing_chat_model":                    "Model used for normal chat turns and direct replies. Favorites are only shortcuts; this exact model ID is sent to the provider.",
-	"routing_chat_fallbacks":                "Comma-separated provider/model fallbacks tried after transient chat failures. Use entries like openrouter/openai/gpt-4o-mini.",
 	"routing_summarization_provider":        "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
 	"routing_summarization_model":           "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
 	"routing_summarization_fallbacks":       "Comma-separated provider/model fallbacks tried after transient summarization failures. Leave blank to use only the primary.",
@@ -1397,29 +1344,17 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"runtime_consolidation_max_input_chars": "Maximum transcript text sent to the memory-summary model. Higher values preserve more detail but cost more and can timeout on small models.",
 	"runtime_consolidation_async_timeout":   "How long background memory cleanup may run before OR3 gives up. Increase this if summaries timeout on slower providers.",
 	"context_mode":                          "Overall prompt-budget preset. Quality includes more context; poor is smaller and cheaper; custom preserves your manual budget values.",
-	"context_max_input_tokens":              "Approximate total room available for instructions, memory, tools, documents, and recent chat before OR3 asks the model to answer. Warning: too high may exceed your model limit and fail.",
-	"context_output_reserve":                "Room saved for the AI's answer. If this is too low, replies may be cut short; if too high, OR3 has less room for context.",
-	"context_safety_margin":                 "Extra empty space kept as a buffer so prompts do not accidentally exceed the model limit. Most users should keep a safety margin.",
 	"context_retrieval_multiplier":          "How many extra memory candidates OR3 checks before choosing what fits. Higher values may find better memories but can slow searches.",
 	"context_retrieval_min_score":           "How relevant a memory must be before OR3 includes it. Higher values are stricter; too high can make OR3 forget useful context.",
 	"context_pressure_warning":              "Prompt fullness percentage where OR3 starts being careful about space. Lower values make it compress earlier.",
 	"context_pressure_high":                 "Prompt fullness percentage where OR3 becomes more aggressive about trimming less important context.",
 	"context_pressure_emergency":            "Prompt fullness percentage where OR3 may drop low-priority context to avoid model errors. Warning: setting this too high can cause over-limit failures.",
-	"context_section_system_core":           "Space reserved for core system rules that keep OR3 safe and consistent. Warning: setting this too low can remove important operating instructions.",
-	"context_section_soul_identity":         "Space reserved for identity/personality bootstrap files. Lower this if those files are large and crowd out chat history.",
-	"context_section_active_task_card":      "Space reserved for the current goal, plan, decisions, files, and references. This helps OR3 stay oriented across long tasks.",
-	"context_section_pinned_memory":         "Space reserved for high-priority saved memory. Lower values reduce durable recall; higher values leave less room for recent chat.",
-	"context_section_recent_history":        "Space reserved for recent conversation messages. Higher values help continuity; lower values make OR3 rely more on summaries.",
-	"context_section_retrieved_memory":      "Space reserved for memories found by search. Higher values improve recall but can bring in stale or less relevant details.",
-	"context_section_memory_digest":         "Space reserved for compact memory summaries. This gives OR3 a quick overview without loading every memory item.",
-	"context_section_workspace":             "Space reserved for workspace/document snippets. Increase if OR3 needs more project files in context; decrease if prompts feel crowded.",
 	"context_task_card_enabled":             "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
 	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
 	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
 	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
 	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
 	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
-	"skills_enable_exec":                    "Allows installed skills to run commands when policy permits. Warning: only enable this for skills you trust.",
 	"skills_max_run_seconds":                "Maximum time a skill command may run. Lower values stop stuck skills sooner; higher values help long-running skills finish.",
 	"skills_managed_dir":                    "Folder where OR3 stores installed or managed skills. Changing it can make installed skills seem missing unless you move them too.",
 	"skills_quarantine":                     "Requires new external skills to be reviewed before they are trusted. Strongly recommended for safety.",
@@ -1460,8 +1395,6 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"security_approvals_pending_ttl":        "How long a pending approval waits before expiring. Shorter reduces stale approvals; longer gives humans more time to respond.",
 	"security_approvals_token_ttl":          "How long a one-time approval token can be used. Shorter is safer; too short can be annoying during manual workflows.",
 	"security_approval_pairing_mode":        "Controls whether new devices and channels are denied, ask for approval, use an allowlist, or are trusted. Warning: trusted is more permissive.",
-	"security_approval_exec_mode":           "Controls approvals for local command execution. Warning: trusted command execution can change files or run programs without asking.",
-	"security_approval_skill_mode":          "Controls approvals for skills that run code or commands. Warning: trusted skills can perform powerful actions without asking.",
 	"security_approval_secret_mode":         "Controls approvals for reading stored secrets. Warning: trusted access can expose sensitive credentials to tools or channels.",
 	"security_approval_message_mode":        "Controls approvals for sending messages through channels. Warning: trusted mode can let OR3 send outbound messages without asking.",
 	"security_profiles_enabled":             "Applies named safety profiles to different channels or triggers. Useful for giving public channels less power than local chat.",
@@ -1473,11 +1406,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"security_network_allowed_hosts":        "Hosts OR3 may contact when network policy is active. Warning: add only hosts you trust and need.",
 	"security_network_allow_loopback":       "Allows OR3 to contact services on this same computer, such as localhost. Usually needed for local tools and bridges.",
 	"security_network_allow_private":        "Allows OR3 to contact private network addresses. Warning: enable only if OR3 must reach internal services on your LAN/VPC.",
-	"hardening_guarded_tools":               "Allows medium-risk tools like file writes and web fetches when policy permits. Turning this off blocks many useful actions.",
-	"hardening_privileged_tools":            "Allows high-risk tools in addition to guarded tools. Warning: enable only in trusted environments.",
-	"hardening_exec_shell":                  "Allows shell-style command execution. Warning: shells are powerful and can run destructive commands if other safeguards allow them.",
 	"hardening_isolate_channel_peers":       "Keeps identities from different channels separated so one sender does not inherit another sender's access. Recommended for safety.",
-	"hardening_exec_allowed_programs":       "List of programs command tools may run. Warning: adding powerful programs like sh, bash, rm, or sudo increases risk.",
 	"hardening_child_env_allowlist":         "Environment variables passed to child commands. Warning: do not include variables that contain secrets unless you intend commands to see them.",
 	"hardening_sandbox_enabled":             "Runs command-capable tools in a restricted sandbox when available. Recommended for safer command execution.",
 	"hardening_sandbox_bwrap":               "Path to the bubblewrap sandbox program. Warning: a wrong path can make sandboxed command execution fail.",
@@ -1696,19 +1625,6 @@ func parseBoolValue(value string, field string) (bool, error) {
 		return false, nil
 	default:
 		return false, fmt.Errorf("invalid boolean for %s: %q", field, value)
-	}
-}
-
-func normalizeConfigureCapability(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "safe":
-		return "safe"
-	case "guarded":
-		return "guarded"
-	case "privileged":
-		return "privileged"
-	default:
-		return ""
 	}
 }
 
@@ -2021,10 +1937,4 @@ func clampInt(value, lower, upper int) int {
 		return upper
 	}
 	return value
-}
-
-func configSnapshotsEqual(left, right config.Config) bool {
-	leftJSON, _ := json.Marshal(left)
-	rightJSON, _ := json.Marshal(right)
-	return string(leftJSON) == string(rightJSON)
 }

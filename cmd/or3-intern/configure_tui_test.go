@@ -86,10 +86,10 @@ func TestConfigureTUIAppliesContextFields(t *testing.T) {
 	if changed, err := applyChoiceSelection(&cfg, "context", "", "context_mode", "balanced"); err != nil || !changed {
 		t.Fatalf("apply context mode: changed=%v err=%v", changed, err)
 	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_max_input_tokens", "12345"); err != nil || !changed {
-		t.Fatalf("apply context max input: changed=%v err=%v", changed, err)
+	if changed, err := applyFieldValue(&cfg, "context", "", "context_pressure_warning", "65"); err != nil || !changed {
+		t.Fatalf("apply context pressure warning: changed=%v err=%v", changed, err)
 	}
-	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 {
+	if cfg.Context.Mode != "balanced" || cfg.Context.Pressure.WarningPercent != 65 {
 		t.Fatalf("unexpected context config: %+v", cfg.Context)
 	}
 }
@@ -225,25 +225,14 @@ func TestBuildSectionFields_ServiceIncludesLocalPairingToggle(t *testing.T) {
 	t.Fatal("expected service section to include local pairing toggle")
 }
 
-func TestBuildSectionFields_ToolsSectionExcludesLegacyExecInRunnerOnly(t *testing.T) {
-	// Runner-only mode hides the legacy built-in exec toggle. Shell
-	// execution is now gated through external runner permissions, not
-	// the old built-in tools enableExec switch.
-	fields := buildSectionFields(config.Default(), "tools", "/workspace/project")
+func TestBuildSectionFields_SkillsSectionExcludesLegacyExecInRunnerOnly(t *testing.T) {
+	// Runner-only mode drops the legacy built-in skills exec toggle.
+	// Skills are now managed by the runner host instead of the built-in
+	// or3-intern skill-exec broker.
+	fields := buildSectionFields(config.Default(), "skills", "/workspace/project")
 	for _, field := range fields {
-		if field.Key == "tools_enable_exec" {
-			t.Fatalf("expected tools section to exclude legacy exec toggle in runner-only mode")
-		}
-	}
-}
-
-func TestBuildSectionFields_ServiceHidesMaxCapabilityInRunnerFirst(t *testing.T) {
-	// Runner-first mode hides `service.maxCapability` from the configure
-	// TUI; tool capability is set per-runner now.
-	fields := buildSectionFields(config.Default(), "service", "/workspace/project")
-	for _, field := range fields {
-		if field.Key == "service_max_capability" {
-			t.Fatalf("service_max_capability should be hidden in runner-first, but appeared with kind=%d", field.Kind)
+		if field.Key == "skills_enable_exec" {
+			t.Fatalf("expected skills section to exclude legacy exec toggle in runner-only mode")
 		}
 	}
 }
@@ -258,16 +247,6 @@ func TestSetToggleFieldValue_AppliesServiceLocalPairingToggle(t *testing.T) {
 	}
 	if !cfg.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected local pairing bootstrap to be enabled")
-	}
-}
-
-func TestConfigureTUIServiceCapabilityApply(t *testing.T) {
-	cfg := config.Default()
-	if changed, err := applyChoiceSelection(&cfg, "service", "", "service_max_capability", "guarded"); err != nil || !changed {
-		t.Fatalf("apply service max capability choice: changed=%v err=%v", changed, err)
-	}
-	if cfg.Service.MaxCapability != "guarded" {
-		t.Fatalf("expected service max capability guarded, got %q", cfg.Service.MaxCapability)
 	}
 }
 

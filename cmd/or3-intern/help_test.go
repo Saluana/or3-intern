@@ -114,7 +114,7 @@ func TestPrintHelpTopic_Configure(t *testing.T) {
 	if !strings.Contains(got, "or3-intern configure") {
 		t.Fatalf("expected configure usage, got %q", got)
 	}
-	if !strings.Contains(got, "provider, storage, workspace, web, channels, service") {
+	if !strings.Contains(got, "provider, storage, runtime, context, workspace, skills, auth, security, hardening, session, automation, channels, service") {
 		t.Fatalf("expected section list, got %q", got)
 	}
 	if !strings.Contains(got, "Bubble Tea setup UI") {

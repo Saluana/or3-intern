@@ -1174,8 +1174,8 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	_ = server.control()
 	reqBody := strings.NewReader(`{
 		"changes":[
-			{"section":"provider","field":"provider_model","op":"set","value":"gpt-4.1"},
-			{"section":"service","field":"service_max_capability","op":"set","value":"guarded"},
+			{"section":"provider","field":"provider_temperature","op":"set","value":"0.5"},
+			{"section":"context","field":"context_pressure_warning","op":"set","value":"75"},
 			{"section":"service","field":"service_enabled","op":"toggle"},
 			{"section":"channels","channel":"slack","field":"access","op":"choose","value":"allowlist"}
 		]
@@ -1193,17 +1193,17 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if loaded.Provider.Model != "gpt-4.1" {
-		t.Fatalf("expected provider model update, got %q", loaded.Provider.Model)
+	if loaded.Provider.Temperature != 0.5 {
+		t.Fatalf("expected provider temperature update, got %v", loaded.Provider.Temperature)
 	}
-	if server.controlSvc == nil || server.controlSvc.Config.Provider.Model != "gpt-4.1" {
+	if server.controlSvc == nil || server.controlSvc.Config.Provider.Temperature != 0.5 {
 		t.Fatalf("expected cached controlplane config update, got %#v", server.controlSvc)
+	}
+	if loaded.Context.Pressure.WarningPercent != 75 {
+		t.Fatalf("expected context pressure warning update, got %d", loaded.Context.Pressure.WarningPercent)
 	}
 	if !loaded.Service.Enabled {
 		t.Fatal("expected service_enabled toggle to set true")
-	}
-	if loaded.Service.MaxCapability != "guarded" {
-		t.Fatalf("expected service max capability guarded, got %q", loaded.Service.MaxCapability)
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)

@@ -6,13 +6,11 @@ import (
 	"or3-intern/internal/config"
 )
 
-func TestStatusForConfigureKey_RunnerFirstHidesRunnerFieldsFromUI(t *testing.T) {
-	// The or3-intern built-in agent loop is gone; runner-only mode hides
-	// every `runners.*` field from the settings UI. The values are still
-	// read at runtime by the runner host, but no UI control writes them.
+func TestStatusForConfigureKey_AlwaysActive(t *testing.T) {
+	// Runner-only mode is the only supported mode; every field is active.
 	cfg := config.Default()
-	if got := StatusForConfigureKey(cfg, "runners_default"); got != FieldStatusHidden {
-		t.Fatalf("status = %q, want hidden", got)
+	if got := StatusForConfigureKey(cfg, "runners_default"); got != FieldStatusActive {
+		t.Fatalf("status = %q, want active", got)
 	}
 }
 

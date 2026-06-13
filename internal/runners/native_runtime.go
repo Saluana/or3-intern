@@ -42,25 +42,6 @@ type NativeRunnerRuntime interface {
 	Stop(ctx context.Context) error
 }
 
-// CLIRuntimeBackend is the explicit compatibility backend for existing chat
-// adapters. The manager still runs this path through its established process
-// execution code, but this wrapper gives tests and discovery code a concrete
-// runtime boundary for CLI fallback behavior.
-type CLIRuntimeBackend struct {
-	IDValue RunnerID
-	Adapter RunnerChatAdapter
-	Process *ProcessManager
-}
-
-func (b CLIRuntimeBackend) ID() RunnerID { return b.IDValue }
-
-func (b CLIRuntimeBackend) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
-	if b.Adapter == nil {
-		return CommandSpec{}, fmt.Errorf("cli runtime backend %q has no adapter", b.IDValue)
-	}
-	return b.Adapter.BuildChatCommand(req)
-}
-
 // RunnerRuntimeRegistry stores optional native backends by runner id.
 type RunnerRuntimeRegistry struct {
 	mu       sync.RWMutex

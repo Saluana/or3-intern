@@ -100,56 +100,7 @@ func RegisterFirstSliceFields() {
 		UserIntents:      []string{"set custom provider key", "repair provider credentials"},
 	})
 
-	Register(ConfigFieldMetadata{
-		Section:          "provider",
-		Key:              "model",
-		Path:             "provider.model",
-		Label:            "Default Model",
-		Description:      "The default model to use for chat and agents",
-		Risk:             RiskSafe,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"change model", "switch to different ai model"},
-	})
-
 	// Hardening and security
-	Register(ConfigFieldMetadata{
-		Section:          "hardening",
-		Key:              "guarded_tools",
-		Path:             "hardening.guardedTools",
-		Label:            "Guarded Tools",
-		Description:      "Require approval for sensitive tool operations",
-		Risk:             RiskNotice,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"enable tool guards", "require approval for tools"},
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "hardening",
-		Key:              "privileged_tools",
-		Path:             "hardening.privilegedTools",
-		Label:            "Privileged Tools",
-		Description:      "Enable privileged tool mode with elevated permissions",
-		Risk:             RiskDanger,
-		RestartRequired:  true,
-		RequiresApproval: true,
-		RequiresStepUp:   true,
-		Rollback: RollbackBehavior{
-			Safe:            true,
-			RestartRequired: true,
-		},
-		UserIntents: []string{"enable privileged mode", "allow elevated tools"},
-	})
-
 	// Skills configuration
 	Register(ConfigFieldMetadata{
 		Section:          "skills",
@@ -400,22 +351,6 @@ func RegisterFirstSliceFields() {
 			Safe: true,
 		},
 		UserIntents: []string{"require step-up", "enable extra verification"},
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "runners",
-		Key:              "disabled_runners",
-		Path:             "runners.disabledRunners",
-		Label:            "Disabled Runners",
-		Description:      "List of disabled runner IDs",
-		Risk:             RiskNotice,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"disable runner", "block specific agent"},
 	})
 
 	Register(ConfigFieldMetadata{

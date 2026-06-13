@@ -177,20 +177,6 @@ func TestAddCodexPoliciesUsesAppServerSandboxVariants(t *testing.T) {
 	}
 }
 
-func TestCLIRuntimeBackendBuildsChatCommand(t *testing.T) {
-	backend := CLIRuntimeBackend{IDValue: RunnerOpenCode, Adapter: fakeChatAdapter{}}
-	if backend.ID() != RunnerOpenCode {
-		t.Fatalf("ID = %q, want opencode", backend.ID())
-	}
-	spec, err := backend.BuildChatCommand(RunnerChatCommandRequest{UserMessage: "hello"})
-	if err != nil {
-		t.Fatalf("BuildChatCommand: %v", err)
-	}
-	if spec.Binary != "fake" || len(spec.Args) != 1 || spec.Args[0] != "hello" {
-		t.Fatalf("unexpected command spec: %+v", spec)
-	}
-}
-
 func TestOpenCodeInfoUsesConfiguredLoopbackWithoutBinary(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

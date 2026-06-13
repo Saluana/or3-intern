@@ -70,20 +70,20 @@ var rootHelpSections = []struct {
 
 var helpTopics = map[string]helpCommand{
 	"configure": {
-		Usage:   "or3-intern configure [--section provider|storage|workspace|web|channels|service] ...",
+		Usage:   "or3-intern configure [--section provider|storage|runtime|context|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",
 		Summary: "Advanced configuration wizard for manual or scripted edits.",
 		Description: []string{
 			"Configure is the advanced configuration wizard. Most users should use `or3-intern setup` for first-run and `or3-intern settings` for day-to-day changes.",
-			"Use configure when you need to edit specific sections via --section flags, run in scripts, or access the full 17-section advanced wizard.",
+			"Use configure when you need to edit specific sections via --section flags, run in scripts, or access the full advanced wizard.",
 			"When stdin and stdout are terminals, configure opens the Bubble Tea setup UI with arrow-key navigation, enter to select, space to toggle, s to save, and q to quit.",
 			"When either side is non-interactive, configure stays in the plain text prompt flow so pipes, redirected input, and scripts keep working.",
 			"The provider section can also set an optional embedding dimensions override for providers/models that support truncated embedding vectors.",
 			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
 		},
 		Flags: []helpItem{
-			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, workspace, web, channels, service"},
+			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, runtime, context, workspace, skills, auth, security, hardening, session, automation, channels, service"},
 		},
-		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section web", "or3-intern configure --section channels"},
+		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section security", "or3-intern configure --section channels"},
 	},
 	"setup": {
 		Usage:   "or3-intern setup",

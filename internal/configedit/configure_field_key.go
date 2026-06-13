@@ -9,7 +9,6 @@ import (
 // configureFieldKeysByPath maps JSON config paths to configure API field keys
 // when the default section_key rule does not match configedit.ApplyFieldValue.
 var configureFieldKeysByPath = map[string]string{
-	"provider.model":                       "provider_model",
 	"provider.apiBase":                     "provider_api_base",
 	"provider.apiKey":                      "provider_api_key",
 	"providers.profiles.openai.apiKey":     "provider_openai_api_key",
@@ -17,12 +16,10 @@ var configureFieldKeysByPath = map[string]string{
 	"providers.profiles.custom.apiKey":     "provider_custom_api_key",
 	"skills.load.globalDir":                "skills_global_dir",
 	"skills.load.disableGlobalDir":         "skills_global_disabled",
-	"hardening.guardedTools":               "hardening_guarded_tools",
 	"service.enabled":                      "service_enabled",
 	"service.listen":                       "service_listen",
 	"service.secret":                       "service_secret",
 	"runner.defaultRunner":                 "runner_default_runner",
-	"runner.disabledRunners":               "runner_disabled_runners",
 	"context.taskCard.enabled":             "context_task_card_enabled",
 }
 

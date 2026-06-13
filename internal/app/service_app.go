@@ -109,10 +109,7 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, 
 		return TurnResult{}, errors.New("service unavailable")
 	}
 	if a.turnOrchestrator == nil {
-		if a.cfg.RunnerFirst() {
-			return TurnResult{}, ErrRunnerRuntimeUnavailable
-		}
-		return TurnResult{}, errors.New("runner orchestrator unavailable")
+		return TurnResult{}, ErrRunnerRuntimeUnavailable
 	}
 	runnerReq := RunnerTurnRequest{
 		SessionKey:    strings.TrimSpace(req.SessionKey),

@@ -256,14 +256,24 @@ func TestRegisterFirstSliceFields(t *testing.T) {
 		}
 	})
 
-	t.Run("Model selection is safe", func(t *testing.T) {
-		meta, ok := Get("provider", "model")
-		if !ok {
-			t.Error("Get(provider, model) returned false")
-			return
+	t.Run("Legacy runner-only fields are not registered", func(t *testing.T) {
+		removed := []struct {
+			section string
+			key     string
+			path    string
+		}{
+			{"provider", "model", "provider.model"},
+			{"hardening", "guarded_tools", "hardening.guardedTools"},
+			{"hardening", "privileged_tools", "hardening.privilegedTools"},
+			{"runners", "disabled_runners", "runners.disabledRunners"},
 		}
-		if meta.Risk != RiskSafe {
-			t.Errorf("Model risk = %v, want %v", meta.Risk, RiskSafe)
+		for _, field := range removed {
+			if meta, ok := Get(field.section, field.key); ok {
+				t.Fatalf("Get(%s, %s) returned stale metadata: %+v", field.section, field.key, meta)
+			}
+			if meta, ok := GetByPath(field.path); ok {
+				t.Fatalf("GetByPath(%s) returned stale metadata: %+v", field.path, meta)
+			}
 		}
 	})
 

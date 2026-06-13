@@ -34,7 +34,6 @@ var configureSections = []struct {
 	{Key: "automation", Label: "Automation", Description: "Cron, heartbeat, webhook, and file-watch triggers"},
 	{Key: "channels", Label: "Channels", Description: "Telegram, Slack, Discord, WhatsApp, and Email delivery"},
 	{Key: "service", Label: "Service", Description: "Internal authenticated HTTP API listener"},
-	{Key: "runners", Label: "Runners", Description: "External runner selection, OpenCode defaults, queue limits, and sandbox controls"},
 }
 
 type configureArgs struct {
@@ -161,13 +160,7 @@ func normalizeConfigureSections(raw []string) ([]string, error) {
 }
 
 func normalizeConfigureSectionKey(value string) string {
-	key := strings.ToLower(strings.TrimSpace(value))
-	switch key {
-	case "web":
-		return "tools"
-	default:
-		return key
-	}
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func loadConfigureConfig(cfgPath, cwd string) (config.Config, bool, string, error) {
@@ -277,7 +270,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "skills", "auth", "security", "hardening", "session", "automation", "service", "runners":
+	case "provider", "storage", "runtime", "context", "workspace", "skills", "auth", "security", "hardening", "session", "automation", "service":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)

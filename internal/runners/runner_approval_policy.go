@@ -36,8 +36,12 @@ func RunnerApprovalAutopilotFromTurnMeta(metaJSON string) bool {
 	}
 }
 
-func runnerChatTurnMetaJSON(approvalAutopilot bool) string {
-	raw, err := json.Marshal(map[string]any{"runner_approval_autopilot": approvalAutopilot})
+func runnerChatTurnMetaJSON(approvalAutopilot bool, memoryDebug RunnerMemoryDebug) string {
+	payload := map[string]any{"runner_approval_autopilot": approvalAutopilot}
+	if memoryDebug != (RunnerMemoryDebug{}) {
+		payload["runner_memory_debug"] = memoryDebug
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "{}"
 	}

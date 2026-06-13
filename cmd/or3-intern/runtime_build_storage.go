@@ -10,7 +10,10 @@ import (
 	"or3-intern/internal/runnercontext"
 )
 
-func prepareRuntimeStorage(cfg config.Config) error {
+func prepareRuntimeStorage(cfg *config.Config, cfgPath string) error {
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir db dir: %w", err)
 	}
@@ -25,6 +28,9 @@ func prepareRuntimeStorage(cfg config.Config) error {
 	}
 	if err := ensureFileIfMissing(cfg.ToolsFile, runnercontext.DefaultRunnerNotes); err != nil {
 		return fmt.Errorf("bootstrap tools file: %w", err)
+	}
+	if _, err := ensureMemorySkillRegistered(cfgPath, cfg); err != nil {
+		return fmt.Errorf("memory skill registration: %w", err)
 	}
 	if cfg.IdentityFile != "" {
 		_ = ensureFileIfMissing(cfg.IdentityFile, "# Identity\n")

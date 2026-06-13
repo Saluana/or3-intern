@@ -162,6 +162,14 @@ func (o *RunnerTurnOrchestrator) CompileRunnerChatPromptForSession(ctx context.C
 
 func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, runnerChatSessionID, appSessionKey, userMessage, triggerKind string, meta map[string]any, continuation runners.ContinuationMode) (RunnerPromptCompileResult, error) {
 	extra := []string(nil)
+	nativeSessionRef := ""
+	if continuation == runners.ContinuationNative && strings.TrimSpace(runnerChatSessionID) != "" && o != nil && o.chat != nil && o.chat.DB != nil {
+		sess, err := o.chat.DB.GetRunnerChatSession(ctx, runnerChatSessionID)
+		if err != nil {
+			return RunnerPromptCompileResult{}, fmt.Errorf("get runner chat session: %w", err)
+		}
+		nativeSessionRef = strings.TrimSpace(sess.NativeSessionRef)
+	}
 	if continuation != runners.ContinuationNative && strings.TrimSpace(runnerChatSessionID) != "" && o != nil && o.chat != nil && o.chat.DB != nil {
 		history, err := o.chat.DB.ListRunnerChatTurns(ctx, runnerChatSessionID, 0)
 		if err != nil {
@@ -171,13 +179,25 @@ func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, ru
 			extra = append(extra, block)
 		}
 	}
-	return o.compilePrompt(ctx, RunnerPromptCompileInput{
+	result := o.compilePrompt(ctx, RunnerPromptCompileInput{
 		SessionKey:         appSessionKey,
 		UserTask:           userMessage,
 		TriggerKind:        triggerKind,
 		Meta:               meta,
 		ExtraContextBlocks: extra,
-	}), nil
+	})
+	if continuation == runners.ContinuationNative && nativeSessionRef != "" && o != nil && o.context != nil {
+		bootstrap := o.bootstrapForTrigger(triggerKind)
+		refresh, refreshDebug := o.context.BuildNativeMemoryRefresh(ctx, appSessionKey, userMessage, bootstrap)
+		result.MemoryRefresh = refresh
+		if strings.TrimSpace(refresh) != "" {
+			result.MemoryDebug.NativeRefresh = true
+		}
+		result.MemoryDebug.PinnedNonEmpty = result.MemoryDebug.PinnedNonEmpty || refreshDebug.PinnedNonEmpty
+		result.MemoryDebug.RetrievedNonEmpty = result.MemoryDebug.RetrievedNonEmpty || refreshDebug.RetrievedNonEmpty
+		result.MemoryDebug.DigestNonEmpty = result.MemoryDebug.DigestNonEmpty || refreshDebug.DigestNonEmpty
+	}
+	return result, nil
 }
 
 func appAgentcliHistory(turns []db.RunnerChatTurn) []runners.RunnerChatTurn {

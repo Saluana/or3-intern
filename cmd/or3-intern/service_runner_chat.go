@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"or3-intern/internal/app"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/runners"
@@ -268,24 +269,26 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 	}
 	promptMessage := strings.TrimSpace(req.UserMessage)
 	promptMessageFinal := false
+	var compiled app.RunnerPromptCompileResult
 	if s.turnOrchestrator != nil {
 		continuation := runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
 		if continuation == "" {
 			continuation = runners.ContinuationMode(sess.ContinuationMode)
 		}
 		compileCtx, cancelCompile := context.WithTimeout(r.Context(), serviceRunnerChatPromptCompileTimeout)
-		compiled, err := s.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
+		var compileErr error
+		compiled, compileErr = s.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
 		cancelCompile()
-		if err != nil {
+		if compileErr != nil {
 			if r.Context().Err() != nil {
-				writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat prompt unavailable", err)
+				writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat prompt unavailable", compileErr)
 				return
 			}
-			log.Printf("runner chat: prompt compile failed; falling back to raw user message: session=%s err=%v", sess.ID, err)
+			log.Printf("runner chat: prompt compile failed; falling back to raw user message: session=%s err=%v", sess.ID, compileErr)
 			if req.Meta == nil {
 				req.Meta = map[string]any{}
 			}
-			req.Meta["runner_prompt_compile_error"] = err.Error()
+			req.Meta["runner_prompt_compile_error"] = compileErr.Error()
 			req.Meta["runner_prompt_compile_fallback"] = true
 		} else if compileCtx.Err() == context.DeadlineExceeded {
 			log.Printf("runner chat: prompt compile timed out; falling back to raw user message: session=%s", sess.ID)
@@ -304,6 +307,8 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		UserMessage:        req.UserMessage,
 		PromptMessage:      promptMessage,
 		PromptMessageFinal: promptMessageFinal,
+		MemoryRefresh:      compiled.MemoryRefresh,
+		MemoryDebug:        compiled.MemoryDebug,
 		Attachments:        attachments,
 		Model:              req.Model,
 		Mode:               req.Mode,

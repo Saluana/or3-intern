@@ -9,7 +9,7 @@ func TestDefaultRunnerNotesDescribeRunnerFirstBehavior(t *testing.T) {
 	for _, want := range []string{
 		"external runner",
 		"runner's native",
-		"memory bridge",
+		"or3-intern memory",
 	} {
 		if !strings.Contains(DefaultRunnerNotes, want) {
 			t.Fatalf("expected default runner notes to include %q", want)

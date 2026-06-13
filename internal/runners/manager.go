@@ -918,6 +918,7 @@ func (m *Manager) buildCommandSpecForRun(ctx context.Context, run db.RunnerRun) 
 			ContinuationMode: ContinuationMode(firstNonEmptyStringMeta(meta, "runner_chat_continuation_mode", string(ContinuationReplay))),
 			ReplayPrompt:     firstNonEmptyStringMeta(meta, "runner_chat_replay_prompt", run.Task),
 			UserMessage:      firstNonEmptyStringMeta(meta, "runner_chat_user_message", run.Task),
+			MemoryRefresh:    stringMeta(meta, "runner_chat_memory_refresh"),
 			Model:            model,
 			Mode:             run.Mode,
 			Isolation:        run.Isolation,

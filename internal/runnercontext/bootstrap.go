@@ -41,13 +41,15 @@ OR3 platform context (injected automatically when relevant):
 - Indexed workspace docs may appear as excerpts.
 - Do not assume hidden OR3 built-in tools exist; use your runner's tool surface.
 
-When OR3 exposes the runner memory bridge (authenticated service API):
-- POST /internal/v1/runner-memory/search — recall durable facts (session_key + query).
-- POST /internal/v1/runner-memory/notes — add a durable memory note (not scratch work).
-- GET/POST /internal/v1/runner-memory/pinned — read or set pinned memory for a session.
-- Search memory when you need to recall a durable fact or decision.
-- Add memory notes only for preferences, decisions, facts, or project lessons that should persist.
-- Update pinned memory only for facts that should consistently appear in future prompts.
+OR3 memory bridge (preferred):
+- Use ` + "`or3-intern memory search/add-note/pinned ...`" + ` to recall durable facts, store durable notes, and read/set pinned memory.
+- Search when you need to recall a durable fact or decision not already in the prompt.
+- Add notes only for preferences, decisions, facts, or project lessons that should persist (not scratch work or secrets).
+- Update pinned memory only for facts that must consistently appear in future prompts.
+- Use ` + "`--session <key>`" + ` for session scope; add ` + "`--global`" + ` for cross-session facts.
+
+Service API internals (not the primary runner interface):
+- POST /internal/v1/runner-memory/search, /notes, and /pinned remain available for the OR3 service process.
 
 Approvals:
 - If a runner permission or OR3 approval is required, stop and wait for approval rather than guessing.

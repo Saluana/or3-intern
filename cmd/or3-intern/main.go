@@ -335,7 +335,7 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := loadedRuntimeConfig.Config
-	if err := prepareRuntimeStorage(cfg); err != nil {
+	if err := prepareRuntimeStorage(&cfg, cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime storage error:", err)
 		os.Exit(1)
 	}
@@ -571,15 +571,35 @@ func main() {
 			fmt.Fprintln(os.Stderr, "migrate-openclaw error:", err)
 			os.Exit(1)
 		}
+	case "memory":
+		if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "memory error:", err)
+			os.Exit(1)
+		}
+		if err := runMemoryCommandWithDeps(ctx, cfg, d, args[1:], memoryCommandDeps{
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "memory error:", err)
+			os.Exit(1)
+		}
 	case "skills":
+		if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "skills error:", err)
+			os.Exit(1)
+		}
+		bundledDir, bundledErr := resolveBundledSkillsDir(cfgPath)
+		if bundledErr != nil {
+			fmt.Fprintln(os.Stderr, "skills error:", bundledErr)
+			os.Exit(1)
+		}
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
 			LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
 				return loadAvailableToolNamesWithManager(ctx, cfg, struct{}{})
 			},
 			LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
-				builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-				return buildSkillsInventory(cfg, builtin, toolNames)
+				return buildSkillsInventory(cfg, bundledDir, toolNames)
 			},
 			Audit: func(ctx context.Context, eventType string, payload any) error {
 				if auditLogger == nil {

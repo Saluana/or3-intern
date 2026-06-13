@@ -58,6 +58,8 @@ type StartTurnRequest struct {
 	ApprovalToken      string
 	ApprovalAutopilot  bool
 	RunnerPermission   *RunnerPermissionRequest
+	MemoryRefresh      string
+	MemoryDebug        RunnerMemoryDebug
 }
 
 type turnMirrorState struct {
@@ -198,7 +200,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		Isolation:        firstNonEmptyStr(req.Isolation, sess.Isolation),
 		Cwd:              firstNonEmptyStr(req.Cwd, sess.Cwd),
 		ContinuationMode: string(req.ContinuationMode),
-		MetaJSON:         runnerChatTurnMetaJSON(req.ApprovalAutopilot),
+		MetaJSON:         runnerChatTurnMetaJSON(req.ApprovalAutopilot, req.MemoryDebug),
 	}
 	turn, err = cm.DB.CreateRunnerChatTurn(ctx, turn)
 	if err != nil {
@@ -255,6 +257,10 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		nativeSessionRef = sess.NativeSessionRef
 	}
 	agentMeta["runner_chat_native_session_ref"] = nativeSessionRef
+	if refresh := strings.TrimSpace(req.MemoryRefresh); refresh != "" {
+		agentMeta["runner_chat_memory_refresh"] = refresh
+	}
+	agentMeta["runner_chat_memory_debug"] = req.MemoryDebug
 	if approvedPermission != nil {
 		agentMeta["runner_permission"] = runnerPermissionToMap(*approvedPermission)
 	}

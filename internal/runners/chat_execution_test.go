@@ -25,6 +25,30 @@ func TestChatExecutionInputNativeContinuationUsesUserMessage(t *testing.T) {
 	}
 }
 
+func TestChatExecutionInputNativeContinuationPrependsMemoryRefresh(t *testing.T) {
+	got := ChatExecutionInput(RunnerChatCommandRequest{
+		ContinuationMode: ContinuationNative,
+		NativeSessionRef: "thread_1",
+		MemoryRefresh:    "memory_context:\npinned_memory:\n- fact: value",
+		UserMessage:      "continue here",
+	}, "run task fallback")
+	want := "memory_context:\npinned_memory:\n- fact: value\n\ncontinue here"
+	if got != want {
+		t.Fatalf("native continuation with refresh = %q, want %q", got, want)
+	}
+}
+
+func TestChatExecutionInputNativeContinuationWithoutMemoryFallsBackToUserMessage(t *testing.T) {
+	got := ChatExecutionInput(RunnerChatCommandRequest{
+		ContinuationMode: ContinuationNative,
+		NativeSessionRef: "thread_1",
+		UserMessage:      "only user",
+	}, "bootstrap")
+	if got != "only user" {
+		t.Fatalf("expected raw user text without memory, got %q", got)
+	}
+}
+
 func TestChatExecutionInputNativeFirstTurnUsesCompiledTask(t *testing.T) {
 	got := ChatExecutionInput(RunnerChatCommandRequest{
 		ContinuationMode: ContinuationNative,

@@ -42,6 +42,8 @@ type RunnerPromptCompileResult struct {
 	CompiledPrompt     string
 	RawTask            string
 	TriggerKind        string
+	MemoryRefresh      string
+	MemoryDebug        runners.RunnerMemoryDebug
 }
 
 // RunnerPromptCompiler assembles cache-friendly runner prompts for external runners.
@@ -90,8 +92,11 @@ func (c *RunnerPromptCompiler) Compile(ctx context.Context, in RunnerPromptCompi
 	bootstrap := c.bootstrapForTrigger(triggerKind)
 	stable := bootstrap.trustedBlocks()
 	var volatile []string
+	var memoryDebug runners.RunnerMemoryDebug
 	if c.context != nil {
-		volatile = c.context.BuildContextBlocks(ctx, in.SessionKey, userTask, triggerKind, bootstrap)
+		ctxResult := c.context.BuildContextWithMeta(ctx, in.SessionKey, userTask, triggerKind, bootstrap)
+		volatile = ctxResult.Blocks
+		memoryDebug = ctxResult.Debug
 	} else {
 		volatile = bootstrap.contextBlocks(triggerKind)
 	}
@@ -115,6 +120,7 @@ func (c *RunnerPromptCompiler) Compile(ctx context.Context, in RunnerPromptCompi
 		CompiledPrompt:     compiled,
 		RawTask:            raw,
 		TriggerKind:        triggerKind,
+		MemoryDebug:        memoryDebug,
 	}
 }
 

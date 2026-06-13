@@ -151,7 +151,15 @@ func (s *serviceServer) serviceBundledSkillsDir() string {
 	if cfgPath == "" {
 		cfgPath = cfgPathOrDefault("")
 	}
-	return filepath.Join(filepath.Dir(cfgPath), "builtin_skills")
+	cfg := s.config
+	if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err == nil {
+		s.config = cfg
+	}
+	dir, err := resolveBundledSkillsDir(cfgPath)
+	if err != nil {
+		return filepath.Join(filepath.Dir(cfgPath), "builtin_skills")
+	}
+	return dir
 }
 
 func (s *serviceServer) applyServiceSkillsInventory(_ skills.Inventory) {}

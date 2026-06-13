@@ -20,7 +20,7 @@ func TestPrepareRuntimeStorageCreatesDirsAndBootstrapFiles(t *testing.T) {
 	cfg.IdentityFile = filepath.Join(tmp, "IDENTITY.md")
 	cfg.MemoryFile = filepath.Join(tmp, "MEMORY.md")
 
-	if err := prepareRuntimeStorage(cfg); err != nil {
+	if err := prepareRuntimeStorage(&cfg, filepath.Join(tmp, "config.yaml")); err != nil {
 		t.Fatalf("prepareRuntimeStorage: %v", err)
 	}
 	for _, path := range []string{filepath.Dir(cfg.DBPath), cfg.ArtifactsDir} {

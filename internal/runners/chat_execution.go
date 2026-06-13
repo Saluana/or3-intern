@@ -10,7 +10,11 @@ func ChatExecutionInput(chat RunnerChatCommandRequest, runTask string) string {
 	switch chat.ContinuationMode {
 	case ContinuationNative:
 		if strings.TrimSpace(chat.NativeSessionRef) != "" {
-			return strings.TrimSpace(chat.UserMessage)
+			userMessage := strings.TrimSpace(chat.UserMessage)
+			if refresh := strings.TrimSpace(chat.MemoryRefresh); refresh != "" {
+				return refresh + "\n\n" + userMessage
+			}
+			return userMessage
 		}
 		return firstNonEmpty(strings.TrimSpace(runTask), strings.TrimSpace(chat.UserMessage))
 	default:

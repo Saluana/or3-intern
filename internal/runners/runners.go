@@ -401,6 +401,7 @@ type RunnerChatCommandRequest struct {
 	ContinuationMode ContinuationMode
 	ReplayPrompt     string
 	UserMessage      string
+	MemoryRefresh    string
 	Model            string
 	Mode             string
 	Isolation        string

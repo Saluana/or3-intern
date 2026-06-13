@@ -137,6 +137,7 @@ func buildRuntimeChatRequest(run db.RunnerRun) (RunnerChatCommandRequest, bool) 
 		ContinuationMode: ContinuationMode(firstNonEmptyStringMeta(meta, "runner_chat_continuation_mode", string(ContinuationReplay))),
 		ReplayPrompt:     firstNonEmptyStringMeta(meta, "runner_chat_replay_prompt", run.Task),
 		UserMessage:      firstNonEmptyStringMeta(meta, "runner_chat_user_message", run.Task),
+		MemoryRefresh:    stringMeta(meta, "runner_chat_memory_refresh"),
 		Model:            run.Model,
 		Mode:             run.Mode,
 		Isolation:        run.Isolation,

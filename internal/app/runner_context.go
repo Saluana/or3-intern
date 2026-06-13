@@ -64,9 +64,36 @@ func NewRunnerContextBuilder(cfg config.Config, deps RunnerContextDeps) *RunnerC
 }
 
 func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKey, userMessage, triggerKind string, bootstrap RunnerBootstrapContext) []string {
-	if b == nil {
-		return bootstrap.contextBlocks(triggerKind)
+	return b.BuildContextWithMeta(ctx, sessionKey, userMessage, triggerKind, bootstrap).Blocks
+}
+
+// BuildContextWithMeta assembles context blocks and memory-source debug flags.
+func (b *RunnerContextBuilder) BuildContextWithMeta(ctx context.Context, sessionKey, userMessage, triggerKind string, bootstrap RunnerBootstrapContext) RunnerContextBuildResult {
+	return b.buildContext(ctx, sessionKey, userMessage, triggerKind, bootstrap, true)
+}
+
+// RunnerContextBuildResult is the metadata-aware output of context assembly.
+type RunnerContextBuildResult struct {
+	Blocks      []string
+	MemoryParts []string
+	Debug       runners.RunnerMemoryDebug
+}
+
+func (b *RunnerContextBuilder) BuildNativeMemoryRefresh(ctx context.Context, sessionKey, userMessage string, bootstrap RunnerBootstrapContext) (string, runners.RunnerMemoryDebug) {
+	result := b.buildContext(ctx, sessionKey, userMessage, "user_message", bootstrap, false)
+	if len(result.MemoryParts) == 0 {
+		return "", result.Debug
 	}
+	refresh := "memory_context:\n" + strings.Join(result.MemoryParts, "\n\n")
+	result.Debug.NativeRefresh = true
+	return refresh, result.Debug
+}
+
+func (b *RunnerContextBuilder) buildContext(ctx context.Context, sessionKey, userMessage, triggerKind string, bootstrap RunnerBootstrapContext, includeDocs bool) RunnerContextBuildResult {
+	if b == nil {
+		return RunnerContextBuildResult{Blocks: bootstrap.contextBlocks(triggerKind)}
+	}
+	var debug runners.RunnerMemoryDebug
 	blocks := make([]string, 0, 4)
 	if autonomous := bootstrap.contextBlocks(triggerKind); len(autonomous) > 0 {
 		blocks = append(blocks, autonomous...)
@@ -83,6 +110,7 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 		if err != nil {
 			log.Printf("runner context: pinned memory failed for %q: %v", scopeKey, err)
 		} else if text := formatPinnedMemoryContext(pinned, runnerPinnedMemoryMaxChars); text != "" {
+			debug.PinnedNonEmpty = true
 			memoryParts = append(memoryParts, "pinned_memory:\n"+text)
 		}
 	}
@@ -106,16 +134,19 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 		if err != nil {
 			log.Printf("runner context: memory retrieve failed for %q: %v", scopeKey, err)
 		} else if text := memory.FormatRetrievedBrief(retrieved, runnerRetrievedMemoryMaxChars); text != "" && text != "(none)" {
+			debug.RetrievedNonEmpty = true
 			memoryParts = append(memoryParts, "retrieved_memory:\n"+text)
 		}
 	}
 	if text := compactRunnerContextText(bootstrap.StaticMemory, runnerStaticMemoryMaxChars); text != "" {
+		debug.DigestNonEmpty = true
 		memoryParts = append(memoryParts, "memory_digest:\n"+text)
 	}
 	if len(memoryParts) > 0 {
+		debug.PassiveCompiled = true
 		blocks = append(blocks, "memory_context:\n"+strings.Join(memoryParts, "\n\n"))
 	}
-	if b.deps.Docs != nil && strings.TrimSpace(userMessage) != "" {
+	if includeDocs && b.deps.Docs != nil && strings.TrimSpace(userMessage) != "" {
 		limit := b.deps.DocLimit
 		if limit <= 0 {
 			limit = 5
@@ -124,6 +155,7 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 		if err != nil {
 			log.Printf("runner context: doc retrieve failed: %v", err)
 		} else if len(docs) > 0 {
+			debug.DocsNonEmpty = true
 			var sb strings.Builder
 			sb.WriteString("indexed_docs:\n")
 			for i, d := range docs {
@@ -132,7 +164,7 @@ func (b *RunnerContextBuilder) BuildContextBlocks(ctx context.Context, sessionKe
 			blocks = append(blocks, strings.TrimSpace(sb.String()))
 		}
 	}
-	return blocks
+	return RunnerContextBuildResult{Blocks: blocks, MemoryParts: memoryParts, Debug: debug}
 }
 
 func formatPinnedMemoryContext(pinned map[string]string, maxChars int) string {

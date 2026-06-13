@@ -172,172 +172,6 @@ func TestCodexAdapter_DangerousBypassFlag(t *testing.T) {
 	}
 }
 
-func TestClaudeAdapter_SafeEdit(t *testing.T) {
-	adapter := &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "fix bug",
-		Mode: "safe_edit",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !contains(cmd.Args, "--bare") {
-		t.Errorf("expected --bare, got %v", cmd.Args)
-	}
-	if !containsArg(cmd.Args, "--permission-mode", "acceptEdits") {
-		t.Errorf("expected --permission-mode acceptEdits, got %v", cmd.Args)
-	}
-	if !containsArg(cmd.Args, "--output-format", "stream-json") {
-		t.Errorf("expected --output-format stream-json, got %v", cmd.Args)
-	}
-}
-
-func TestClaudeAdapter_ReviewMode(t *testing.T) {
-	adapter := &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "review code",
-		Mode: "review",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--permission-mode", "plan") {
-		t.Errorf("expected plan for review, got %v", cmd.Args)
-	}
-}
-
-func TestClaudeAdapter_SandboxAuto(t *testing.T) {
-	adapter := &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "do it",
-		Mode: "sandbox_auto",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--permission-mode", "bypassPermissions") {
-		t.Errorf("expected bypassPermissions for sandbox_auto, got %v", cmd.Args)
-	}
-}
-
-func TestClaudeAdapter_MaxTurns(t *testing.T) {
-	adapter := &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task:     "do it",
-		Mode:     "safe_edit",
-		MaxTurns: 5,
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--max-turns", "5") {
-		t.Errorf("expected --max-turns 5, got %v", cmd.Args)
-	}
-}
-
-func TestClaudeAdapter_NoMaxTurns(t *testing.T) {
-	adapter := &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "do it",
-		Mode: "safe_edit",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	for _, a := range cmd.Args {
-		if a == "--max-turns" {
-			t.Errorf("unexpected --max-turns when MaxTurns=0")
-		}
-	}
-}
-
-func TestGeminiAdapter_DefaultArgs(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "hello",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--prompt", "hello") {
-		t.Errorf("expected --prompt hello, got %v", cmd.Args)
-	}
-	if !containsArg(cmd.Args, "--output-format", "json") {
-		t.Errorf("expected --output-format json, got %v", cmd.Args)
-	}
-}
-
-func TestGeminiAdapter_SafeEdit(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "fix bug",
-		Mode: "safe_edit",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--approval-mode", "auto_edit") {
-		t.Errorf("expected --approval-mode auto_edit, got %v", cmd.Args)
-	}
-}
-
-func TestGeminiAdapter_ReviewMode(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "review",
-		Mode: "review",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--approval-mode", "default") {
-		t.Errorf("expected --approval-mode default, got %v", cmd.Args)
-	}
-}
-
-func TestGeminiAdapter_SandboxAuto(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "do it",
-		Mode: "sandbox_auto",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	if !containsArg(cmd.Args, "--approval-mode", "yolo") {
-		t.Errorf("expected --approval-mode yolo, got %v", cmd.Args)
-	}
-}
-
-func TestGeminiAdapter_NoDuplicateYolo(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	cmd, err := adapter.BuildCommand(RunnerRunRequest{
-		Task: "do it",
-		Mode: "sandbox_auto",
-	})
-	if err != nil {
-		t.Fatalf("BuildCommand: %v", err)
-	}
-	count := 0
-	for _, a := range cmd.Args {
-		if a == "--yolo" {
-			count++
-		}
-	}
-	if count > 0 {
-		t.Errorf("adapter emitted --yolo %d times (should be 0)", count)
-	}
-	count = 0
-	for _, a := range cmd.Args {
-		if a == "--approval-mode" || a == "yolo" {
-			count++
-		}
-	}
-	if count > 2 {
-		t.Errorf("expected exactly one --approval-mode yolo pair, got: %v", cmd.Args)
-	}
-}
-
 func TestShellMetacharactersRemainOneArgvElement(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -346,8 +180,6 @@ func TestShellMetacharactersRemainOneArgvElement(t *testing.T) {
 	}{
 		{"opencode semicolon", &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}, `fix"; rm -rf /"`},
 		{"codex backticks", &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}, "run `evil`"},
-		{"claude dollar", &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}, "ls $(cat /etc/passwd)"},
-		{"gemini newlines", &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}, "first\nrm -rf /"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -373,7 +205,7 @@ func TestShellMetacharactersRemainOneArgvElement(t *testing.T) {
 
 func TestNewDefaultRegistry_HasAllAdapters(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, id := range []RunnerID{RunnerOpenCode, RunnerCodex, RunnerClaude, RunnerGemini} {
+	for _, id := range []RunnerID{RunnerOpenCode, RunnerCodex} {
 		adapter, ok := reg.Adapter(id)
 		if !ok {
 			t.Errorf("NewDefaultRegistry missing adapter for %q", id)
@@ -387,7 +219,7 @@ func TestNewDefaultRegistry_HasAllAdapters(t *testing.T) {
 		}
 	}
 	// Verify BuildCommand works without manual spec wiring
-	for _, id := range []RunnerID{RunnerOpenCode, RunnerCodex, RunnerClaude, RunnerGemini} {
+	for _, id := range []RunnerID{RunnerOpenCode, RunnerCodex} {
 		cmd, err := reg.BuildCommand(RunnerRunRequest{
 			RunnerID: string(id),
 			Task:     "test",
@@ -426,10 +258,15 @@ func TestAllRunners_IncludesAllAdapterIDs(t *testing.T) {
 	for _, s := range all {
 		ids[s.ID] = true
 	}
-	expected := []RunnerID{RunnerOpenCode, RunnerCodex, RunnerClaude, RunnerGemini}
+	expected := []RunnerID{RunnerOpenCode, RunnerCodex}
 	for _, id := range expected {
 		if !ids[id] {
 			t.Errorf("AllRunners missing %q", id)
+		}
+	}
+	for _, id := range []RunnerID{RunnerClaude, RunnerGemini} {
+		if ids[id] {
+			t.Errorf("AllRunners should not include removed runner %q", id)
 		}
 	}
 }

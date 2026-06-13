@@ -440,6 +440,17 @@ func compactStrings(values []string) []string {
 	return out
 }
 
+func supportedRunnerIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "opencode", "codex":
+			out = append(out, strings.ToLower(strings.TrimSpace(value)))
+		}
+	}
+	return compactStrings(out)
+}
+
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
 		return true
@@ -473,9 +484,9 @@ func validateRunnersConfig(cfg RunnersConfig) error {
 		return errors.New("runners.default is required")
 	}
 	switch defaultRunner {
-	case "opencode", "codex", "claude", "gemini":
+	case "opencode", "codex":
 	default:
-		return fmt.Errorf("runners.default must be opencode, codex, claude, or gemini (got %q)", cfg.Default)
+		return fmt.Errorf("runners.default must be opencode or codex (got %q)", cfg.Default)
 	}
 	for _, disabled := range cfg.Disabled {
 		if strings.EqualFold(strings.TrimSpace(disabled), defaultRunner) {

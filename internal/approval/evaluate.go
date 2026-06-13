@@ -39,17 +39,45 @@ func (b *Broker) EvaluateRunnerPermission(ctx context.Context, req RunnerPermiss
 		RequestingAgent: strings.TrimSpace(req.AgentID),
 		SessionID:       strings.TrimSpace(req.SessionID),
 	}
-	return b.evaluateWithMode(ctx, SubjectRunnerPermission, subject, req.ApprovalToken, b.Config.Exec.Mode,
-		AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.RunnerID, Agent: subject.RequestingAgent},
-		RunnerPermissionAllowlistMatcher{RunnerID: subject.RunnerID, PermissionKind: subject.PermissionKind, Access: subject.Access, TargetPath: subject.TargetPath},
+	scope := AllowlistScope{HostID: subject.ExecutionHostID, Tool: subject.RunnerID, Agent: subject.RequestingAgent}
+	matcher := RunnerPermissionAllowlistMatcher{RunnerID: subject.RunnerID, PermissionKind: subject.PermissionKind, Access: subject.Access, TargetPath: subject.TargetPath}
+	return b.evaluateWithMode(ctx, SubjectRunnerPermission, subject, req.ApprovalToken, b.Config.Exec.Mode, scope, matcher,
+		func(ctx context.Context, sh SubjectHash, mode config.ApprovalMode) (Decision, bool, error) {
+			return b.applyRunnerPermissionAutopilot(ctx, req, subject, sh, scope, mode)
+		},
 	)
 }
 
-func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
-	return b.evaluateWithMode(ctx, subjectType, subject, approvalToken, b.modeFor(subjectType), scope, matcher)
+func (b *Broker) applyRunnerPermissionAutopilot(ctx context.Context, req RunnerPermissionEvaluation, subject RunnerPermissionSubject, sh SubjectHash, scope AllowlistScope, mode config.ApprovalMode) (Decision, bool, error) {
+	moderator := reviewRunnerPermissionAutopilot(req)
+	if !moderator.Reviewed {
+		return Decision{}, false, nil
+	}
+	if moderator.Action == "approve_once" {
+		_ = b.audit(ctx, "approval.moderator.approved", map[string]any{
+			"subject_hash": sh.Hash, "host_id": b.hostID(), "type": string(SubjectRunnerPermission),
+			"risk": moderator.Risk, "action": moderator.Action, "policy_hash": moderator.PolicyHash,
+		})
+		return Decision{Allowed: true, SubjectHash: sh.Hash, Reason: "moderator_approved", Moderator: moderator}, true, nil
+	}
+	dec, err := b.requireApproval(ctx, SubjectRunnerPermission, subject, sh, scope, mode)
+	if err != nil {
+		return Decision{}, false, err
+	}
+	dec.Moderator = moderator
+	if b.DB != nil && dec.RequestID != 0 {
+		_ = b.DB.UpdateApprovalRequestModerator(ctx, dec.RequestID, moderator.Status, moderator.Risk, moderator.Action, moderator.Reason, moderator.Model, moderator.PolicyHash, b.now().UnixMilli(), moderator.LatencyMS)
+	}
+	return dec, true, nil
 }
 
-func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, mode config.ApprovalMode, scope AllowlistScope, matcher any) (Decision, error) {
+func (b *Broker) evaluate(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, scope AllowlistScope, matcher any) (Decision, error) {
+	return b.evaluateWithMode(ctx, subjectType, subject, approvalToken, b.modeFor(subjectType), scope, matcher, nil)
+}
+
+type preRequireApprovalHook func(ctx context.Context, sh SubjectHash, mode config.ApprovalMode) (Decision, bool, error)
+
+func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, subject any, approvalToken string, mode config.ApprovalMode, scope AllowlistScope, matcher any, preRequire preRequireApprovalHook) (Decision, error) {
 	sh, err := CanonicalSubjectHash(subject)
 	if err != nil {
 		return Decision{}, err
@@ -63,6 +91,13 @@ func (b *Broker) evaluateWithMode(ctx context.Context, subjectType SubjectType, 
 	}
 	if mode == config.ApprovalModeAllowlist {
 		if dec, ok := b.checkAllowlist(ctx, subjectType, scope, matcher, sh, mode); ok {
+			return dec, nil
+		}
+	}
+	if preRequire != nil {
+		if dec, ok, err := preRequire(ctx, sh, mode); err != nil {
+			return Decision{}, err
+		} else if ok {
 			return dec, nil
 		}
 	}

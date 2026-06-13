@@ -1126,13 +1126,13 @@ func TestLoad_RunnersDisabledRunnersEnvOverride(t *testing.T) {
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 
-	t.Setenv("OR3_RUNNERS_DISABLED", "opencode,codex, claude ")
+	t.Setenv("OR3_RUNNERS_DISABLED", "codex, claude ")
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	expected := []string{"opencode", "codex", "claude"}
+	expected := []string{"codex"}
 	if len(cfg.Runners.Disabled) != len(expected) {
 		t.Fatalf("expected %d disabled runners, got %d: %v", len(expected), len(cfg.Runners.Disabled), cfg.Runners.Disabled)
 	}
@@ -1198,8 +1198,8 @@ func TestLoad_RunnersDefaultEnvOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Runners.Default != "claude" {
-		t.Errorf("expected env override claude, got %q", cfg.Runners.Default)
+	if cfg.Runners.Default != "opencode" {
+		t.Errorf("expected removed env override to migrate to opencode, got %q", cfg.Runners.Default)
 	}
 }
 

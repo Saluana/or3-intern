@@ -81,54 +81,6 @@ func (a *CodexAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSp
 	return a.buildNativeResumeChatCommand(req)
 }
 
-func (a *ClaudeAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
-	if req.ContinuationMode != ContinuationNative || strings.TrimSpace(req.NativeSessionRef) == "" {
-		return a.BuildCommand(chatCommandRunRequest(a.ID(), req))
-	}
-	cmd, err := a.BuildCommand(chatCommandRunRequest(a.ID(), req))
-	if err != nil {
-		return CommandSpec{}, err
-	}
-	args := make([]string, 0, len(cmd.Args)+2)
-	if len(cmd.Args) > 0 && cmd.Args[0] == "--bare" {
-		args = append(args, "--bare", "--resume", strings.TrimSpace(req.NativeSessionRef))
-		args = append(args, cmd.Args[1:]...)
-	} else {
-		args = append(args, "--resume", strings.TrimSpace(req.NativeSessionRef))
-		args = append(args, cmd.Args...)
-	}
-	cmd.Args = args
-	cmd.ArgvPreview = append([]string{}, args...)
-	return cmd, nil
-}
-
-func (a *GeminiAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
-	if req.ContinuationMode != ContinuationNative {
-		return a.buildReplayChatCommand(req)
-	}
-	return a.buildNativeChatCommand(req)
-}
-
-func (a *GeminiAdapter) buildReplayChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
-	task := chatCommandRunRequest(a.ID(), req).Task
-	args := []string{"--prompt", task, "--output-format", "stream-json"}
-	mode := RunnerMode(req.Mode)
-	switch mode {
-	case RunnerModeReview:
-		args = append(args, "--approval-mode", "default")
-	case RunnerModeSafeEdit, "":
-		args = append(args, "--approval-mode", "auto_edit")
-	case RunnerModeSandboxAuto:
-		args = append(args, "--approval-mode", "yolo")
-	default:
-		return CommandSpec{}, fmt.Errorf("unsupported gemini mode %q", req.Mode)
-	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	return CommandSpec{RunnerID: a.ID(), Binary: a.spec.Binary, Args: args, Cwd: req.Cwd, OutputMode: OutputJSONL, ArgvPreview: append([]string{}, args...)}, nil
-}
-
 func (a *CodexAdapter) buildNativeResumeChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
 	base := chatCommandRunRequest(a.ID(), req)
 	mode := RunnerMode(req.Mode)
@@ -158,30 +110,6 @@ func (a *CodexAdapter) buildNativeResumeChatCommand(req RunnerChatCommandRequest
 		args = append(args, "--model", req.Model)
 	}
 	args = append(args, strings.TrimSpace(req.NativeSessionRef), base.Task)
-	return CommandSpec{RunnerID: a.ID(), Binary: a.spec.Binary, Args: args, Cwd: req.Cwd, OutputMode: OutputJSONL, ArgvPreview: append([]string{}, args...)}, nil
-}
-
-func (a *GeminiAdapter) buildNativeChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
-	task := chatCommandRunRequest(a.ID(), req).Task
-	args := make([]string, 0, 12)
-	if ref := strings.TrimSpace(req.NativeSessionRef); ref != "" {
-		args = append(args, "--resume", ref)
-	}
-	args = append(args, "--prompt", task, "--output-format", "stream-json")
-	mode := RunnerMode(req.Mode)
-	switch mode {
-	case RunnerModeReview:
-		args = append(args, "--approval-mode", "default")
-	case RunnerModeSafeEdit, "":
-		args = append(args, "--approval-mode", "auto_edit")
-	case RunnerModeSandboxAuto:
-		args = append(args, "--approval-mode", "yolo")
-	default:
-		return CommandSpec{}, fmt.Errorf("unsupported gemini mode %q", req.Mode)
-	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
 	return CommandSpec{RunnerID: a.ID(), Binary: a.spec.Binary, Args: args, Cwd: req.Cwd, OutputMode: OutputJSONL, ArgvPreview: append([]string{}, args...)}, nil
 }
 
@@ -235,43 +163,6 @@ func (a *CodexAdapter) NormalizeChatEvent(raw RunnerRunEvent) []RunnerChatEvent 
 	return normalizeGenericChatEvent(raw)
 }
 
-func (a *ClaudeAdapter) NormalizeChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
-	if raw.Type == "structured" {
-		if events := normalizeClaudeStructuredChatEvent(raw); len(events) > 0 {
-			return events
-		}
-		return []RunnerChatEvent{{Type: "runner_output", Seq: raw.Seq, Stream: raw.Stream, Payload: rawEventPayload(raw)}}
-	}
-	if raw.Type == "output" && raw.Stream == "stdout" {
-		trimmed := strings.TrimSpace(raw.Chunk)
-		payloads, _ := decodeStructuredPayloads(trimmed)
-		if trimmed == "" || strings.HasPrefix(trimmed, "{") || len(payloads) > 0 {
-			return []RunnerChatEvent{{Type: "runner_output", Seq: raw.Seq, Stream: raw.Stream, Payload: rawEventPayload(raw)}}
-		}
-	}
-	return normalizeGenericChatEvent(raw)
-}
-
-func (a *GeminiAdapter) NormalizeChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
-	if raw.Type == "structured" {
-		if events := normalizeGeminiStructuredChatEvent(raw); len(events) > 0 {
-			return events
-		}
-		if isSuppressedGeminiStructuredEvent(raw.Payload) {
-			return nil
-		}
-		return []RunnerChatEvent{{Type: "runner_output", Seq: raw.Seq, Stream: raw.Stream, Payload: rawEventPayload(raw)}}
-	}
-	if raw.Type == "output" && raw.Stream == "stdout" {
-		trimmed := strings.TrimSpace(raw.Chunk)
-		payloads, _ := decodeStructuredPayloads(trimmed)
-		if trimmed == "" || strings.HasPrefix(trimmed, "{") || len(payloads) > 0 {
-			return []RunnerChatEvent{{Type: "runner_output", Seq: raw.Seq, Stream: raw.Stream, Payload: rawEventPayload(raw)}}
-		}
-	}
-	return normalizeGenericChatEvent(raw)
-}
-
 func (a *OpenCodeAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string, bool) {
 	payload := strings.TrimSpace(extractOpenCodeSessionRefPayload(event))
 	if payload == "" {
@@ -283,20 +174,6 @@ func (a *OpenCodeAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string,
 func (a *CodexAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string, bool) {
 	ref := extractProviderSessionRef(event, []string{"thread_id", "threadId"}, func(obj map[string]any) bool {
 		return stringField(obj, "type") == "thread.started" || stringField(obj, "method") == "thread/started"
-	})
-	return ref, ref != ""
-}
-
-func (a *ClaudeAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string, bool) {
-	ref := extractProviderSessionRef(event, []string{"session_id", "sessionId"}, func(obj map[string]any) bool {
-		return stringField(obj, "type") == "system" && stringField(obj, "subtype") == "init"
-	})
-	return ref, ref != ""
-}
-
-func (a *GeminiAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string, bool) {
-	ref := extractProviderSessionRef(event, []string{"session_id", "sessionId"}, func(obj map[string]any) bool {
-		return stringField(obj, "type") == "init"
 	})
 	return ref, ref != ""
 }
@@ -489,224 +366,6 @@ func isSuppressedCodexStructuredEvent(raw json.RawMessage) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeClaudeStructuredChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
-	obj, ok := rawObject(raw.Payload)
-	if !ok {
-		return nil
-	}
-	if stringField(obj, "type") == "assistant" || stringField(obj, "type") == "assistant_message" {
-		text := extractString(firstNonNil(obj["message"], obj["content"], obj["text"]))
-		if text != "" {
-			return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload)}}
-		}
-	}
-	if stringField(obj, "type") == "content_block_delta" || stringField(obj, "type") == "delta" {
-		text := extractString(firstNonNil(obj["text"], obj["delta"], mapField(obj, "delta")["text"]))
-		if text != "" {
-			return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamKindFromClaude(obj), text, raw.Payload)}}
-		}
-	}
-	if stringField(obj, "type") == "tool_use" || stringField(obj, "type") == "tool_result" {
-		lifecycle := runtimeEventItemStarted
-		status := "inProgress"
-		if stringField(obj, "type") == "tool_result" {
-			lifecycle = runtimeEventItemCompleted
-			status = "completed"
-		}
-		name := extractString(firstNonNil(obj["name"], obj["tool_name"]))
-		payload := toolLifecyclePayload(classifyToolName(name), status, name, extractString(firstNonNil(obj["input"], obj["content"], obj["result"])), obj)
-		return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Payload: runtimePayload(lifecycle, payload, raw.Payload)}}
-	}
-	if stringField(obj, "type") == "result" {
-		status := "completed"
-		if strings.TrimSpace(extractString(obj["error"])) != "" {
-			status = "failed"
-		}
-		return []RunnerChatEvent{{Type: runtimeEventTurnCompleted, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTurnCompleted, map[string]any{"state": status}, raw.Payload)}}
-	}
-	return nil
-}
-
-func normalizeGeminiStructuredChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
-	obj, ok := rawObject(raw.Payload)
-	if !ok {
-		return nil
-	}
-	eventType := strings.ToLower(stringField(obj, "type"))
-	if eventType == "init" {
-		return nil
-	}
-	if eventType == "result" {
-		if !strings.EqualFold(stringField(obj, "status"), "error") {
-			return nil
-		}
-		msg := extractString(firstNonNil(mapField(obj, "error")["message"], obj["message"], obj["error"]))
-		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: msg, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": msg}, raw.Payload)}}
-	}
-	if eventType == "message" && strings.EqualFold(stringField(obj, "role"), "user") {
-		return nil
-	}
-	text := extractGeminiAssistantText(obj)
-	if eventType == "content" || eventType == "assistant" || eventType == "message" || (eventType == "" && text != "") {
-		if text != "" {
-			return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload)}}
-		}
-	}
-	if strings.Contains(strings.ToLower(eventType), "tool") {
-		status := "inProgress"
-		lifecycle := runtimeEventItemStarted
-		if strings.Contains(strings.ToLower(eventType), "completed") || strings.Contains(strings.ToLower(eventType), "result") {
-			status = "completed"
-			lifecycle = runtimeEventItemCompleted
-		}
-		name := geminiToolName(obj)
-		data := geminiToolData(obj, name)
-		detail := extractString(firstNonNil(obj["arguments"], obj["parameters"], obj["input"], obj["output"], mapField(obj, "error")["message"]))
-		return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Payload: runtimePayload(lifecycle, toolLifecyclePayload(classifyToolName(name), status, name, detail, data), raw.Payload)}}
-	}
-	if eventType == "error" {
-		msg := extractString(firstNonNil(obj["message"], obj["error"]))
-		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: msg, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": msg}, raw.Payload)}}
-	}
-	return nil
-}
-
-func isSuppressedGeminiStructuredEvent(raw json.RawMessage) bool {
-	obj, ok := rawObject(raw)
-	if !ok {
-		return false
-	}
-	eventType := strings.ToLower(stringField(obj, "type"))
-	if eventType == "init" {
-		return true
-	}
-	if eventType == "message" && strings.EqualFold(stringField(obj, "role"), "user") {
-		return true
-	}
-	if eventType == "result" && !strings.EqualFold(stringField(obj, "status"), "error") {
-		return true
-	}
-	return false
-}
-
-func geminiToolName(obj map[string]any) string {
-	name := extractString(firstNonNil(obj["name"], obj["tool_name"], obj["toolName"]))
-	if name != "" {
-		return name
-	}
-	toolID := strings.TrimSpace(extractString(firstNonNil(obj["tool_id"], obj["toolId"], obj["id"])))
-	if toolID == "" {
-		return ""
-	}
-	parts := strings.Split(toolID, "_")
-	if len(parts) >= 3 && isNumericString(parts[len(parts)-1]) && isNumericString(parts[len(parts)-2]) {
-		return strings.Join(parts[:len(parts)-2], "_")
-	}
-	return toolID
-}
-
-func geminiToolData(obj map[string]any, name string) map[string]any {
-	data := make(map[string]any, len(obj)+4)
-	for key, value := range obj {
-		data[key] = value
-	}
-	toolID := strings.TrimSpace(extractString(firstNonNil(obj["tool_id"], obj["toolId"], obj["id"])))
-	if toolID != "" {
-		data["id"] = toolID
-		data["callID"] = toolID
-	}
-	if strings.TrimSpace(name) != "" {
-		data["name"] = name
-		data["tool"] = name
-	}
-	if parameters := mapField(obj, "parameters"); len(parameters) > 0 {
-		data["input"] = parameters
-	}
-	if output := extractString(obj["output"]); output != "" {
-		data["result"] = output
-	}
-	return data
-}
-
-func isNumericString(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func extractGeminiAssistantText(obj map[string]any) string {
-	return extractGeminiAssistantValue(firstNonNil(
-		obj["response"],
-		obj["result"],
-		obj["text"],
-		obj["content"],
-		obj["delta"],
-		obj["message"],
-	), 0)
-}
-
-func extractGeminiAssistantValue(value any, depth int) string {
-	if depth > 4 {
-		return ""
-	}
-	switch v := value.(type) {
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return ""
-		}
-		if nested := extractGeminiAssistantFromSerialized(trimmed, depth+1); nested != "" {
-			return nested
-		}
-		return trimmed
-	case []any:
-		parts := make([]string, 0, len(v))
-		for _, item := range v {
-			if text := extractGeminiAssistantValue(item, depth+1); text != "" {
-				parts = append(parts, text)
-			}
-		}
-		return strings.TrimSpace(strings.Join(parts, "\n\n"))
-	case map[string]any:
-		for _, key := range []string{"response", "result", "text", "content", "delta", "message"} {
-			if text := extractGeminiAssistantValue(v[key], depth+1); text != "" {
-				return text
-			}
-		}
-	}
-	return ""
-}
-
-func extractGeminiAssistantFromSerialized(text string, depth int) string {
-	if depth > 4 {
-		return ""
-	}
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return ""
-	}
-	candidates := []string{trimmed}
-	if strings.HasPrefix(trimmed, "\"") && strings.Contains(trimmed, "\":") && !strings.HasPrefix(trimmed, "\"{") {
-		candidates = append(candidates, "{"+trimmed+"}")
-	}
-	for _, candidate := range candidates {
-		var parsed any
-		if err := json.Unmarshal([]byte(candidate), &parsed); err != nil {
-			continue
-		}
-		if nested := extractGeminiAssistantValue(parsed, depth+1); nested != "" && nested != trimmed {
-			return nested
-		}
-	}
-	return ""
 }
 
 func openCodeTextPart(value any) (string, bool) {
@@ -1286,14 +945,6 @@ func codexTurnState(obj map[string]any) string {
 	}
 }
 
-func runtimeStreamKindFromClaude(obj map[string]any) string {
-	kind := strings.ToLower(firstNonEmptyStr(stringField(obj, "stream_kind"), stringField(obj, "streamKind"), stringField(obj, "kind")))
-	if strings.Contains(kind, "reasoning") || strings.Contains(kind, "thinking") {
-		return runtimeStreamReasoningText
-	}
-	return runtimeStreamAssistantText
-}
-
 // extractTokenUsage reads a {input, output, cached, total, ...} object
 // from any of the common shapes the runtimes emit.
 func extractTokenUsage(obj map[string]any) map[string]any {
@@ -1607,9 +1258,5 @@ func looksSessionID(value string) bool {
 
 var _ RunnerChatAdapter = (*OpenCodeAdapter)(nil)
 var _ RunnerChatAdapter = (*CodexAdapter)(nil)
-var _ RunnerChatAdapter = (*ClaudeAdapter)(nil)
-var _ RunnerChatAdapter = (*GeminiAdapter)(nil)
 var _ NativeRunnerChatAdapter = (*OpenCodeAdapter)(nil)
 var _ NativeRunnerChatAdapter = (*CodexAdapter)(nil)
-var _ NativeRunnerChatAdapter = (*ClaudeAdapter)(nil)
-var _ NativeRunnerChatAdapter = (*GeminiAdapter)(nil)

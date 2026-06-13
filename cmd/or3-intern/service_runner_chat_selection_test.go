@@ -55,8 +55,6 @@ func newDiscoveryRegistry() *runners.RunnerRegistry {
 	return runners.NewRunnerRegistry(specs, []runners.RunnerAdapter{
 		runners.NewOpenCodeAdapter(),
 		runners.NewCodexAdapter(),
-		runners.NewClaudeAdapter(),
-		runners.NewGeminiAdapter(),
 	})
 }
 
@@ -235,8 +233,6 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	binDir := t.TempDir()
 	writeExecutableScript(t, binDir, "opencode", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'OpenCode 1.2.3'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"list\" ]; then\n  exit 1\nfi\nexit 0\n")
 	writeExecutableScript(t, binDir, "codex", "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  echo 'Codex 0.9.0'\n  exit 0\nfi\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nexit 0\n")
-	writeExecutableScript(t, binDir, "claude", "#!/bin/sh\necho 'Claude 9.9.9'\nexit 0\n")
-	writeExecutableScript(t, binDir, "gemini", "#!/bin/sh\nexit 1\n")
 	oldPath := os.Getenv("PATH")
 	if err := os.Setenv("PATH", binDir); err != nil {
 		t.Fatalf("Setenv PATH: %v", err)
@@ -244,7 +240,6 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	defer os.Setenv("PATH", oldPath)
 
 	cfg := config.Default()
-	cfg.Runners.Disabled = []string{string(runners.RunnerClaude)}
 	registry := newDiscoveryRegistry()
 	manager := &runners.Manager{DB: database, Cfg: cfg.Runners, Registry: registry}
 	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, &runners.ChatManager{DB: database, Manager: manager})
@@ -278,11 +273,12 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	if got := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["status"]; got != string(runners.RunnerStatusAvailable) {
 		t.Fatalf("expected Codex available, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(runners.RunnerClaude))["status"]; got != string(runners.RunnerStatusDisabledByConfig) {
-		t.Fatalf("expected Claude disabled_by_config, got %#v", got)
-	}
-	if got := findRunnerByID(t, chatPayload, string(runners.RunnerGemini))["status"]; got != string(runners.RunnerStatusError) {
-		t.Fatalf("expected Gemini error, got %#v", got)
+	for _, removed := range []string{string(runners.RunnerClaude), string(runners.RunnerGemini)} {
+		for _, raw := range chatPayload["runners"].([]any) {
+			if item, ok := raw.(map[string]any); ok && item["id"] == removed {
+				t.Fatalf("removed runner %q must not be returned, got %#v", removed, chatPayload)
+			}
+		}
 	}
 	codexCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["chat_capabilities"].(map[string]any)
 	if !ok || codexCaps["chatNativeSession"] != true || codexCaps["streamToolEvents"] != true {

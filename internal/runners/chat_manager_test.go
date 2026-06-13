@@ -72,7 +72,7 @@ func TestChatManagerUsesSessionMaxTurnsDefault(t *testing.T) {
 	ctx := context.Background()
 	sess, err := cm.EnsureSession(ctx, StartTurnRequest{
 		AppSessionKey:    "app-session",
-		RunnerID:         string(RunnerClaude),
+		RunnerID:         string(RunnerOpenCode),
 		ContinuationMode: ContinuationReplay,
 		MaxTurns:         7,
 	})
@@ -91,8 +91,12 @@ func TestChatManagerUsesSessionMaxTurnsDefault(t *testing.T) {
 	if run.MetaJSON == "" || run.MetaJSON == "{}" {
 		t.Fatalf("expected max turns in meta, got %q", run.MetaJSON)
 	}
-	if got := run.MetaJSON; got != `{"_max_turns":7,"runner_chat_continuation_mode":"replay","runner_chat_native_session_ref":"","runner_chat_replay_prompt":"System: This conversation is being replayed for context. Previous turns are provided below in chronological order. Treat them as authoritative chat history.\n\nUser: hello\n","runner_chat_session_id":"`+sess.ID+`","runner_chat_turn_id":"`+result.Turn.ID+`","runner_chat_user_message":"hello"}` {
-		t.Fatalf("unexpected meta json: %s", got)
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(run.MetaJSON), &meta); err != nil {
+		t.Fatalf("decode meta json: %v", err)
+	}
+	if got := meta["_max_turns"]; got != float64(7) {
+		t.Fatalf("expected _max_turns=7, got %#v in %s", got, run.MetaJSON)
 	}
 }
 

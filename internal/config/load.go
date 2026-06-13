@@ -165,7 +165,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Runners.Disabled == nil {
 		cfg.Runners.Disabled = []string{}
 	}
-	cfg.Runners.Disabled = compactStrings(cfg.Runners.Disabled)
+	cfg.Runners.Disabled = supportedRunnerIDs(compactStrings(cfg.Runners.Disabled))
 	if cfg.Runners.RuntimeMode == nil {
 		cfg.Runners.RuntimeMode = map[string]string{"opencode": "auto", "codex": "auto"}
 	} else {
@@ -173,6 +173,10 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
 			trimmedMode := strings.ToLower(strings.TrimSpace(mode))
 			if trimmedRunner == "" {
+				delete(cfg.Runners.RuntimeMode, runner)
+				continue
+			}
+			if trimmedRunner != "opencode" && trimmedRunner != "codex" {
 				delete(cfg.Runners.RuntimeMode, runner)
 				continue
 			}
@@ -195,7 +199,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
 			trimmedModel := strings.TrimSpace(model)
 			delete(cfg.Runners.DefaultModels, runner)
-			if trimmedRunner != "" && trimmedModel != "" {
+			if (trimmedRunner == "opencode" || trimmedRunner == "codex") && trimmedModel != "" {
 				cfg.Runners.DefaultModels[trimmedRunner] = trimmedModel
 			}
 		}
@@ -207,7 +211,7 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 			trimmedRunner := strings.ToLower(strings.TrimSpace(runner))
 			trimmedEndpoint := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 			delete(cfg.Runners.NativeServerURLs, runner)
-			if trimmedRunner != "" && trimmedEndpoint != "" {
+			if (trimmedRunner == "opencode" || trimmedRunner == "codex") && trimmedEndpoint != "" {
 				cfg.Runners.NativeServerURLs[trimmedRunner] = trimmedEndpoint
 			}
 		}
@@ -224,6 +228,8 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 		cfg.Runners.ChildEnvAllowlist = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP"}
 	}
 	if trimmed := strings.ToLower(strings.TrimSpace(cfg.Runners.Default)); trimmed == "" {
+		cfg.Runners.Default = "opencode"
+	} else if trimmed == "claude" || trimmed == "gemini" {
 		cfg.Runners.Default = "opencode"
 	} else {
 		cfg.Runners.Default = trimmed

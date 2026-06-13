@@ -35,9 +35,9 @@ func TestExtractFinalTextCandidateRunnerSpecificAndGeneric(t *testing.T) {
 		score  int
 		text   string
 	}{
-		{name: "gemini response", runner: RunnerGemini, value: map[string]any{"response": "Gemini done"}, score: 100, text: "Gemini done"},
-		{name: "claude assistant", runner: RunnerClaude, value: map[string]any{"type": "assistant", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "part one"}, map[string]any{"type": "text", "text": "part two"}}}}, score: 85, text: "part one\n\npart two"},
-		{name: "claude success result", runner: RunnerClaude, value: map[string]any{"type": "result", "subtype": "success", "result": "final answer"}, score: 100, text: "final answer"},
+		{name: "generic gemini-shaped response", runner: "", value: map[string]any{"response": "Gemini done"}, score: 70, text: "Gemini done"},
+		{name: "generic claude-shaped assistant", runner: "", value: map[string]any{"type": "assistant", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "part one"}, map[string]any{"type": "text", "text": "part two"}}}}, score: 90, text: "part one\n\npart two"},
+		{name: "generic result envelope", runner: "", value: map[string]any{"type": "result", "subtype": "success", "result": "final answer"}, score: 88, text: "final answer"},
 		{name: "codex content fallback", runner: RunnerCodex, value: map[string]any{"type": "item.completed", "item": map[string]any{"type": "agent_message", "content": "codex content"}}, score: 95, text: "codex content"},
 		{name: "opencode text part", runner: RunnerOpenCode, value: map[string]any{"type": "text", "part": map[string]any{"type": "text", "text": "delta"}}, score: 100, text: "delta"},
 		{name: "opencode reasoning part suppressed", runner: RunnerOpenCode, value: map[string]any{"type": "text", "part": map[string]any{"type": "text", "kind": "thinking", "text": "private thought"}}, score: 0, text: ""},
@@ -57,12 +57,6 @@ func TestExtractFinalTextCandidateRunnerSpecificAndGeneric(t *testing.T) {
 }
 
 func TestResultExtractHelpers(t *testing.T) {
-	if got := extractClaudeAssistantText(map[string]any{"content": "single string"}); got != "single string" {
-		t.Fatalf("expected string fallback, got %q", got)
-	}
-	if got := extractClaudeAssistantText("nope"); got != "" {
-		t.Fatalf("expected empty assistant text, got %q", got)
-	}
 	if got := extractTextPart(map[string]any{"type": "tool", "text": "ignore"}); got != "" {
 		t.Fatalf("expected non-text part to be ignored, got %q", got)
 	}
@@ -109,15 +103,5 @@ func TestExtractOpenCodeVisibleTextSuppressesReasoningTypeParts(t *testing.T) {
 	}
 	if got := extractOpenCodeVisibleText(value); got != "I can help with code." {
 		t.Fatalf("expected only visible assistant text, got %q", got)
-	}
-}
-
-func TestExtractGeminiAssistantValueNestedJSONResponse(t *testing.T) {
-	value := map[string]any{
-		"session_id": "session_outer",
-		"response":   "{\n \"session_id\": \"session_inner\",\n \"response\": \"I'm fully operational and ready to assist.\",\n \"stats\": {\"models\": {}}\n}",
-	}
-	if got := extractGeminiAssistantText(value); got != "I'm fully operational and ready to assist." {
-		t.Fatalf("unexpected nested Gemini response extraction: %q", got)
 	}
 }

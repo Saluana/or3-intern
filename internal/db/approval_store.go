@@ -57,9 +57,17 @@ type ApprovalRequestRecord struct {
 	ResolverActorID      string
 	ResolutionKind       string
 	ResolutionNote       string
+	ModeratorStatus      string
+	ModeratorRisk        string
+	ModeratorAction      string
+	ModeratorReason      string
+	ModeratorModel       string
+	ModeratorPolicyHash  string
+	ModeratorReviewedAt  int64
+	ModeratorLatencyMS   int64
 }
 
-const approvalRequestSelectColumns = `id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note`
+const approvalRequestSelectColumns = `id, type, subject_hash, subject_json, requester_agent_id, requester_session_id, requester_context_json, execution_host_id, status, policy_mode, requested_at, expires_at, resolved_at, resolver_actor_id, resolution_kind, resolution_note, moderator_status, moderator_risk, moderator_action, moderator_reason, moderator_model, moderator_policy_hash, moderator_reviewed_at, moderator_latency_ms`
 
 type ApprovalAllowlistRecord struct {
 	ID                  int64
@@ -763,6 +771,12 @@ func (d *DB) DisableApprovalAllowlist(ctx context.Context, id int64, disabledAt 
 	return rows > 0, nil
 }
 
+func (d *DB) UpdateApprovalRequestModerator(ctx context.Context, id int64, status, risk, action, reason, model, policyHash string, reviewedAt, latencyMS int64) error {
+	_, err := d.SQL.ExecContext(ctx, `UPDATE approval_requests SET moderator_status=?, moderator_risk=?, moderator_action=?, moderator_reason=?, moderator_model=?, moderator_policy_hash=?, moderator_reviewed_at=?, moderator_latency_ms=? WHERE id=?`,
+		status, risk, action, reason, model, policyHash, reviewedAt, latencyMS, id)
+	return err
+}
+
 // ApproveRequestArtifacts bundles the side effects of approving a request.
 type ApproveRequestArtifacts struct {
 	Request     ApprovalRequestRecord
@@ -956,6 +970,7 @@ func scanApprovalRequest(scanner interface{ Scan(dest ...any) error }) (Approval
 	if err := scanner.Scan(
 		&rec.ID, &rec.Type, &rec.SubjectHash, &rec.SubjectJSON, &rec.RequesterAgentID, &rec.RequesterSessionID, &rec.RequesterContextJSON,
 		&rec.ExecutionHostID, &rec.Status, &rec.PolicyMode, &rec.RequestedAt, &rec.ExpiresAt, &rec.ResolvedAt, &rec.ResolverActorID, &rec.ResolutionKind, &rec.ResolutionNote,
+		&rec.ModeratorStatus, &rec.ModeratorRisk, &rec.ModeratorAction, &rec.ModeratorReason, &rec.ModeratorModel, &rec.ModeratorPolicyHash, &rec.ModeratorReviewedAt, &rec.ModeratorLatencyMS,
 	); err != nil {
 		return ApprovalRequestRecord{}, err
 	}

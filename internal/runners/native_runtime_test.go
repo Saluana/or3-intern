@@ -72,7 +72,7 @@ func TestRunnerRuntimeModeDefaultsAndOverrides(t *testing.T) {
 	if got := runnerRuntimeMode(cfg, RunnerCodex); got != RuntimeModeNative {
 		t.Fatalf("codex mode = %q, want native", got)
 	}
-	if got := runnerRuntimeMode(cfg, RunnerClaude); got != RuntimeModeAuto {
+	if got := runnerRuntimeMode(cfg, RunnerID("legacy-runner")); got != RuntimeModeAuto {
 		t.Fatalf("unknown mode = %q, want auto", got)
 	}
 }

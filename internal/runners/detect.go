@@ -44,26 +44,8 @@ func Detect(ctx context.Context, spec RunnerSpec, opts DetectOptions) RunnerInfo
 		}
 		out, err := cmd.Output()
 		if err != nil {
-			if spec.ID == RunnerGemini {
-				vCtx2, cancel2 := context.WithTimeout(ctx, 2*time.Second)
-				defer cancel2()
-				helpCmd := exec.CommandContext(vCtx2, path, "--help")
-				if opts.WorkDir != "" {
-					helpCmd.Dir = opts.WorkDir
-				}
-				if len(opts.Env) > 0 {
-					helpCmd.Env = opts.Env
-				}
-				if helpOut, helpErr := helpCmd.Output(); helpErr == nil {
-					info.Version = firstLine(helpOut)
-				} else {
-					info.Status = RunnerStatusError
-					return info
-				}
-			} else {
-				info.Status = RunnerStatusError
-				return info
-			}
+			info.Status = RunnerStatusError
+			return info
 		} else {
 			info.Version = firstLine(out)
 		}
@@ -89,10 +71,6 @@ func Detect(ctx context.Context, spec RunnerSpec, opts DetectOptions) RunnerInfo
 		} else {
 			info.AuthStatus = AuthReady
 		}
-	}
-
-	if spec.ID == RunnerGemini {
-		info.AuthStatus = AuthUnknown
 	}
 
 	return info

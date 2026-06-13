@@ -3,7 +3,6 @@ package runners
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -51,54 +50,6 @@ func AllRunners() []RunnerSpec {
 				ModelFlag:           true,
 				PermissionsMode:     false,
 				SafeSandboxFlag:     true,
-				DangerousBypassFlag: true,
-				StdinPrompt:         false,
-				Chat: RunnerChatCapabilities{
-					ChatSelectable:            true,
-					ChatReplay:                true,
-					ChatNativeSession:         true,
-					ChatResume:                true,
-					ChatSessionRefExtractable: true,
-					StreamToolEvents:          true,
-				},
-			},
-		},
-		{
-			ID:          RunnerClaude,
-			DisplayName: "Claude Code",
-			Binary:      "claude",
-			VersionArgs: []string{"--version"},
-			AuthCheck:   &SmallCommandSpec{Args: []string{"auth", "status"}, Timeout: 3},
-			Supports: RunnerSupports{
-				StructuredOutput:    true,
-				StreamingJSON:       true,
-				ModelFlag:           true,
-				PermissionsMode:     true,
-				SafeSandboxFlag:     false,
-				DangerousBypassFlag: true,
-				StdinPrompt:         false,
-				Chat: RunnerChatCapabilities{
-					ChatSelectable:            true,
-					ChatReplay:                true,
-					ChatNativeSession:         true,
-					ChatResume:                true,
-					ChatSessionRefExtractable: true,
-					StreamToolEvents:          true,
-				},
-			},
-		},
-		{
-			ID:          RunnerGemini,
-			DisplayName: "Gemini CLI",
-			Binary:      "gemini",
-			VersionArgs: []string{"--version"},
-			AuthCheck:   nil,
-			Supports: RunnerSupports{
-				StructuredOutput:    true,
-				StreamingJSON:       true,
-				ModelFlag:           true,
-				PermissionsMode:     true,
-				SafeSandboxFlag:     false,
 				DangerousBypassFlag: true,
 				StdinPrompt:         false,
 				Chat: RunnerChatCapabilities{
@@ -285,18 +236,14 @@ func ValidateRunPolicy(mode RunnerMode, isolation RunIsolation, allowSandboxAuto
 	return nil
 }
 
-// NewDefaultRegistry creates a fully-wired registry with all standard runners and adapters.
+// NewDefaultRegistry creates a fully-wired registry with supported runner adapters.
 func NewDefaultRegistry() *RunnerRegistry {
 	specs := AllRunners()
 	openCodeSpec := findSpec(specs, RunnerOpenCode)
 	codexSpec := findSpec(specs, RunnerCodex)
-	claudeSpec := findSpec(specs, RunnerClaude)
-	geminiSpec := findSpec(specs, RunnerGemini)
 	return NewRunnerRegistry(specs, []RunnerAdapter{
 		&OpenCodeAdapter{spec: openCodeSpec},
 		&CodexAdapter{spec: codexSpec},
-		&ClaudeAdapter{spec: claudeSpec},
-		&GeminiAdapter{spec: geminiSpec},
 	})
 }
 
@@ -331,20 +278,8 @@ func NewCodexAdapter() *CodexAdapter {
 	return &CodexAdapter{spec: codexSpec()}
 }
 
-// NewClaudeAdapter creates a Claude Code adapter wired to the standard spec.
-func NewClaudeAdapter() *ClaudeAdapter {
-	return &ClaudeAdapter{spec: claudeSpec()}
-}
-
-// NewGeminiAdapter creates a Gemini CLI adapter wired to the standard spec.
-func NewGeminiAdapter() *GeminiAdapter {
-	return &GeminiAdapter{spec: geminiSpec()}
-}
-
 func openCodeSpec() RunnerSpec { return findSpec(AllRunners(), RunnerOpenCode) }
 func codexSpec() RunnerSpec    { return findSpec(AllRunners(), RunnerCodex) }
-func claudeSpec() RunnerSpec   { return findSpec(AllRunners(), RunnerClaude) }
-func geminiSpec() RunnerSpec   { return findSpec(AllRunners(), RunnerGemini) }
 
 // OpenCodeAdapter builds argv for OpenCode CLI.
 type OpenCodeAdapter struct{ spec RunnerSpec }
@@ -424,91 +359,6 @@ func (a *CodexAdapter) BuildCommand(req RunnerRunRequest) (CommandSpec, error) {
 		Args:        args,
 		Cwd:         req.Cwd,
 		OutputMode:  OutputJSONL,
-		ArgvPreview: append([]string{}, args...),
-	}, nil
-}
-
-// ClaudeAdapter builds argv for Claude Code CLI.
-type ClaudeAdapter struct{ spec RunnerSpec }
-
-func (a *ClaudeAdapter) ID() RunnerID        { return RunnerClaude }
-func (a *ClaudeAdapter) DisplayName() string { return "Claude Code" }
-func (a *ClaudeAdapter) Spec() RunnerSpec    { return a.spec }
-func (a *ClaudeAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInfo {
-	return Detect(ctx, a.spec, opts)
-}
-
-func (a *ClaudeAdapter) BuildCommand(req RunnerRunRequest) (CommandSpec, error) {
-	args := []string{
-		"--bare",
-		"-p", req.Task,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
-	}
-
-	mode := RunnerMode(req.Mode)
-	switch mode {
-	case RunnerModeReview:
-		args = append(args, "--permission-mode", "plan")
-	case RunnerModeSafeEdit, "":
-		args = append(args, "--permission-mode", "acceptEdits")
-	case RunnerModeSandboxAuto:
-		args = append(args, "--permission-mode", "bypassPermissions")
-	default:
-		return CommandSpec{}, fmt.Errorf("unsupported claude mode %q", req.Mode)
-	}
-
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	if req.MaxTurns > 0 {
-		args = append(args, "--max-turns", strconv.Itoa(req.MaxTurns))
-	}
-	return CommandSpec{
-		RunnerID:    a.ID(),
-		Binary:      a.spec.Binary,
-		Args:        args,
-		Cwd:         req.Cwd,
-		OutputMode:  OutputJSONL,
-		ArgvPreview: append([]string{}, args...),
-	}, nil
-}
-
-// GeminiAdapter builds argv for Gemini CLI.
-type GeminiAdapter struct{ spec RunnerSpec }
-
-func (a *GeminiAdapter) ID() RunnerID        { return RunnerGemini }
-func (a *GeminiAdapter) DisplayName() string { return "Gemini CLI" }
-func (a *GeminiAdapter) Spec() RunnerSpec    { return a.spec }
-func (a *GeminiAdapter) Detect(ctx context.Context, opts DetectOptions) RunnerInfo {
-	return Detect(ctx, a.spec, opts)
-}
-
-func (a *GeminiAdapter) BuildCommand(req RunnerRunRequest) (CommandSpec, error) {
-	args := []string{"--prompt", req.Task, "--output-format", "json"}
-
-	mode := RunnerMode(req.Mode)
-	switch mode {
-	case RunnerModeReview:
-		args = append(args, "--approval-mode", "default")
-	case RunnerModeSafeEdit, "":
-		args = append(args, "--approval-mode", "auto_edit")
-	case RunnerModeSandboxAuto:
-		args = append(args, "--approval-mode", "yolo")
-	default:
-		return CommandSpec{}, fmt.Errorf("unsupported gemini mode %q", req.Mode)
-	}
-
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	return CommandSpec{
-		RunnerID:    a.ID(),
-		Binary:      a.spec.Binary,
-		Args:        args,
-		Cwd:         req.Cwd,
-		OutputMode:  OutputJSON,
 		ArgvPreview: append([]string{}, args...),
 	}, nil
 }

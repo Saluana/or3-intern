@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 )
 
@@ -84,5 +86,87 @@ func TestRunnerChatStoreReconcileOnStartup(t *testing.T) {
 	}
 	if turn.Status != RunnerChatTurnStatusAborted || turn.ErrorMessage == "" {
 		t.Fatalf("turn not reconciled: %#v", turn)
+	}
+}
+
+func TestRunnerChatTurnColumnsMigration_ExistingDB(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy_runner_chat.db")
+
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	legacyStmts := []string{
+		`CREATE TABLE sessions(key TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', last_consolidated_msg_id INTEGER NOT NULL DEFAULT 0);`,
+		`CREATE TABLE runner_chat_sessions(
+			id TEXT PRIMARY KEY,
+			app_session_key TEXT NOT NULL,
+			runner_id TEXT NOT NULL,
+			continuation_mode TEXT NOT NULL DEFAULT 'replay',
+			native_session_ref TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
+			isolation TEXT NOT NULL DEFAULT '',
+			cwd TEXT NOT NULL DEFAULT '',
+			max_turns INTEGER NOT NULL DEFAULT 0,
+			meta_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(app_session_key, runner_id)
+		);`,
+		`CREATE TABLE runner_chat_turns(
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			user_message TEXT NOT NULL DEFAULT '',
+			final_text TEXT NOT NULL DEFAULT '',
+			error_message TEXT NOT NULL DEFAULT '',
+			runner_job_id TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
+			isolation TEXT NOT NULL DEFAULT '',
+			cwd TEXT NOT NULL DEFAULT '',
+			continuation_mode TEXT NOT NULL DEFAULT 'replay',
+			user_message_id INTEGER NOT NULL DEFAULT 0,
+			assistant_message_id INTEGER NOT NULL DEFAULT 0,
+			requested_at INTEGER NOT NULL,
+			started_at INTEGER NOT NULL DEFAULT 0,
+			completed_at INTEGER NOT NULL DEFAULT 0,
+			meta_json TEXT NOT NULL DEFAULT '{}'
+		);`,
+	}
+	for _, stmt := range legacyStmts {
+		if _, err := rawDB.Exec(stmt); err != nil {
+			t.Fatalf("create legacy schema: %v", err)
+		}
+	}
+	if _, err := rawDB.Exec(`INSERT INTO sessions(key, created_at, updated_at) VALUES('app-session', 1, 1)`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO runner_chat_sessions(id, app_session_key, runner_id, continuation_mode, created_at, updated_at) VALUES('rcs-legacy', 'app-session', 'opencode', 'replay', 1, 1)`); err != nil {
+		t.Fatalf("seed runner chat session: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO runner_chat_turns(id, session_id, sequence, status, user_message, continuation_mode, requested_at) VALUES('rct-legacy', 'rcs-legacy', 1, 'succeeded', 'hello', 'replay', 1)`); err != nil {
+		t.Fatalf("seed runner chat turn: %v", err)
+	}
+	_ = rawDB.Close()
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after legacy schema: %v", err)
+	}
+	defer d.Close()
+
+	turns, err := d.ListRunnerChatTurns(context.Background(), "rcs-legacy", 0)
+	if err != nil {
+		t.Fatalf("ListRunnerChatTurns after migration: %v", err)
+	}
+	if len(turns) != 1 || turns[0].UserMessage != "hello" {
+		t.Fatalf("unexpected turns after migration: %#v", turns)
+	}
+	if turns[0].RunnerRunID != "" {
+		t.Fatalf("expected empty runner_run_id default, got %q", turns[0].RunnerRunID)
 	}
 }

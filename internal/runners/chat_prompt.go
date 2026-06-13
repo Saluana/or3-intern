@@ -1,6 +1,7 @@
 package runners
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -175,8 +176,13 @@ func sanitizeReplayAssistantText(text string) string {
 	if trimmed == "" {
 		return ""
 	}
-	if nested := extractGeminiAssistantFromSerialized(trimmed, 0); nested != "" {
-		return nested
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+		for _, key := range []string{"response", "result", "text", "content", "message"} {
+			if candidate := extractString(parsed[key]); candidate != "" && candidate != trimmed {
+				return candidate
+			}
+		}
 	}
 	return trimmed
 }

@@ -31,7 +31,7 @@ func TestProcessManager_ExtractsGeminiFinalText(t *testing.T) {
 
 	pm := NewProcessManager(1024, 4096)
 	out := pm.Run(context.Background(), CommandSpec{
-		RunnerID:   RunnerGemini,
+		RunnerID:   RunnerCodex,
 		Binary:     "fake-gemini",
 		Env:        []string{"PATH=" + dir},
 		OutputMode: OutputJSON,
@@ -45,20 +45,20 @@ func TestProcessManager_ExtractsGeminiFinalText(t *testing.T) {
 	}
 }
 
-func TestProcessManager_ExtractsClaudeFinalText(t *testing.T) {
+func TestProcessManager_ExtractsGenericResultFinalText(t *testing.T) {
 	dir := t.TempDir()
-	writeFakeBinary(t, dir, "fake-claude", `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}' && printf '%s\n' '{"type":"result","subtype":"success","result":"Final markdown answer"}'`)
+	writeFakeBinary(t, dir, "fake-runner", `printf '%s\n' '{"type":"result","subtype":"success","result":"Final markdown answer"}'`)
 
 	pm := NewProcessManager(1024, 4096)
 	out := pm.Run(context.Background(), CommandSpec{
-		RunnerID:   RunnerClaude,
-		Binary:     "fake-claude",
+		RunnerID:   RunnerCodex,
+		Binary:     "fake-runner",
 		Env:        []string{"PATH=" + dir},
 		OutputMode: OutputJSONL,
 	}, nil)
 
 	if out.FinalTextPreview != "Final markdown answer" {
-		t.Fatalf("expected claude result text, got %q", out.FinalTextPreview)
+		t.Fatalf("expected result text, got %q", out.FinalTextPreview)
 	}
 }
 

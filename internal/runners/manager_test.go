@@ -215,14 +215,6 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 			info:      RunnerInfo{Status: RunnerStatusMissing},
 			fetchedAt: time.Now(),
 		}
-		manager.Registry.detectCache[RunnerClaude] = runnerDetectCacheEntry{
-			info:      RunnerInfo{Status: RunnerStatusAuthMissing},
-			fetchedAt: time.Now(),
-		}
-		manager.Registry.detectCache[RunnerGemini] = runnerDetectCacheEntry{
-			info:      RunnerInfo{Status: RunnerStatusError},
-			fetchedAt: time.Now(),
-		}
 		return manager
 	}
 
@@ -269,13 +261,25 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 			wantErrText: "not installed",
 		},
 		{
-			name:        "runner auth missing",
-			req:         RunnerRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerClaude)},
+			name: "runner auth missing",
+			mutate: func(m *Manager) {
+				m.Registry.detectCache[RunnerOpenCode] = runnerDetectCacheEntry{
+					info:      RunnerInfo{Status: RunnerStatusAuthMissing},
+					fetchedAt: time.Now(),
+				}
+			},
+			req:         RunnerRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode)},
 			wantErrText: "not authenticated",
 		},
 		{
-			name:        "runner not functional",
-			req:         RunnerRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerGemini)},
+			name: "runner not functional",
+			mutate: func(m *Manager) {
+				m.Registry.detectCache[RunnerOpenCode] = runnerDetectCacheEntry{
+					info:      RunnerInfo{Status: RunnerStatusError},
+					fetchedAt: time.Now(),
+				}
+			},
+			req:         RunnerRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode)},
 			wantErrText: "not functional",
 		},
 		{

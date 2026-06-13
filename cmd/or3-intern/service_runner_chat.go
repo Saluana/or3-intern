@@ -26,31 +26,33 @@ func (s *serviceServer) runnerChatWriteUnavailable() bool {
 
 // runnerChatCreateSessionRequest is the body for POST /runner-chat/sessions.
 type runnerChatCreateSessionRequest struct {
-	AppSessionKey    string `json:"app_session_key"`
-	RunnerID         string `json:"runner_id"`
-	ContinuationMode string `json:"continuation_mode"`
-	Model            string `json:"model"`
-	Mode             string `json:"mode"`
-	Isolation        string `json:"isolation"`
-	Cwd              string `json:"cwd"`
-	MaxTurns         int    `json:"max_turns"`
+	AppSessionKey     string `json:"app_session_key"`
+	RunnerID          string `json:"runner_id"`
+	ContinuationMode  string `json:"continuation_mode"`
+	Model             string `json:"model"`
+	Mode              string `json:"mode"`
+	Isolation         string `json:"isolation"`
+	Cwd               string `json:"cwd"`
+	MaxTurns          int    `json:"max_turns"`
+	ApprovalAutopilot *bool `json:"approval_autopilot"`
 }
 
 // runnerChatStartTurnRequest is the body for POST /runner-chat/sessions/:id/turns.
 type runnerChatStartTurnRequest struct {
-	UserMessage      string           `json:"user_message"`
-	Attachments      []map[string]any `json:"attachments"`
-	ContinuationMode string           `json:"continuation_mode"`
-	Model            string           `json:"model"`
-	Mode             string           `json:"mode"`
-	Isolation        string           `json:"isolation"`
-	Cwd              string           `json:"cwd"`
-	MaxTurns         int              `json:"max_turns"`
-	TimeoutSeconds   int              `json:"timeout_seconds"`
-	Meta             map[string]any   `json:"meta"`
-	ThinkingLevel    string           `json:"thinking_level"`
-	ApprovalToken    string           `json:"approval_token"`
-	RunnerPermission struct {
+	UserMessage       string           `json:"user_message"`
+	Attachments       []map[string]any `json:"attachments"`
+	ContinuationMode  string           `json:"continuation_mode"`
+	Model             string           `json:"model"`
+	Mode              string           `json:"mode"`
+	Isolation         string           `json:"isolation"`
+	Cwd               string           `json:"cwd"`
+	MaxTurns          int              `json:"max_turns"`
+	TimeoutSeconds    int              `json:"timeout_seconds"`
+	Meta              map[string]any   `json:"meta"`
+	ThinkingLevel     string           `json:"thinking_level"`
+	ApprovalToken     string           `json:"approval_token"`
+	ApprovalAutopilot *bool            `json:"approval_autopilot"`
+	RunnerPermission  struct {
 		RunnerID   string `json:"runner_id"`
 		Kind       string `json:"kind"`
 		Access     string `json:"access"`
@@ -311,6 +313,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		TimeoutSeconds:     req.TimeoutSeconds,
 		Meta:               req.Meta,
 		ApprovalToken:      serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
+		ApprovalAutopilot:  runners.ResolveRunnerApprovalAutopilot(req.ApprovalAutopilot),
 	}
 	if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
 		if startReq.Meta == nil {

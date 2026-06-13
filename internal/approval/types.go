@@ -56,6 +56,7 @@ type Decision struct {
 	RequestID        int64
 	SubjectHash      string
 	Reason           string
+	Moderator        ModeratorDecision
 }
 
 type RequesterContext struct {
@@ -89,6 +90,19 @@ type RunnerPermissionEvaluation struct {
 	AgentID        string
 	SessionID      string
 	ApprovalToken  string
+	Autopilot      bool
+	RunnerMode     string
+}
+
+type ModeratorDecision struct {
+	Reviewed   bool
+	Status     string
+	Risk       string
+	Action     string
+	Reason     string
+	Model      string
+	PolicyHash string
+	LatencyMS  int64
 }
 
 type MessageSendSubject struct {

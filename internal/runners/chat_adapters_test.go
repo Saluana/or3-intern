@@ -14,8 +14,6 @@ func TestChatAdaptersBuildReplayCommands(t *testing.T) {
 	}{
 		{"opencode", &OpenCodeAdapter{spec: RunnerSpec{Binary: "opencode"}}, []string{"run", "--format", "json", "replay prompt"}},
 		{"codex", &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}, []string{"--ask-for-approval", "never", "-c", "mcp_servers={}", "exec", "--json", "--color", "never", "--skip-git-repo-check", "--sandbox", "workspace-write", "replay prompt"}},
-		{"claude", &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}, []string{"--bare", "-p", "replay prompt", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"}},
-		{"gemini", &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}, []string{"--prompt", "replay prompt", "--output-format", "stream-json", "--approval-mode", "auto_edit"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -43,7 +41,7 @@ func TestNormalizeGenericChatEventKeepsRawOutput(t *testing.T) {
 }
 
 func TestNormalizeGenericChatEventMapsStdoutToTextDelta(t *testing.T) {
-	adapter := &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}
+	adapter := &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}
 	events := adapter.NormalizeChatEvent(RunnerRunEvent{Type: "output", Stream: "stdout", Chunk: "hello", Seq: 3})
 	if len(events) != 1 || events[0].Type != "text_delta" || events[0].Text != "hello" {
 		t.Fatalf("unexpected normalized event: %#v", events)
@@ -257,18 +255,6 @@ func TestNativeChatCommandsUseUserMessageNotReplayPrompt(t *testing.T) {
 			ref:     "thread_123",
 			want:    []string{"--ask-for-approval", "never", "-c", "mcp_servers={}", "--cd", "/workspace", "--sandbox", "workspace-write", "exec", "resume", "--json", "--skip-git-repo-check", "thread_123", "continue from here"},
 		},
-		{
-			name:    "claude",
-			adapter: &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}},
-			ref:     "session_123",
-			want:    []string{"--bare", "--resume", "session_123", "-p", "continue from here", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"},
-		},
-		{
-			name:    "gemini",
-			adapter: &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}},
-			ref:     "session_123",
-			want:    []string{"--resume", "session_123", "--prompt", "continue from here", "--output-format", "stream-json", "--approval-mode", "auto_edit"},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -317,85 +303,6 @@ func TestCodexNativeResumeSandboxAutoUsesSupportedArgs(t *testing.T) {
 	}
 }
 
-func TestNativeFirstTurnUsesCompiledBootstrapWhenProvided(t *testing.T) {
-	gemini := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	cmd, err := gemini.BuildChatCommand(RunnerChatCommandRequest{
-		ReplayPrompt:     "full replay prompt",
-		UserMessage:      "start native session",
-		ContinuationMode: ContinuationNative,
-		Mode:             string(RunnerModeSafeEdit),
-	})
-	if err != nil {
-		t.Fatalf("BuildChatCommand: %v", err)
-	}
-	assertArgsEqual(t, []string{"--prompt", "full replay prompt", "--output-format", "stream-json", "--approval-mode", "auto_edit"}, cmd.Args)
-	if cmd.OutputMode != OutputJSONL {
-		t.Fatalf("expected native Gemini chat to use JSONL output, got %q", cmd.OutputMode)
-	}
-}
-
-func TestGeminiNormalizeStructuredResultEnvelope(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	payload := json.RawMessage(`{"session_id":"session_outer","response":"{\n \"session_id\": \"session_inner\",\n \"response\": \"I'm fully operational and ready to assist.\",\n \"stats\": {\"models\": {}}\n}","stats":{"models":{"gemini-3-flash-preview":{"api":{"totalRequests":1}}}}}`)
-	events := adapter.NormalizeChatEvent(RunnerRunEvent{Type: "structured", Payload: payload, Seq: 42})
-	if len(events) != 1 {
-		t.Fatalf("expected one normalized event, got %#v", events)
-	}
-	if events[0].Type != "text_delta" {
-		t.Fatalf("expected text_delta, got %#v", events[0])
-	}
-	if events[0].Text != "I'm fully operational and ready to assist." {
-		t.Fatalf("unexpected Gemini normalized text: %q", events[0].Text)
-	}
-}
-
-func TestGeminiNormalizeSuppressesUserEchoAndSuccessResult(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	for _, payload := range []json.RawMessage{
-		json.RawMessage(`{"type":"init","session_id":"session_gemini"}`),
-		json.RawMessage(`{"type":"message","role":"user","content":"System: replay prompt"}`),
-		json.RawMessage(`{"type":"result","status":"success","stats":{"total_tokens":12}}`),
-	} {
-		events := adapter.NormalizeChatEvent(RunnerRunEvent{Type: "structured", Payload: payload, Seq: 43})
-		if len(events) != 0 {
-			t.Fatalf("expected Gemini metadata/user echo to be suppressed, got %#v", events)
-		}
-	}
-}
-
-func TestGeminiNormalizeAssistantMessageDelta(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	events := adapter.NormalizeChatEvent(RunnerRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"message","role":"assistant","content":"I'm listening."}`), Seq: 44})
-	if len(events) != 1 || events[0].Type != "text_delta" || events[0].Text != "I'm listening." {
-		t.Fatalf("expected assistant message delta only, got %#v", events)
-	}
-}
-
-func TestGeminiNormalizeToolUseAndResultShareStableCardKey(t *testing.T) {
-	adapter := &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}
-	toolID := "google_web_search_1778396831085_0"
-	started := adapter.NormalizeChatEvent(RunnerRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"tool_use","tool_name":"google_web_search","tool_id":"` + toolID + `","parameters":{"query":"vancouver news"}}`), Seq: 45})
-	completed := adapter.NormalizeChatEvent(RunnerRunEvent{Type: "structured", Payload: json.RawMessage(`{"type":"tool_result","tool_id":"` + toolID + `","status":"success","output":"Search results returned."}`), Seq: 46})
-	if len(started) != 1 || started[0].Type != runtimeEventItemStarted {
-		t.Fatalf("expected Gemini tool_use to start one item, got %#v", started)
-	}
-	if len(completed) != 1 || completed[0].Type != runtimeEventItemCompleted {
-		t.Fatalf("expected Gemini tool_result to complete one item, got %#v", completed)
-	}
-	for _, event := range []RunnerChatEvent{started[0], completed[0]} {
-		assertPayloadField(t, event.Payload, "item_type", runtimeItemWebSearch)
-		assertPayloadField(t, event.Payload, "title", "google_web_search")
-		var payload map[string]any
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			t.Fatalf("unmarshal payload: %v", err)
-		}
-		data, ok := payload["data"].(map[string]any)
-		if !ok || data["id"] != toolID || data["name"] != "google_web_search" {
-			t.Fatalf("expected stable Gemini tool data, got %#v", payload["data"])
-		}
-	}
-}
-
 func TestNativeSessionRefExtractors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -404,8 +311,6 @@ func TestNativeSessionRefExtractors(t *testing.T) {
 		want    string
 	}{
 		{"codex", &CodexAdapter{spec: RunnerSpec{Binary: "codex"}}, json.RawMessage(`{"type":"thread.started","thread_id":"thread_abc"}`), "thread_abc"},
-		{"claude", &ClaudeAdapter{spec: RunnerSpec{Binary: "claude"}}, json.RawMessage(`{"type":"system","subtype":"init","session_id":"session_claude"}`), "session_claude"},
-		{"gemini", &GeminiAdapter{spec: RunnerSpec{Binary: "gemini"}}, json.RawMessage(`{"type":"init","session_id":"session_gemini"}`), "session_gemini"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

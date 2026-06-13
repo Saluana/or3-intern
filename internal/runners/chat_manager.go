@@ -56,6 +56,7 @@ type StartTurnRequest struct {
 	TimeoutSeconds     int
 	Meta               map[string]any
 	ApprovalToken      string
+	ApprovalAutopilot  bool
 	RunnerPermission   *RunnerPermissionRequest
 }
 
@@ -197,6 +198,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		Isolation:        firstNonEmptyStr(req.Isolation, sess.Isolation),
 		Cwd:              firstNonEmptyStr(req.Cwd, sess.Cwd),
 		ContinuationMode: string(req.ContinuationMode),
+		MetaJSON:         runnerChatTurnMetaJSON(req.ApprovalAutopilot),
 	}
 	turn, err = cm.DB.CreateRunnerChatTurn(ctx, turn)
 	if err != nil {
@@ -247,6 +249,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	agentMeta["runner_chat_continuation_mode"] = string(req.ContinuationMode)
 	agentMeta["runner_chat_user_message"] = userMessage
 	agentMeta["runner_chat_replay_prompt"] = prompt
+	agentMeta["runner_approval_autopilot"] = req.ApprovalAutopilot
 	nativeSessionRef := ""
 	if req.ContinuationMode == ContinuationNative {
 		nativeSessionRef = sess.NativeSessionRef
@@ -798,6 +801,8 @@ func (cm *ChatManager) approvedRunnerPermission(ctx context.Context, sess db.Run
 		TargetPath:     permission.TargetPath,
 		SessionID:      sess.AppSessionKey,
 		ApprovalToken:  strings.TrimSpace(req.ApprovalToken),
+		Autopilot:      req.ApprovalAutopilot,
+		RunnerMode:     firstNonEmptyStr(req.Mode, sess.Mode),
 	})
 	if err != nil {
 		return nil, err
@@ -889,6 +894,8 @@ func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess
 		Access:         permission.Access,
 		TargetPath:     permission.TargetPath,
 		SessionID:      sess.AppSessionKey,
+		Autopilot:      RunnerApprovalAutopilotFromTurnMeta(turn.MetaJSON),
+		RunnerMode:     turn.Mode,
 	})
 	if err != nil {
 		log.Printf("chat manager: runner permission evaluation failed: turn=%s err=%v", turn.ID, err)
@@ -898,13 +905,14 @@ func (cm *ChatManager) appendRunnerApprovalRequired(turn db.RunnerChatTurn, sess
 	// skip emitting the approval_required event so the app doesn't render a
 	// dead approval card. We still record the native request for replay.
 	if !decision.RequiresApproval || decision.RequestID == 0 {
-		if hasNative {
-			state.permission = &runnerApprovalState{
-				Request:       permission,
-				Decision:      decision,
-				Message:       runnerPermissionApprovalMessage(permission),
-				NativeRequest: nativeRef,
-				HasNative:     true,
+		if decision.Allowed && hasNative {
+			if responder, ok := cm.lookupNativeResponder(sess.RunnerID); ok {
+				if err := responder.RespondToNativeRequest(context.Background(), nativeRef, NativeRequestDecision{
+					Decision: "approve",
+					Message:  decision.Reason,
+				}); err != nil {
+					log.Printf("chat manager: auto-approved native request response failed turn=%s runner=%s ref=%s err=%v", turn.ID, sess.RunnerID, nativeRef.RequestID, err)
+				}
 			}
 		}
 		return
@@ -1381,7 +1389,7 @@ func runnerReadableFinalText(text string) string {
 		}
 		bestScore := 0
 		bestText := ""
-		for _, runnerID := range []RunnerID{RunnerCodex, RunnerOpenCode, RunnerClaude, RunnerGemini} {
+		for _, runnerID := range []RunnerID{RunnerCodex, RunnerOpenCode} {
 			score, candidate := extractFinalTextCandidate(runnerID, payload)
 			if strings.TrimSpace(candidate) != "" && score > bestScore {
 				bestScore = score

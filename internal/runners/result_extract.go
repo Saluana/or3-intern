@@ -50,29 +50,6 @@ func extractFinalTextCandidate(runnerID RunnerID, payload any) (int, string) {
 	}
 
 	switch runnerID {
-	case RunnerGemini:
-		if response := extractString(obj["response"]); response != "" {
-			return 100, response
-		}
-		if payloadType := stringField(obj, "type"); payloadType == "result" {
-			if response := extractString(obj["response"]); response != "" {
-				return 95, response
-			}
-			if result := extractString(obj["result"]); result != "" {
-				return 90, result
-			}
-		}
-	case RunnerClaude:
-		if stringField(obj, "type") == "result" && stringField(obj, "subtype") == "success" {
-			if result := extractString(obj["result"]); result != "" {
-				return 100, result
-			}
-		}
-		if stringField(obj, "type") == "assistant" {
-			if message := extractClaudeAssistantText(obj["message"]); message != "" {
-				return 85, message
-			}
-		}
 	case RunnerCodex:
 		if stringField(obj, "type") == "item.completed" {
 			if item, ok := obj["item"].(map[string]any); ok && stringField(item, "type") == "agent_message" {
@@ -175,32 +152,6 @@ func extractGenericFinalText(obj map[string]any) (int, string) {
 
 	return 0, ""
 }
-
-func extractClaudeAssistantText(value any) string {
-	msg, ok := value.(map[string]any)
-	if !ok {
-		return ""
-	}
-	content, ok := msg["content"].([]any)
-	if !ok {
-		return extractString(msg["content"])
-	}
-	parts := make([]string, 0, len(content))
-	for _, item := range content {
-		part, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if stringField(part, "type") != "text" {
-			continue
-		}
-		if text := extractString(part["text"]); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
 func extractTextPart(value any) string {
 	part, ok := value.(map[string]any)
 	if !ok {

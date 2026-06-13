@@ -146,15 +146,15 @@ esac`
 	}
 }
 
-func TestDetect_GeminiAuthUnknown(t *testing.T) {
+func TestDetect_NoAuthCheckLeavesAuthUnknown(t *testing.T) {
 	dir := t.TempDir()
-	writeFakeBinary(t, dir, "gemini", `echo "Gemini CLI v1.0"`)
+	writeFakeBinary(t, dir, "runner", `echo "Runner CLI v1.0"`)
 	t.Setenv("PATH", dir)
 
 	spec := RunnerSpec{
-		ID:          RunnerGemini,
-		DisplayName: "Gemini CLI",
-		Binary:      "gemini",
+		ID:          "custom-runner",
+		DisplayName: "Custom Runner",
+		Binary:      "runner",
 		VersionArgs: []string{"--help"},
 		AuthCheck:   nil,
 	}
@@ -163,31 +163,7 @@ func TestDetect_GeminiAuthUnknown(t *testing.T) {
 		t.Errorf("expected available, got %q", info.Status)
 	}
 	if info.AuthStatus != AuthUnknown {
-		t.Errorf("expected auth unknown for gemini, got %q", info.AuthStatus)
-	}
-}
-
-func TestDetect_GeminiFallbackToHelp(t *testing.T) {
-	dir := t.TempDir()
-	writeFakeBinary(t, dir, "gemini2", `case "$1" in
-  --version) echo "version not supported" >&2; exit 1;;
-  --help) echo "Gemini CLI help"; exit 0;;
-esac`)
-	t.Setenv("PATH", dir)
-
-	spec := RunnerSpec{
-		ID:          RunnerGemini,
-		DisplayName: "Gemini CLI",
-		Binary:      "gemini2",
-		VersionArgs: []string{"--version"},
-		AuthCheck:   nil,
-	}
-	info := Detect(context.Background(), spec, DetectOptions{})
-	if info.Status != RunnerStatusAvailable {
-		t.Errorf("expected available after help fallback, got %q", info.Status)
-	}
-	if !strings.Contains(info.Version, "Gemini CLI help") {
-		t.Errorf("expected help output in version, got %q", info.Version)
+		t.Errorf("expected auth unknown without auth check, got %q", info.AuthStatus)
 	}
 }
 

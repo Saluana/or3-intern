@@ -735,3 +735,59 @@ func TestBroker_AllowlistMatchesBeyondFirstPage(t *testing.T) {
 		t.Fatal("expected target allowlist id")
 	}
 }
+
+func TestBroker_EvaluateRunnerPermissionAutopilotApprovesLowRiskWork(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateRunnerPermission(context.Background(), RunnerPermissionEvaluation{
+		RunnerID:       "opencode",
+		PermissionKind: "filesystem",
+		Access:         "write",
+		TargetPath:     "src/app.ts",
+		SessionID:      "session-1",
+		Autopilot:      true,
+		RunnerMode:     "safe_edit",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRunnerPermission: %v", err)
+	}
+	if !decision.Allowed || decision.RequiresApproval {
+		t.Fatalf("expected autopilot approval, got %#v", decision)
+	}
+	if !decision.Moderator.Reviewed || decision.Moderator.Action != "approve_once" {
+		t.Fatalf("expected moderator approve_once metadata, got %#v", decision.Moderator)
+	}
+}
+
+func TestBroker_EvaluateRunnerPermissionAutopilotEscalatesAskWrite(t *testing.T) {
+	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {
+		cfg.Exec.Mode = config.ApprovalModeAsk
+	})
+	defer cleanup()
+
+	decision, err := broker.EvaluateRunnerPermission(context.Background(), RunnerPermissionEvaluation{
+		RunnerID:       "codex",
+		PermissionKind: "filesystem",
+		Access:         "write",
+		TargetPath:     "src/app.ts",
+		SessionID:      "session-1",
+		Autopilot:      true,
+		RunnerMode:     "review",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRunnerPermission: %v", err)
+	}
+	if decision.Allowed || !decision.RequiresApproval || decision.RequestID == 0 {
+		t.Fatalf("expected human approval escalation, got %#v", decision)
+	}
+	rec, err := broker.DB.GetApprovalRequest(context.Background(), decision.RequestID)
+	if err != nil {
+		t.Fatalf("GetApprovalRequest: %v", err)
+	}
+	if rec.ModeratorAction != "escalate" || rec.ModeratorRisk == "" {
+		t.Fatalf("expected persisted moderator escalation, got %#v", rec)
+	}
+}

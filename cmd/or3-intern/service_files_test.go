@@ -19,11 +19,15 @@ func TestServiceFileRootsUseConfiguredDirs(t *testing.T) {
 	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
 
 	roots := server.serviceFileRoots()
-	if len(roots) != 1 {
-		t.Fatalf("expected one root, got %d", len(roots))
+	byID := map[string]serviceFileRoot{}
+	for _, root := range roots {
+		byID[root.ID] = root
 	}
-	if roots[0].ID != "allowed" || !roots[0].Writable {
-		t.Fatalf("unexpected root: %+v", roots[0])
+	if root, ok := byID["allowed"]; !ok || !root.Writable {
+		t.Fatalf("expected writable allowed root, got %+v", root)
+	}
+	if _, ok := byID["home"]; !ok {
+		t.Fatal("expected home root to be present")
 	}
 }
 

@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"or3-intern/internal/bus"
+	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 func openChannelCommandTestDB(t *testing.T) *db.DB {
@@ -80,4 +83,163 @@ func TestChannelCommandHandlerDoesNotInterceptApprovalCommands(t *testing.T) {
 	if handled || err != nil {
 		t.Fatalf("expected approval command to pass through, handled=%v err=%v", handled, err)
 	}
+}
+
+func TestChannelCommandHandlerNormalizesOpenCodeProviderModel(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Runners.Default = string(runners.RunnerOpenCode)
+	database := openChannelCommandTestDB(t)
+	handler := &channelCommandHandler{Config: cfg, DB: database}
+
+	ev := bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", Message: "/model openrouter/deepseek-v4-flash-free"}
+	if _, handled, err := handler.Handle(ctx, ev); !handled || err != nil {
+		t.Fatalf("expected /model handled without error, handled=%v err=%v", handled, err)
+	}
+	meta, err := database.GetChatSessionMeta(ctx, "telegram:123")
+	if err != nil {
+		t.Fatalf("GetChatSessionMeta: %v", err)
+	}
+	if meta.RunnerModel != "deepseek-v4-flash-free" {
+		t.Fatalf("expected canonical OpenCode model id, got %#v", meta)
+	}
+}
+
+func TestChannelCommandHandlerOpenCodeAllowsModelOutsidePartialCatalog(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Runners.Default = string(runners.RunnerOpenCode)
+	database := openChannelCommandTestDB(t)
+	catalog := []runners.RunnerModelInfo{
+		{ID: "gpt-5", DisplayName: "GPT-5", Provider: "openai", ProviderName: "OpenAI"},
+	}
+	handler := &channelCommandHandler{
+		Config:        cfg,
+		DB:            database,
+		RunnerManager: &runners.Manager{Registry: runners.NewRunnerRegistry(runners.SelectableRunners(), nil), Runtimes: modelRuntimeRegistry(catalog)},
+	}
+
+	ev := bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", Message: "/model nemotron-3-ultra-free"}
+	if _, handled, err := handler.Handle(ctx, ev); !handled || err != nil {
+		t.Fatalf("expected /model handled without error, handled=%v err=%v", handled, err)
+	}
+	meta, err := database.GetChatSessionMeta(ctx, "telegram:123")
+	if err != nil {
+		t.Fatalf("GetChatSessionMeta: %v", err)
+	}
+	if meta.RunnerModel != "nemotron-3-ultra-free" {
+		t.Fatalf("expected saved OpenCode model outside partial catalog, got %#v", meta)
+	}
+}
+
+func TestChannelCommandHandlerSavedOpenCodeModelSurvivesPartialCatalogRefresh(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Runners.Default = string(runners.RunnerOpenCode)
+	database := openChannelCommandTestDB(t)
+	if _, err := database.SetChatSessionRunnerPreference(ctx, "telegram:123", string(runners.RunnerOpenCode), "OpenCode", "nemotron-3-ultra-free"); err != nil {
+		t.Fatalf("SetChatSessionRunnerPreference: %v", err)
+	}
+	catalog := []runners.RunnerModelInfo{
+		{ID: "gpt-5", DisplayName: "GPT-5", Provider: "openai", ProviderName: "OpenAI"},
+	}
+	handler := &channelCommandHandler{
+		Config:        cfg,
+		DB:            database,
+		RunnerManager: &runners.Manager{Registry: runners.NewRunnerRegistry(runners.SelectableRunners(), nil), Runtimes: modelRuntimeRegistry(catalog)},
+	}
+
+	next, handled, err := handler.Handle(ctx, bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", Message: "Can you help me bruv. I lost my keys", Meta: map[string]any{}})
+	if handled || err != nil {
+		t.Fatalf("expected saved OpenCode model to continue despite partial catalog, handled=%v err=%v", handled, err)
+	}
+	if next.Meta["runner_id"] != string(runners.RunnerOpenCode) || next.Meta["model"] != "nemotron-3-ultra-free" {
+		t.Fatalf("expected runner/model metadata injection, got %#v", next.Meta)
+	}
+}
+
+func TestChannelCommandHandlerModelsShowsProviderButtons(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	catalog := []runners.RunnerModelInfo{
+		{ID: "kimi-k2.5", DisplayName: "Kimi K2.5", Provider: "openrouter", ProviderName: "OpenRouter"},
+		{ID: "gpt-5", DisplayName: "GPT-5", Provider: "openai", ProviderName: "OpenAI"},
+	}
+	channels := rootchannels.NewManager()
+	capture := &captureChannel{name: "telegram"}
+	if err := channels.Register(capture); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	handler := &channelCommandHandler{
+		Config:        cfg,
+		DB:            openChannelCommandTestDB(t),
+		RunnerManager: &runners.Manager{Registry: runners.NewRunnerRegistry(runners.SelectableRunners(), nil), Runtimes: modelRuntimeRegistry(catalog)},
+		Channels:      channels,
+	}
+
+	ev := bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", Message: "/models", Meta: map[string]any{"chat_id": "123", "reply_to_message_id": int64(99)}}
+	if _, handled, err := handler.Handle(ctx, ev); !handled || err != nil {
+		t.Fatalf("expected /models handled without error, handled=%v err=%v", handled, err)
+	}
+	if got := capture.lastText(); !strings.Contains(got, "Tap a provider") || !strings.Contains(got, "/model <exact-id>") {
+		t.Fatalf("unexpected provider picker text: %q", got)
+	}
+	if len(capture.metas) != 1 {
+		t.Fatalf("expected one delivery meta, got %#v", capture.metas)
+	}
+	if _, ok := capture.metas[0]["telegram_reply_markup"]; !ok {
+		t.Fatalf("expected telegram provider buttons, got %#v", capture.metas[0])
+	}
+	if capture.metas[0]["reply_to_message_id"] != int64(99) {
+		t.Fatalf("expected reply metadata to be preserved, got %#v", capture.metas[0])
+	}
+}
+
+func TestChannelCommandHandlerModelsProviderListsExactIDs(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	catalog := []runners.RunnerModelInfo{
+		{ID: "kimi-k2.5", DisplayName: "Kimi K2.5", Provider: "openrouter", ProviderName: "OpenRouter"},
+		{ID: "gpt-5", DisplayName: "GPT-5", Provider: "openai", ProviderName: "OpenAI"},
+	}
+	channels := rootchannels.NewManager()
+	capture := &captureChannel{name: "telegram"}
+	if err := channels.Register(capture); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	handler := &channelCommandHandler{
+		Config:        cfg,
+		DB:            openChannelCommandTestDB(t),
+		RunnerManager: &runners.Manager{Registry: runners.NewRunnerRegistry(runners.SelectableRunners(), nil), Runtimes: modelRuntimeRegistry(catalog)},
+		Channels:      channels,
+	}
+
+	ev := bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", Message: "/models opencode openrouter", Meta: map[string]any{"chat_id": "123"}}
+	if _, handled, err := handler.Handle(ctx, ev); !handled || err != nil {
+		t.Fatalf("expected /models handled without error, handled=%v err=%v", handled, err)
+	}
+	got := capture.lastText()
+	if !strings.Contains(got, "- kimi-k2.5") || strings.Contains(got, "- gpt-5") || !strings.Contains(got, "/model kimi-k2.5") {
+		t.Fatalf("unexpected provider model list: %q", got)
+	}
+}
+
+type channelCommandModelRuntime struct {
+	models []runners.RunnerModelInfo
+}
+
+func (r channelCommandModelRuntime) ID() runners.RunnerID { return runners.RunnerOpenCode }
+func (r channelCommandModelRuntime) Info(context.Context, config.RunnersConfig, []string) runners.RunnerRuntimeInfo {
+	return runners.RunnerRuntimeInfo{Models: r.models}
+}
+func (r channelCommandModelRuntime) Execute(context.Context, runners.NativeRuntimeExecuteRequest) (runners.ProcessOutput, error) {
+	return runners.ProcessOutput{}, nil
+}
+func (r channelCommandModelRuntime) Abort(context.Context, string) error { return nil }
+func (r channelCommandModelRuntime) Stop(context.Context) error          { return nil }
+
+func modelRuntimeRegistry(models []runners.RunnerModelInfo) *runners.RunnerRuntimeRegistry {
+	registry := &runners.RunnerRuntimeRegistry{}
+	registry.Register(channelCommandModelRuntime{models: models})
+	return registry
 }

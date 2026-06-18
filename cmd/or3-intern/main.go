@@ -858,8 +858,9 @@ func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTur
 					}
 				}
 				var err error
+				var result app.RunnerTurnResult
 				if turnOrchestrator != nil {
-					err = turnOrchestrator.HandleBusEvent(cctx, ev)
+					result, err = turnOrchestrator.StartBusEventTurn(cctx, ev)
 				} else {
 					err = app.ErrRunnerRuntimeUnavailable
 				}
@@ -872,6 +873,8 @@ func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTur
 						deliverChannelRuntimeError(cctx, channelManager, ev, err)
 						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
 					}
+				} else if ev.Channel != "cli" && turnOrchestrator != nil {
+					deliverChannelTurnResult(cctx, channelManager, ev, turnOrchestrator, result)
 				}
 				stopTyping()
 				cancel()
@@ -902,6 +905,51 @@ func deliverChannelRuntimeError(ctx context.Context, channelManager *rootchannel
 	text := "I hit a problem while handling that request (" + code + "). Please retry, or review the details in the OR3 app."
 	if derr := channelManager.DeliverWithMeta(ctx, ev.Channel, channelEventTarget(ev), text, rootchannels.ReplyMeta(ev.Meta)); derr != nil {
 		log.Printf("channel error delivery failed: channel=%s session=%s err=%v", ev.Channel, ev.SessionKey, derr)
+	}
+}
+
+func deliverChannelTurnResult(ctx context.Context, channelManager *rootchannels.Manager, ev bus.Event, turnOrchestrator *app.RunnerTurnOrchestrator, result app.RunnerTurnResult) {
+	if channelManager == nil || turnOrchestrator == nil || strings.TrimSpace(result.RunnerChatTurnID) == "" {
+		return
+	}
+	final, ok := turnOrchestrator.WaitForTurnResult(ctx, result)
+	if !ok {
+		log.Printf("channel turn delivery skipped: channel=%s session=%s turn=%s reason=timeout_or_missing", ev.Channel, ev.SessionKey, result.RunnerChatTurnID)
+		return
+	}
+	text := channelTurnDeliveryText(final)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if derr := channelManager.DeliverWithMeta(ctx, ev.Channel, channelEventTarget(ev), text, rootchannels.ReplyMeta(ev.Meta)); derr != nil {
+		log.Printf("channel turn delivery failed: channel=%s session=%s turn=%s err=%v", ev.Channel, ev.SessionKey, result.RunnerChatTurnID, derr)
+	}
+}
+
+func channelTurnDeliveryText(final app.RunnerTurnFinalResult) string {
+	if text := strings.TrimSpace(final.FinalText); text != "" {
+		return text
+	}
+	if errMessage := strings.TrimSpace(final.ErrorMessage); errMessage != "" {
+		status := strings.ReplaceAll(strings.TrimSpace(final.Status), "_", " ")
+		if status == "" {
+			status = "failed"
+		}
+		return "Runner turn " + status + ": " + errMessage
+	}
+	switch final.Status {
+	case db.RunnerChatTurnStatusSucceeded:
+		return "(no output)"
+	case db.RunnerChatTurnStatusApprovalRequired:
+		return "OR3 needs your approval before the runner can continue. Review the request in the app, or reply with the approval command if one was shown."
+	case db.RunnerChatTurnStatusTimedOut:
+		return "Runner turn timed out. Check the OR3 app for details."
+	case db.RunnerChatTurnStatusAborted:
+		return "Runner turn was aborted."
+	case db.RunnerChatTurnStatusFailed:
+		return "Runner turn failed. Check the OR3 app for details."
+	default:
+		return ""
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
@@ -43,6 +44,14 @@ type RunnerTurnResult struct {
 	RunnerChatTurnID    string
 	RunnerRunID         string
 	RunnerJobID         string
+}
+
+// RunnerTurnFinalResult is the persisted terminal state for a runner-backed
+// chat turn.
+type RunnerTurnFinalResult struct {
+	Status       string
+	FinalText    string
+	ErrorMessage string
 }
 
 // RunnerTurnOrchestrator routes ingress work to runners.ChatManager instead of
@@ -240,20 +249,68 @@ func (o *RunnerTurnOrchestrator) compilePrompt(ctx context.Context, in RunnerPro
 
 // HandleBusEvent converts a bus event into a runner chat turn.
 func (o *RunnerTurnOrchestrator) HandleBusEvent(ctx context.Context, ev bus.Event) error {
+	_, err := o.StartBusEventTurn(ctx, ev)
+	return err
+}
+
+// StartBusEventTurn converts a bus event into a runner chat turn and returns
+// durable ids callers can use to wait for final delivery.
+func (o *RunnerTurnOrchestrator) StartBusEventTurn(ctx context.Context, ev bus.Event) (RunnerTurnResult, error) {
 	if o == nil {
-		return errors.New("runner turn orchestrator unavailable")
+		return RunnerTurnResult{}, errors.New("runner turn orchestrator unavailable")
 	}
 	switch ev.Type {
 	case bus.EventUserMessage, bus.EventCron, bus.EventHeartbeat, bus.EventWebhook, bus.EventFileChange, bus.EventSystem:
 	default:
-		return nil
+		return RunnerTurnResult{}, nil
 	}
 	req := RunnerTurnRequestFromBusEvent(o.cfg, ev)
 	runCtx := requestctx.ContextWithApprovalToken(ctx, req.ApprovalToken)
 	runCtx = requestctx.ContextWithRequesterIdentity(runCtx, req.Actor, req.Role)
 	runCtx = requestctx.ContextWithCapabilityCeiling(runCtx, req.Capability)
-	_, err := o.StartTurn(runCtx, req)
-	return err
+	return o.StartTurn(runCtx, req)
+}
+
+// WaitForTurnResult waits until the underlying runner job and chat turn have
+// reached a terminal state, then returns the persisted text/error that the app
+// timeline uses.
+func (o *RunnerTurnOrchestrator) WaitForTurnResult(ctx context.Context, result RunnerTurnResult) (RunnerTurnFinalResult, bool) {
+	if o == nil || o.chat == nil || o.chat.DB == nil || strings.TrimSpace(result.RunnerChatTurnID) == "" {
+		return RunnerTurnFinalResult{}, false
+	}
+	if o.chat.Jobs != nil && strings.TrimSpace(result.RunnerJobID) != "" {
+		_, _ = o.chat.Jobs.Wait(ctx, result.RunnerJobID)
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		turn, err := o.chat.DB.GetRunnerChatTurn(ctx, result.RunnerChatTurnID)
+		if err == nil && runnerChatTurnTerminal(turn.Status) {
+			return RunnerTurnFinalResult{
+				Status:       turn.Status,
+				FinalText:    strings.TrimSpace(turn.FinalText),
+				ErrorMessage: strings.TrimSpace(turn.ErrorMessage),
+			}, true
+		}
+		select {
+		case <-ctx.Done():
+			return RunnerTurnFinalResult{}, false
+		case <-ticker.C:
+		}
+	}
+}
+
+func runnerChatTurnTerminal(status string) bool {
+	switch status {
+	case db.RunnerChatTurnStatusSucceeded,
+		db.RunnerChatTurnStatusApprovalRequired,
+		db.RunnerChatTurnStatusFailed,
+		db.RunnerChatTurnStatusAborted,
+		db.RunnerChatTurnStatusTimedOut:
+		return true
+	default:
+		return false
+	}
 }
 
 // RunnerTurnRequestFromBusEvent maps a bus event to a runner turn request.

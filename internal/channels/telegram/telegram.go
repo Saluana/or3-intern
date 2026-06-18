@@ -81,7 +81,7 @@ func (c *Channel) registerCommands(ctx context.Context) error {
 		{Command: "runners", Description: "List selectable runners"},
 		{Command: "runner", Description: "Choose a runner: /runner <id>"},
 		{Command: "models", Description: "List models: /models [runner]"},
-		{Command: "model", Description: "Choose a model: /model <name>"},
+		{Command: "model", Description: "Choose a model: /model <exact-id>"},
 		{Command: "reset", Description: "Reset runner/model preferences"},
 		{Command: "approve", Description: "Approve an OR3 request"},
 		{Command: "deny", Description: "Deny an OR3 request"},
@@ -112,14 +112,25 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 	if len(mediaPaths) > 0 {
 		return c.deliverMedia(ctx, chatID, text, mediaPaths, meta)
 	}
-	payload := map[string]any{"chat_id": chatID, "text": text}
-	if replyID, ok := meta["reply_to_message_id"].(int64); ok && replyID > 0 {
-		payload["reply_to_message_id"] = replyID
+	parts := splitTelegramText(text)
+	if len(parts) == 0 {
+		return nil
 	}
-	if approvalID := approvalRequestIDFromText(text); approvalID > 0 {
-		payload["reply_markup"] = telegramApprovalReplyMarkup(approvalID)
+	for i, part := range parts {
+		payload := map[string]any{"chat_id": chatID, "text": part}
+		if replyID, ok := meta["reply_to_message_id"].(int64); ok && replyID > 0 {
+			payload["reply_to_message_id"] = replyID
+		}
+		if markup, ok := telegramReplyMarkupFromMeta(meta); ok && i == 0 {
+			payload["reply_markup"] = markup
+		} else if approvalID := approvalRequestIDFromText(part); approvalID > 0 {
+			payload["reply_markup"] = telegramApprovalReplyMarkup(approvalID)
+		}
+		if err := c.postJSON(ctx, "/sendMessage", payload, nil); err != nil {
+			return err
+		}
 	}
-	return c.postJSON(ctx, "/sendMessage", payload, nil)
+	return nil
 }
 
 // StartTyping keeps Telegram's typing indicator alive while a turn is running.
@@ -269,9 +280,9 @@ func (c *Channel) fetchUpdates(ctx context.Context, eventBus *bus.Bus) error {
 }
 
 func (c *Channel) handleCallbackQuery(ctx context.Context, eventBus *bus.Bus, query callbackQuery) {
-	cmd, ok := telegramApprovalCommandFromCallbackData(query.Data)
+	cmd, answer, ok := telegramCommandFromCallbackData(query.Data)
 	if !ok || query.Message.Chat.ID == 0 {
-		_ = c.answerCallbackQuery(ctx, query.ID, "That approval button is no longer valid.")
+		_ = c.answerCallbackQuery(ctx, query.ID, "That button is no longer valid.")
 		return
 	}
 	chatID := strconv.FormatInt(query.Message.Chat.ID, 10)
@@ -304,7 +315,7 @@ func (c *Channel) handleCallbackQuery(ctx context.Context, eventBus *bus.Bus, qu
 		_ = c.answerCallbackQuery(ctx, query.ID, "OR3 is busy. Please try again.")
 		return
 	}
-	_ = c.answerCallbackQuery(ctx, query.ID, "Approval received.")
+	_ = c.answerCallbackQuery(ctx, query.ID, answer)
 }
 
 func telegramApprovalCommandFromCallbackData(data string) (string, bool) {
@@ -321,6 +332,76 @@ func telegramApprovalCommandFromCallbackData(data string) (string, bool) {
 		return "", false
 	}
 	return "/" + action + " " + strconv.FormatInt(id, 10), true
+}
+
+func telegramCommandFromCallbackData(data string) (command string, answer string, ok bool) {
+	if cmd, ok := telegramApprovalCommandFromCallbackData(data); ok {
+		return cmd, "Approval received.", true
+	}
+	parts := strings.Split(strings.TrimSpace(data), ":")
+	if len(parts) == 4 && parts[0] == "or3" && parts[1] == "models" {
+		runnerID := strings.ToLower(strings.TrimSpace(parts[2]))
+		provider := strings.ToLower(strings.TrimSpace(parts[3]))
+		if runnerID != "" && provider != "" {
+			return "/models " + runnerID + " " + provider, "Showing " + provider + " models.", true
+		}
+	}
+	return "", "", false
+}
+
+const telegramMessageTextLimit = 3900
+
+func splitTelegramText(text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	runes := []rune(text)
+	if len(runes) <= telegramMessageTextLimit {
+		return []string{text}
+	}
+	parts := []string{}
+	for len(runes) > 0 {
+		if len(runes) <= telegramMessageTextLimit {
+			part := strings.TrimSpace(string(runes))
+			if part != "" {
+				parts = append(parts, part)
+			}
+			break
+		}
+		cut := telegramMessageTextLimit
+		floor := cut - 600
+		if floor < 0 {
+			floor = 0
+		}
+		for i := cut; i > floor; i-- {
+			if runes[i-1] == '\n' {
+				cut = i
+				break
+			}
+		}
+		part := strings.TrimSpace(string(runes[:cut]))
+		if part != "" {
+			parts = append(parts, part)
+		}
+		runes = []rune(strings.TrimSpace(string(runes[cut:])))
+	}
+	if len(parts) == 0 {
+		return []string{text}
+	}
+	return parts
+}
+
+func telegramReplyMarkupFromMeta(meta map[string]any) (any, bool) {
+	if len(meta) == 0 {
+		return nil, false
+	}
+	for _, key := range []string{"telegram_reply_markup", "reply_markup"} {
+		if markup, ok := meta[key]; ok && markup != nil {
+			return markup, true
+		}
+	}
+	return nil, false
 }
 
 func (c *Channel) answerCallbackQuery(ctx context.Context, callbackID string, text string) error {

@@ -78,6 +78,7 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvString("OR3_RUNNERS_DEFAULT_ISOLATION", &cfg.Runners.DefaultIsolation)
 	applyEnvString("OR3_RUNNERS_CODEX_HOME", &cfg.Runners.CodexHomePath)
 	applyEnvString("OR3_RUNNERS_CODEX_SHADOW_HOME", &cfg.Runners.CodexShadowHomePath)
+	applyEnvBool("OR3_FILESYSTEM_BROWSING", &cfg.FilesystemBrowsing)
 	applyEnvBool("OR3_SERVICE_ENABLED", &cfg.Service.Enabled)
 	applyEnvString("OR3_SERVICE_LISTEN", &cfg.Service.Listen)
 	applyEnvString("OR3_SERVICE_SECRET", &cfg.Service.Secret)

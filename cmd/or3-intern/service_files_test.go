@@ -420,6 +420,42 @@ func TestHandleFileWriteRejectsUnsupportedTextFile(t *testing.T) {
 	}
 }
 
+func TestServiceFileRootsExcludesFilesystemByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+
+	roots := server.serviceFileRoots()
+	for _, root := range roots {
+		if root.ID == "filesystem" {
+			t.Fatal("expected filesystem root to be excluded when FilesystemBrowsing is false")
+		}
+	}
+}
+
+func TestServiceFileRootsIncludesFilesystemWhenEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	server := &serviceServer{config: config.Config{
+		AllowedDir:         tmp,
+		FilesystemBrowsing: true,
+	}}
+
+	roots := server.serviceFileRoots()
+	byID := map[string]serviceFileRoot{}
+	for _, root := range roots {
+		byID[root.ID] = root
+	}
+	root, ok := byID["filesystem"]
+	if !ok {
+		t.Fatal("expected filesystem root when FilesystemBrowsing is true")
+	}
+	if root.Path != "/" {
+		t.Fatalf("expected filesystem root path '/', got %q", root.Path)
+	}
+	if root.Writable {
+		t.Fatal("expected filesystem root to be read-only")
+	}
+}
+
 func TestDefaultSearchFileRootPrefersWorkspace(t *testing.T) {
 	tmp := t.TempDir()
 	workspace := filepath.Join(tmp, "workspace")

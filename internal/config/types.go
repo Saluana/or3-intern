@@ -136,6 +136,7 @@ type Config struct {
 	Hardening           HardeningConfig         `json:"hardening"`
 	Cron                CronConfig              `json:"cron"`
 	Service             ServiceConfig           `json:"service"`
+	FilesystemBrowsing  bool                    `json:"filesystemBrowsing"`
 	Heartbeat           HeartbeatConfig         `json:"heartbeat"`
 	Channels            ChannelsConfig          `json:"channels"`
 	Context             ContextConfig           `json:"context"`

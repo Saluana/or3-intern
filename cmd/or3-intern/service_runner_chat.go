@@ -35,7 +35,7 @@ type runnerChatCreateSessionRequest struct {
 	Isolation         string `json:"isolation"`
 	Cwd               string `json:"cwd"`
 	MaxTurns          int    `json:"max_turns"`
-	ApprovalAutopilot *bool `json:"approval_autopilot"`
+	ApprovalAutopilot *bool  `json:"approval_autopilot"`
 }
 
 // runnerChatStartTurnRequest is the body for POST /runner-chat/sessions/:id/turns.
@@ -274,6 +274,12 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		continuation := runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
 		if continuation == "" {
 			continuation = runners.ContinuationMode(sess.ContinuationMode)
+		}
+		if strings.TrimSpace(req.Cwd) != "" {
+			if req.Meta == nil {
+				req.Meta = map[string]any{}
+			}
+			req.Meta["_cwd"] = req.Cwd
 		}
 		compileCtx, cancelCompile := context.WithTimeout(r.Context(), serviceRunnerChatPromptCompileTimeout)
 		var compileErr error

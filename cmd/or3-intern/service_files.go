@@ -138,6 +138,9 @@ func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 	if home, err := os.UserHomeDir(); err == nil {
 		add("home", "Home", home, false)
 	}
+	if s.config.FilesystemBrowsing {
+		add("filesystem", "Full Filesystem", "/", false)
+	}
 	if len(roots) == 0 {
 		if cwd, err := os.Getwd(); err == nil {
 			roots = append(roots, serviceFileRoot{ID: "cwd", Label: "Current Directory", Path: cwd, Writable: true})

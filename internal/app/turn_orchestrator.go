@@ -188,6 +188,9 @@ func (o *RunnerTurnOrchestrator) compileRunnerChatPrompt(ctx context.Context, ru
 			extra = append(extra, block)
 		}
 	}
+	if cwd, ok := meta["_cwd"].(string); ok && strings.TrimSpace(cwd) != "" {
+		extra = append(extra, "working_directory: "+cwd)
+	}
 	result := o.compilePrompt(ctx, RunnerPromptCompileInput{
 		SessionKey:         appSessionKey,
 		UserTask:           userMessage,

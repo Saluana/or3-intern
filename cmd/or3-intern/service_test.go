@@ -1564,8 +1564,19 @@ checks:
 	if err := json.Unmarshal(rec.Body.Bytes(), &listBody); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listBody.Items) != 1 || listBody.Items[0].Name != "demo" || listBody.Items[0].Source != string(skills.SourceGlobal) {
-		t.Fatalf("expected demo global skill, got %#v", listBody.Items)
+	// Should include bundled skills (agent, cron, heartbeat, memory, reminders, runner) plus the demo global skill.
+	if len(listBody.Items) < 2 {
+		t.Fatalf("expected at least 2 skills (bundled + demo), got %d: %#v", len(listBody.Items), listBody.Items)
+	}
+	var foundDemo bool
+	for _, item := range listBody.Items {
+		if item.Name == "demo" && item.Source == string(skills.SourceGlobal) {
+			foundDemo = true
+			break
+		}
+	}
+	if !foundDemo {
+		t.Fatalf("expected demo global skill in list, got %#v", listBody.Items)
 	}
 
 	reqBody := strings.NewReader(`{"enabled":false,"apiKey":"secret-value","config":{"demo.enabled":true}}`)
@@ -1583,6 +1594,59 @@ checks:
 	entry := loaded.Skills.Entries["demo"]
 	if entry.Enabled == nil || *entry.Enabled || entry.APIKey != "secret-value" || entry.Config["demo.enabled"] != true {
 		t.Fatalf("expected persisted skill settings, got %#v", entry)
+	}
+}
+
+func TestServiceSkillsInstallBundled_BadJSONReturns400(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Skills.Load.GlobalDir = filepath.Join(tmp, "agents-skills")
+	cfg.WorkspaceDir = tmp
+	cfg.Skills.Load.DisableGlobalDir = false
+	cfgPath := filepath.Join(tmp, "config.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	server := &serviceServer{config: cfg, configPath: cfgPath}
+
+	// Malformed JSON should return 400.
+	body := strings.NewReader(`{"target": broken}`)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/skills/install-bundled", body)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+	server.handleSkills(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceSkillsInstallBundled_EmptyBodyDefaultsToGlobal(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	globalDir := filepath.Join(tmp, "agents-skills")
+	cfg.Skills.Load.GlobalDir = globalDir
+	cfg.WorkspaceDir = tmp
+	cfg.Skills.Load.DisableGlobalDir = false
+	cfgPath := filepath.Join(tmp, "config.json")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	server := &serviceServer{config: cfg, configPath: cfgPath}
+
+	// Empty body should default to "global" and succeed.
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/skills/install-bundled", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+	server.handleSkills(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty body (defaults to global), got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Skills should be materialized into the global dir.
+	for _, name := range skills.RequiredBundledSkills {
+		path := filepath.Join(globalDir, name, "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("required bundled skill %q missing at %s: %v", name, path, err)
+		}
 	}
 }
 

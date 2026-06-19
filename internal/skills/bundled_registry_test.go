@@ -103,6 +103,77 @@ func TestEnsureMemorySkillRegisteredInstallsAndApproves(t *testing.T) {
 	}
 }
 
+func TestListBundledSkills_ReturnsExpectedDirectories(t *testing.T) {
+	names, err := ListBundledSkills()
+	if err != nil {
+		t.Fatalf("ListBundledSkills: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("expected at least one bundled skill")
+	}
+	// Should include all RequiredBundledSkills.
+	for _, required := range RequiredBundledSkills {
+		found := false
+		for _, name := range names {
+			if name == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("required bundled skill %q not in list: %v", required, names)
+		}
+	}
+	// embed.go should not appear as a skill.
+	for _, name := range names {
+		if name == "embed.go" {
+			t.Fatalf("embed.go should not appear in bundled skill list")
+		}
+	}
+}
+
+func TestInstallAllBundledSkills_MaterializesAllToTarget(t *testing.T) {
+	tmp := t.TempDir()
+	installed, err := InstallAllBundledSkills(tmp)
+	if err != nil {
+		t.Fatalf("InstallAllBundledSkills: %v", err)
+	}
+	if len(installed) == 0 {
+		t.Fatal("expected at least one installed skill")
+	}
+	for _, name := range installed {
+		if !IsBundledSkillInstalled(tmp, name) {
+			t.Fatalf("skill %q should be installed at %s", name, tmp)
+		}
+		// Verify SKILL.md is readable.
+		path := filepath.Join(tmp, name, "SKILL.md")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s/SKILL.md: %v", name, err)
+		}
+		if len(body) == 0 {
+			t.Fatalf("SKILL.md for %q is empty", name)
+		}
+	}
+}
+
+func TestInstallAllBundledSkills_Idempotent(t *testing.T) {
+	tmp := t.TempDir()
+	first, err := InstallAllBundledSkills(tmp)
+	if err != nil {
+		t.Fatalf("first InstallAllBundledSkills: %v", err)
+	}
+	second, err := InstallAllBundledSkills(tmp)
+	if err != nil {
+		t.Fatalf("second InstallAllBundledSkills: %v", err)
+	}
+	// Second install should still report them all (the materialize function
+	// writes files regardless, which is idempotent at the filesystem level).
+	if len(second) != len(first) {
+		t.Fatalf("expected same number of skills (first=%d, second=%d)", len(first), len(second))
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if strings.EqualFold(strings.TrimSpace(value), want) {

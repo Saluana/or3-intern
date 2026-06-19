@@ -319,6 +319,44 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
 		return nil
+	case "install-bundled":
+		fs := flag.NewFlagSet("skills install-bundled", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		global := fs.Bool("global", false, "Install to the global skills directory (~/.agents/skills/)")
+		dir := fs.String("dir", "", "Install to a specific directory")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		targetDir := strings.TrimSpace(*dir)
+		if targetDir == "" && *global {
+			targetDir = strings.TrimSpace(cfg.Skills.Load.GlobalDir)
+		}
+		if targetDir == "" {
+			targetDir = strings.TrimSpace(cfg.Skills.Load.GlobalDir)
+		}
+		if targetDir == "" {
+			return fmt.Errorf("install directory not found. Use --global or --dir <path>")
+		}
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return fmt.Errorf("create install directory: %w", err)
+		}
+		installed, err := installBundledSkills(targetDir)
+		if err != nil {
+			return err
+		}
+		if len(installed) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no bundled skills to install)")
+			return nil
+		}
+		for _, name := range installed {
+			_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\n", name, targetDir)
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.install-bundled", map[string]any{"target": targetDir, "skills": installed}); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown skills subcommand: %s", args[0])
 	}
@@ -498,4 +536,8 @@ func printReasons(w io.Writer, label string, values []string) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
+}
+
+func installBundledSkills(targetDir string) ([]string, error) {
+	return skills.InstallAllBundledSkills(targetDir)
 }

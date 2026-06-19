@@ -15,8 +15,30 @@ import (
 // BundledMemorySkillName is the first-party memory bridge skill shipped with or3-intern.
 const BundledMemorySkillName = "memory"
 
+// BundledCronSkillName is the first-party cron management skill.
+const BundledCronSkillName = "cron"
+
+// BundledHeartbeatSkillName is the first-party heartbeat management skill.
+const BundledHeartbeatSkillName = "heartbeat"
+
+// BundledRemindersSkillName is the first-party reminders wrapper skill.
+const BundledRemindersSkillName = "reminders"
+
+// BundledAgentSkillName is the first-party one-shot agent task skill.
+const BundledAgentSkillName = "agent"
+
+// BundledRunnerSkillName is the first-party runner diagnostics skill.
+const BundledRunnerSkillName = "runner"
+
 // RequiredBundledSkills must be present under the bundled skills root for a complete install.
-var RequiredBundledSkills = []string{BundledMemorySkillName}
+var RequiredBundledSkills = []string{
+	BundledMemorySkillName,
+	BundledCronSkillName,
+	BundledHeartbeatSkillName,
+	BundledRemindersSkillName,
+	BundledAgentSkillName,
+	BundledRunnerSkillName,
+}
 
 // IsBundledSkillInstalled reports whether a bundled skill directory contains SKILL.md.
 func IsBundledSkillInstalled(bundledDir, skillName string) bool {
@@ -75,6 +97,39 @@ func EnsureMemorySkillRegistered(cfgDir string, cfg *config.Config) (installed b
 	installed = !wasInstalled && IsBundledSkillInstalled(bundledDir, BundledMemorySkillName)
 	policyChanged = EnsureMemorySkillPolicy(cfg)
 	return installed, policyChanged, nil
+}
+
+// ListBundledSkills returns the names of all bundled skill directories in the embedded FS.
+func ListBundledSkills() ([]string, error) {
+	entries, err := fs.ReadDir(builtinembed.FS, ".")
+	if err != nil {
+		return nil, fmt.Errorf("read bundled skills: %w", err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "embed.go" {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	return names, nil
+}
+
+// InstallAllBundledSkills materializes every bundled skill from the embedded tree into targetDir.
+// Returns the names of successfully installed skills.
+func InstallAllBundledSkills(targetDir string) ([]string, error) {
+	names, err := ListBundledSkills()
+	if err != nil {
+		return nil, err
+	}
+	var installed []string
+	for _, name := range names {
+		if err := materializeBundledSkill(targetDir, name); err != nil {
+			return installed, fmt.Errorf("install bundled skill %q: %w", name, err)
+		}
+		installed = append(installed, name)
+	}
+	return installed, nil
 }
 
 func materializeBundledSkill(targetDir, skillName string) error {

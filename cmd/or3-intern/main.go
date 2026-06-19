@@ -303,6 +303,31 @@ func main() {
 		}
 		return
 	}
+	if cmd == "cron" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, _, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "cron error:", loadErr)
+			os.Exit(1)
+		}
+		storePath := strings.TrimSpace(cfg.Cron.StorePath)
+		if storePath == "" {
+			fmt.Fprintln(os.Stderr, "cron error: cron store path not configured")
+			os.Exit(1)
+		}
+		if err := runCronCommand(context.Background(), storePath, args[1:], os.Stdout, os.Stderr); err != nil {
+			if isUsageError(err) {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			fmt.Fprintln(os.Stderr, "cron error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cmd == "access" {
 		cwd, err := os.Getwd()
 		if err != nil {

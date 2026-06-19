@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -11,6 +15,10 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/skills"
 )
+
+type serviceInstallBundledRequest struct {
+	Target string `json:"target"`
+}
 
 type serviceSkillItem struct {
 	Name             string   `json:"name"`
@@ -70,6 +78,14 @@ func (s *serviceServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(path, "/")
+	if len(parts) == 1 && parts[0] == "install-bundled" {
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleSkillInstallBundled(w, r)
+		return
+	}
 	if len(parts) != 2 || parts[1] != "settings" {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "skills route not found"})
 		return
@@ -135,6 +151,43 @@ func (s *serviceServer) handleSkillSettingsUpdate(w http.ResponseWriter, r *http
 		"ok":          true,
 		"config_path": path,
 		"skill":       serviceSkillItemFromMeta(itemSkill, next.Skills),
+	})
+}
+
+func (s *serviceServer) handleSkillInstallBundled(w http.ResponseWriter, r *http.Request) {
+	var body serviceInstallBundledRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body", "detail": err.Error()})
+			return
+		}
+		body.Target = "global"
+	}
+	target := strings.TrimSpace(body.Target)
+	var targetDir string
+	switch target {
+	case "global":
+		targetDir = strings.TrimSpace(s.config.Skills.Load.GlobalDir)
+	case "workspace":
+		targetDir = filepath.Join(strings.TrimSpace(s.config.WorkspaceDir), "skills")
+	default:
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown install target: %q", target)})
+		return
+	}
+	if targetDir == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "install target directory not configured"})
+		return
+	}
+	installed, err := installBundledSkills(targetDir)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "install bundled skills failed", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"target":    target,
+		"targetDir": targetDir,
+		"skills":    installed,
 	})
 }
 

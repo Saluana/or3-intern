@@ -78,13 +78,13 @@ func TestResolveRunnerCwd_WithRestriction(t *testing.T) {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
 
-	// Absolute path outside restrict dir → rejected
-	_, err = resolveRunnerCwd("/etc", restrictDir)
-	if err == nil {
-		t.Fatal("expected error for cwd outside restrict dir")
+	// Absolute path outside restrict dir → allowed (explicit user choice)
+	got, err = resolveRunnerCwd("/etc", restrictDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "outside allowed directory") {
-		t.Fatalf("expected 'outside allowed directory' error, got: %v", err)
+	if got != "/etc" {
+		t.Fatalf("expected /etc, got %q", got)
 	}
 
 	// Relative path escaping restrict dir via .. → rejected

@@ -179,6 +179,27 @@ func (d *DB) UpdateRunnerChatSessionNativeRef(ctx context.Context, id, ref strin
 	return err
 }
 
+// UpdateRunnerChatSessionCwd moves a runner chat session to a new working
+// directory. Native runner references are directory-scoped, so changing the
+// directory intentionally clears the reference and forces a clean native
+// session while retaining OR3's durable chat history.
+func (d *DB) UpdateRunnerChatSessionCwd(ctx context.Context, id, cwd string) (RunnerChatSession, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunnerChatSession{}, errors.New("runner chat session id required")
+	}
+	result, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_chat_sessions SET cwd=?, native_session_ref='', updated_at=? WHERE id=?`,
+		strings.TrimSpace(cwd), NowMS(), id)
+	if err != nil {
+		return RunnerChatSession{}, err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return RunnerChatSession{}, ErrRunnerChatSessionNotFound
+	}
+	return d.GetRunnerChatSession(ctx, id)
+}
+
 // CreateRunnerChatTurn inserts a new turn for a session. Returns
 // ErrRunnerChatTurnActive when an active turn already exists.
 func (d *DB) CreateRunnerChatTurn(ctx context.Context, turn RunnerChatTurn) (RunnerChatTurn, error) {

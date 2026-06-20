@@ -146,6 +146,52 @@ func TestChatManagerReplayDoesNotForwardNativeSessionRef(t *testing.T) {
 	t.Fatalf("turn did not finalize after abort")
 }
 
+func TestChatManagerWorkspaceChangeStartsFreshNativeSession(t *testing.T) {
+	d := openChatManagerTestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	sess, err := cm.EnsureSession(ctx, StartTurnRequest{
+		AppSessionKey: "app-workspace", RunnerID: string(RunnerOpenCode),
+		ContinuationMode: ContinuationNative, Cwd: "/old-workspace",
+	})
+	if err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	if err := d.UpdateRunnerChatSessionNativeRef(ctx, sess.ID, "native-old"); err != nil {
+		t.Fatalf("UpdateRunnerChatSessionNativeRef: %v", err)
+	}
+	result, err := cm.StartTurn(ctx, sess.ID, StartTurnRequest{
+		UserMessage: "continue here", ContinuationMode: ContinuationNative,
+		Cwd: "/new-workspace", PromptMessage: "compiled bootstrap",
+	})
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	defer func() { _ = cm.Manager.Abort(ctx, result.JobID) }()
+	updated, err := d.GetRunnerChatSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatSession: %v", err)
+	}
+	if updated.Cwd != "/new-workspace" || updated.NativeSessionRef != "" {
+		t.Fatalf("expected fresh native workspace session, got %#v", updated)
+	}
+	run, ok, err := d.GetRunnerRun(ctx, result.JobID)
+	if err != nil || !ok {
+		t.Fatalf("GetRunnerRun: ok=%v err=%v", ok, err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(run.MetaJSON), &meta); err != nil {
+		t.Fatalf("decode run meta: %v", err)
+	}
+	if meta["runner_chat_native_session_ref"] != "" || run.Cwd != "/new-workspace" {
+		t.Fatalf("stale native workspace metadata: run=%#v meta=%#v", run, meta)
+	}
+	appMeta, err := d.GetChatSessionMeta(ctx, sess.AppSessionKey)
+	if err != nil || appMeta.RunnerCwd != "/new-workspace" {
+		t.Fatalf("app session cwd=%q err=%v", appMeta.RunnerCwd, err)
+	}
+}
+
 func TestRunnerErrorEnvelopeIsNotFinalText(t *testing.T) {
 	raw := `{"type":"error","timestamp":1780727114335,"sessionID":"ses_1646495d3ffe7m5AzHnsNey91c","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_c208f54a"}}}`
 	snap := jobs.Snapshot{

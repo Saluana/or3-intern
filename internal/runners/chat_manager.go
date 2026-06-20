@@ -206,6 +206,19 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	if err != nil {
 		return StartTurnResult{}, err
 	}
+	if turn.Cwd != "" && strings.TrimSpace(turn.Cwd) != strings.TrimSpace(sess.Cwd) {
+		updated, updateErr := cm.DB.UpdateRunnerChatSessionCwd(ctx, sess.ID, turn.Cwd)
+		if updateErr != nil {
+			_ = cm.DB.FinalizeRunnerChatTurn(context.Background(), turn.ID, db.RunnerChatTurnFinalize{
+				Status:       db.RunnerChatTurnStatusFailed,
+				ErrorMessage: fmt.Sprintf("update runner workspace: %v", updateErr),
+				CompletedAt:  db.NowMS(),
+			})
+			return StartTurnResult{}, fmt.Errorf("update runner workspace: %w", updateErr)
+		}
+		sess = updated
+		_, _ = cm.DB.SetChatSessionRunnerCwd(ctx, sess.AppSessionKey, turn.Cwd)
+	}
 
 	userPayload := map[string]any{
 		"transport":              "runner_chat",

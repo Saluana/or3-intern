@@ -353,7 +353,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		case errors.Is(err, db.ErrRunnerChatTurnActive):
 			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "another turn is already active for this session", "code": "runner_chat_turn_active"})
 		default:
-			writeServiceError(w, r, http.StatusBadRequest, "start runner chat turn failed", err)
+			writeRunnerChatStartError(w, r, err)
 		}
 		return
 	}
@@ -363,6 +363,41 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		"job_id":     result.JobID,
 		"status":     result.Turn.Status,
 	})
+}
+
+func writeRunnerChatStartError(w http.ResponseWriter, r *http.Request, err error) {
+	public := "start runner chat turn failed"
+	payload := serviceErrorPayload(r, public)
+	payload["code"] = serviceCodeValidationFailed
+	if detail := runnerChatStartErrorDetail(err); detail != "" {
+		payload["detail"] = detail
+	}
+	if err != nil {
+		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
+	}
+	writeServiceJSON(w, http.StatusBadRequest, payload)
+}
+
+func runnerChatStartErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(detail)
+	for _, safe := range []string{
+		"invalid cwd:",
+		"unknown runner ",
+		"runner is disabled",
+		"is disabled by config",
+		"is not installed",
+		"is not authenticated",
+		"is not functional",
+	} {
+		if strings.Contains(lower, safe) {
+			return detail
+		}
+	}
+	return ""
 }
 
 func (s *serviceServer) handleRunnerChatTurnRead(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID string) {

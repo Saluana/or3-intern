@@ -27,6 +27,7 @@ Environment:
   OR3_ENV_FILE         Path to an env file to auto-load before starting.
   OR3_SERVICE_RUN_DIR  Directory for pid/log files.
   OR3_SERVICE_UNSAFE_DEV=true launches `or3-intern --unsafe-dev service`.
+  OR3_SERVICE_LAUNCHD_LABEL overrides the detected macOS service label.
 EOF
 }
 
@@ -163,6 +164,43 @@ wait_for_port_release() {
     fi
     sleep 0.25
   done
+  return 1
+}
+
+launchd_service_target() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 1
+  command -v launchctl >/dev/null 2>&1 || return 1
+  local label="${OR3_SERVICE_LAUNCHD_LABEL:-local.or3-intern.service}"
+  local target="gui/$(id -u)/$label"
+  launchctl print "$target" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$target"
+}
+
+restart_launchd_service() {
+  local target="$1"
+  local port
+  port="$(service_port)"
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    echo "Stopping competing or3-intern service (PID $pid)..."
+    kill "$pid" 2>/dev/null || true
+  done < <(find_service_pids)
+  wait_for_port_release "$port" || true
+  echo "Restarting launchd service $target..."
+  launchctl kickstart -k "$target"
+  for _ in {1..60}; do
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      local running_pid
+      running_pid="$(find_service_pids | sed -n '1p')"
+      [[ -n "$running_pid" ]] && echo "$running_pid" > "$pid_file"
+      echo "or3-intern launchd service is listening as PID ${running_pid:-unknown}."
+      echo "Log file: $log_file"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "launchd restarted OR3, but port $port did not become ready." >&2
   return 1
 }
 
@@ -316,6 +354,11 @@ case "$action" in
     ;;
   restart)
     ensure_binary
+    launchd_target="$(launchd_service_target || true)"
+    if [[ -n "$launchd_target" ]]; then
+      restart_launchd_service "$launchd_target"
+      exit $?
+    fi
     stop_service true
     if [[ -n "$(find_service_pids)" ]]; then
       print_status

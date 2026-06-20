@@ -201,6 +201,8 @@ func SetToggleFieldValue(cfg *config.Config, section, channel, fieldKey string, 
 		cfg.Triggers.Webhook.Enabled = value
 	case "automation_filewatch_enabled":
 		cfg.Triggers.FileWatch.Enabled = value
+	case "filesystem_browsing":
+		cfg.FilesystemBrowsing = value
 	case "service_enabled":
 		cfg.Service.Enabled = value
 	case "service_allow_unauthenticated_pairing":

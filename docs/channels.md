@@ -34,6 +34,7 @@ go run ./cmd/or3-intern serve
 - inbound traffic is mapped to session keys per platform
 - outbound replies follow runner chat turns persisted to SQLite (`messages` + runner events)
 - channel `/approve` and `/deny` commands resolve pending approvals without starting a model turn
+- channel `/workspace <path>` sets the working directory for future turns in that channel session; `/workspace reset` restores the service default
 - `hardening.isolateChannelPeers=true` can isolate senders inside shared channels
 - channels can use `inboundPolicy=allowlist`, `pairing`, or `deny`; when omitted, legacy `openAccess` behavior still applies
 - most channels support a default outbound destination for `send_message`

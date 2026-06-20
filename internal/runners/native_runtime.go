@@ -244,6 +244,10 @@ func freeLoopbackPort() (int, error) {
 }
 
 func httpJSON(ctx context.Context, client *http.Client, method, url string, body any, out any) error {
+	return httpJSONWithHeaders(ctx, client, method, url, body, out, nil)
+}
+
+func httpJSONWithHeaders(ctx context.Context, client *http.Client, method, url string, body any, out any, headers map[string]string) error {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -258,6 +262,11 @@ func httpJSON(ctx context.Context, client *http.Client, method, url string, body
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		if strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -405,7 +414,7 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 	}
 	if sessionID == "" {
 		var session map[string]any
-		if err := httpJSON(ctx, r.client, http.MethodPost, endpoint+"/session", map[string]any{}, &session); err != nil {
+		if err := httpJSONWithHeaders(ctx, r.client, http.MethodPost, endpoint+"/session", map[string]any{}, &session, openCodeDirectoryHeaders(req.Run.Cwd)); err != nil {
 			return ProcessOutput{ExitCode: -1, StderrPreview: err.Error(), DurationMS: time.Since(started).Milliseconds()}, err
 		}
 		sessionID = firstNonEmpty(fmt.Sprint(session["id"]), fmt.Sprint(session["ID"]), fmt.Sprint(session["sessionID"]), fmt.Sprint(session["session_id"]))
@@ -459,11 +468,11 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
-		_ = streamOpenCodeGlobalEvents(streamCtx, r.client, endpoint, sessionID, onEvent, &seq, streamState)
+		_ = streamOpenCodeGlobalEvents(streamCtx, r.client, endpoint, sessionID, req.Run.Cwd, onEvent, &seq, streamState)
 	}()
 
 	var response map[string]any
-	messageErr := httpJSON(messageCtx, r.client, http.MethodPost, endpoint+"/session/"+sessionID+"/message", messageBody, &response)
+	messageErr := httpJSONWithHeaders(messageCtx, r.client, http.MethodPost, endpoint+"/session/"+sessionID+"/message", messageBody, &response, openCodeDirectoryHeaders(req.Run.Cwd))
 
 	cancelStream()
 	select {
@@ -491,6 +500,14 @@ func (r *OpenCodeNativeRuntime) Execute(ctx context.Context, req NativeRuntimeEx
 		onEvent(textChunkEvent(&seq, finalText))
 	}
 	return ProcessOutput{ExitCode: 0, StdoutPreview: finalText, FinalTextPreview: finalText, DurationMS: time.Since(started).Milliseconds()}, nil
+}
+
+func openCodeDirectoryHeaders(cwd string) map[string]string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return nil
+	}
+	return map[string]string{"X-OpenCode-Directory": cwd}
 }
 
 func (r *OpenCodeNativeRuntime) Abort(ctx context.Context, jobID string) error {
@@ -610,7 +627,7 @@ func (r *OpenCodeNativeRuntime) ContinuePendingTurn(ctx context.Context, req Nat
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
-		_ = streamOpenCodeGlobalEvents(streamCtx, r.client, endpoint, sessionID, onEvent, &seq, streamState)
+		_ = streamOpenCodeGlobalEvents(streamCtx, r.client, endpoint, sessionID, req.Run.Cwd, onEvent, &seq, streamState)
 	}()
 	waitCtx, cancelWait := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancelWait()

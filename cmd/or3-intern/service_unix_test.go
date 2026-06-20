@@ -87,3 +87,31 @@ func TestServiceUnixSocketTransportRefusesExistingRegularFile(t *testing.T) {
 		t.Fatalf("expected existing regular file to remain, got %v", statErr)
 	}
 }
+
+func TestServiceTCPBindFailureDoesNotRunStartupCallback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a loopback listener")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("loopback listener unavailable: %v", err)
+	}
+	defer listener.Close()
+	called := false
+	server := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})}
+	err = serveHTTPWithConfiguredTransport(
+		context.Background(),
+		server,
+		config.Config{Service: config.ServiceConfig{Listen: listener.Addr().String()}},
+		func() error {
+			called = true
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected duplicate bind to fail")
+	}
+	if called {
+		t.Fatal("startup callback ran before the service owned its socket")
+	}
+}

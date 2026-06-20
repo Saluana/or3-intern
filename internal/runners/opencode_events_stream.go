@@ -28,7 +28,7 @@ func newOpenCodeStreamState() *openCodeStreamState {
 
 // streamOpenCodeGlobalEvents subscribes to GET /event (SSE) and forwards session-scoped
 // events to the agent run event handler in the shape expected by OpenCodeAdapter.NormalizeChatEvent.
-func streamOpenCodeGlobalEvents(ctx context.Context, client *http.Client, endpoint, sessionID string, onEvent func(RunnerRunEvent), seq *int64, state *openCodeStreamState) error {
+func streamOpenCodeGlobalEvents(ctx context.Context, client *http.Client, endpoint, sessionID, cwd string, onEvent func(RunnerRunEvent), seq *int64, state *openCodeStreamState) error {
 	if client == nil || onEvent == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
@@ -38,6 +38,9 @@ func streamOpenCodeGlobalEvents(ctx context.Context, client *http.Client, endpoi
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if cwd = strings.TrimSpace(cwd); cwd != "" {
+		req.Header.Set("X-OpenCode-Directory", cwd)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

@@ -82,7 +82,8 @@ func (c *Channel) registerCommands(ctx context.Context) error {
 		{Command: "runner", Description: "Choose a runner: /runner <id>"},
 		{Command: "models", Description: "List models: /models [runner]"},
 		{Command: "model", Description: "Choose a model: /model <exact-id>"},
-		{Command: "reset", Description: "Reset runner/model preferences"},
+		{Command: "workspace", Description: "Set workspace: /workspace <path>"},
+		{Command: "reset", Description: "Reset channel preferences"},
 		{Command: "approve", Description: "Approve an OR3 request"},
 		{Command: "deny", Description: "Deny an OR3 request"},
 	}

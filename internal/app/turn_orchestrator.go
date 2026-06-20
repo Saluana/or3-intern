@@ -333,6 +333,9 @@ func RunnerTurnRequestFromBusEvent(cfg config.Config, ev bus.Event) RunnerTurnRe
 		if raw, ok := ev.Meta["model"].(string); ok {
 			req.Model = strings.TrimSpace(raw)
 		}
+		if raw, ok := ev.Meta["cwd"].(string); ok {
+			req.Cwd = strings.TrimSpace(raw)
+		}
 		if raw, ok := ev.Meta["approval_token"].(string); ok {
 			req.ApprovalToken = strings.TrimSpace(raw)
 		}

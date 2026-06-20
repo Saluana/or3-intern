@@ -1122,6 +1122,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "workspace_dir", Label: "Workspace directory", Description: "Project root for workspace-restricted file tools.", Kind: configureFieldText, Value: workspace, EmptyHint: cwd},
 			{Key: "workspace_allowed_dir", Label: "Allowed directory", Description: "Optional additional allowed root used by some flows and integrations.", Kind: configureFieldText, Value: cfg.AllowedDir, EmptyHint: cwd},
+			{Key: "filesystem_browsing", Label: "Full filesystem browsing", Description: "Browse and select any folder on this computer when choosing working directories and attachments.", Kind: configureFieldToggle, Value: onOff(cfg.FilesystemBrowsing)},
 		}
 	case "skills":
 		return []configureField{

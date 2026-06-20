@@ -284,7 +284,7 @@ func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {
 		},
 		{
 			name:        "invalid cwd",
-			req:         RunnerRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode), Cwd: "/outside"},
+			req:         RunnerRunRequest{ParentSessionKey: "sess", Task: "task", RunnerID: string(RunnerOpenCode), Cwd: "../outside"},
 			wantErrText: "invalid cwd",
 		},
 	}

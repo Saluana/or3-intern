@@ -186,11 +186,6 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 		turnOrchestrator = buildRunnerTurnOrchestrator(cfg, server.chatManager, server.serviceDB(), server.serviceMemRetriever(), server.serviceDocRetriever(), server.serviceEmbedProvider())
 	}
 	server.turnOrchestrator = turnOrchestrator
-	if server.chatManager != nil {
-		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
-			log.Printf("chat manager: startup reconciliation failed: %v", err)
-		}
-	}
 	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
@@ -202,34 +197,64 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 		IdleTimeout:       60 * time.Second,
 	}
 
-	return serveHTTPWithConfiguredTransport(ctx, httpServer, cfg)
+	return serveHTTPWithConfiguredTransport(ctx, httpServer, cfg, func() error {
+		// Claim the service socket before mutating runner state. A duplicate
+		// process must fail its bind without aborting turns owned by the live
+		// service.
+		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
+			return fmt.Errorf("runner manager start: %w", err)
+		}
+		if server.chatManager != nil {
+			if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
+				log.Printf("chat manager: startup reconciliation failed: %v", err)
+			}
+		}
+		return nil
+	})
 }
 
-func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Server, cfg config.Config) error {
+func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Server, cfg config.Config, afterBind ...func() error) error {
 	errCh := make(chan error, 1)
 	socketPath := strings.TrimSpace(cfg.Service.UnixSocket)
+	var listener net.Listener
 	if socketPath != "" {
 		if err := prepareUnixSocketPath(socketPath); err != nil {
 			return err
 		}
-		listener, err := net.Listen("unix", socketPath)
+		var err error
+		listener, err = net.Listen("unix", socketPath)
 		if err != nil {
 			return err
 		}
-		go func() {
-			log.Printf("or3-intern service listening on unix socket %s", socketPath)
-			if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-				errCh <- err
-			}
-		}()
 	} else {
-		go func() {
-			log.Printf("or3-intern service listening on %s", cfg.Service.Listen)
-			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				errCh <- err
-			}
-		}()
+		var err error
+		listener, err = net.Listen("tcp", cfg.Service.Listen)
+		if err != nil {
+			return err
+		}
 	}
+	for _, callback := range afterBind {
+		if callback == nil {
+			continue
+		}
+		if err := callback(); err != nil {
+			_ = listener.Close()
+			if socketPath != "" {
+				cleanupUnixSocketPath(socketPath)
+			}
+			return err
+		}
+	}
+	go func() {
+		if socketPath != "" {
+			log.Printf("or3-intern service listening on unix socket %s", socketPath)
+		} else {
+			log.Printf("or3-intern service listening on %s", cfg.Service.Listen)
+		}
+		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)

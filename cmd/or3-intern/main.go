@@ -475,7 +475,7 @@ func main() {
 	serviceJobs := buildServiceJobRegistry(cmd)
 
 	runnerManager = buildRuntimeRunnerManager(cfg, d, serviceJobs)
-	if runnerManager != nil {
+	if runnerManager != nil && cmd != "service" {
 		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
 			fmt.Fprintln(os.Stderr, "runner manager error:", err)
 			os.Exit(1)

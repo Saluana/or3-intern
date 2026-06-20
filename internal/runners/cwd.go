@@ -9,13 +9,9 @@ import (
 	"or3-intern/internal/tools"
 )
 
-// resolveRunnerCwd validates and canonicalizes the requested working directory
-// against the manager's RestrictDir. It follows these rules:
-//
-//   - Empty requested → defaults to RestrictDir (or os.Getwd if unrestricted)
-//   - Relative requested → resolved below RestrictDir
-//   - Absolute requested → must be inside RestrictDir, rejected otherwise
-//   - Empty RestrictDir → allow any cwd (no restriction)
+// resolveRunnerCwd resolves and canonicalizes the requested working directory.
+// RestrictDir constrains the default (empty) and relative CWD; explicitly-set
+// absolute paths are always trusted since the request is authenticated.
 func resolveRunnerCwd(requested, restrictDir string) (string, error) {
 	requested = strings.TrimSpace(requested)
 
@@ -27,10 +23,7 @@ func resolveRunnerCwd(requested, restrictDir string) (string, error) {
 	}
 
 	if filepath.IsAbs(requested) {
-		if strings.TrimSpace(restrictDir) == "" {
-			return requested, nil
-		}
-		return validateCwdWithinRoot(requested, restrictDir)
+		return requested, nil
 	}
 
 	base := strings.TrimSpace(restrictDir)

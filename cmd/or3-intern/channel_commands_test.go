@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +28,54 @@ func TestParseChannelCommandAllowsTelegramBotSuffix(t *testing.T) {
 	cmd, args, ok := parseChannelCommand("/runner@or3_bot opencode")
 	if !ok || cmd != "runner" || len(args) != 1 || args[0] != "opencode" {
 		t.Fatalf("unexpected parse result: cmd=%q args=%#v ok=%v", cmd, args, ok)
+	}
+}
+
+func TestChannelCommandHandlerPersistsAndInjectsWorkspace(t *testing.T) {
+	ctx := context.Background()
+	database := openChannelCommandTestDB(t)
+	handler := &channelCommandHandler{Config: config.Default(), DB: database}
+	workspace := filepath.Join(t.TempDir(), "project with spaces")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	ev := bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:workspace", Message: "/workspace " + workspace}
+	if _, handled, err := handler.Handle(ctx, ev); !handled || err != nil {
+		t.Fatalf("expected /workspace handled without error, handled=%v err=%v", handled, err)
+	}
+	meta, err := database.GetChatSessionMeta(ctx, ev.SessionKey)
+	if err != nil {
+		t.Fatalf("GetChatSessionMeta: %v", err)
+	}
+	if meta.RunnerCwd != workspace {
+		t.Fatalf("runner cwd = %q, want %q", meta.RunnerCwd, workspace)
+	}
+	next, handled, err := handler.Handle(ctx, bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: ev.SessionKey, Message: "pwd", Meta: map[string]any{}})
+	if handled || err != nil {
+		t.Fatalf("expected normal turn to continue, handled=%v err=%v", handled, err)
+	}
+	if next.Meta["cwd"] != workspace || next.Meta["_cwd"] != workspace {
+		t.Fatalf("expected cwd metadata injection, got %#v", next.Meta)
+	}
+}
+
+func TestResolveChannelWorkspacePathExpandsHomeAndRejectsFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := filepath.Join(home, "project")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	got, err := resolveChannelWorkspacePath("~/project")
+	if err != nil || got != project {
+		t.Fatalf("resolved = %q, err=%v, want %q", got, err, project)
+	}
+	file := filepath.Join(home, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := resolveChannelWorkspacePath(file); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("expected file rejection, got %v", err)
 	}
 }
 
@@ -64,6 +113,9 @@ func TestChannelCommandHandlerResetClearsPreferences(t *testing.T) {
 	if _, err := database.SetChatSessionRunnerPreference(ctx, "telegram:123", "opencode", "OpenCode", "gpt-5"); err != nil {
 		t.Fatalf("SetChatSessionRunnerPreference: %v", err)
 	}
+	if _, err := database.SetChatSessionRunnerCwd(ctx, "telegram:123", t.TempDir()); err != nil {
+		t.Fatalf("SetChatSessionRunnerCwd: %v", err)
+	}
 	handler := &channelCommandHandler{Config: cfg, DB: database}
 	if _, handled, err := handler.Handle(ctx, bus.Event{Type: bus.EventUserMessage, Channel: "telegram", SessionKey: "telegram:123", Message: "/reset"}); !handled || err != nil {
 		t.Fatalf("expected /reset handled without error, handled=%v err=%v", handled, err)
@@ -72,7 +124,7 @@ func TestChannelCommandHandlerResetClearsPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChatSessionMeta: %v", err)
 	}
-	if meta.RunnerID != "" || meta.RunnerLabel != "" || meta.RunnerModel != "" {
+	if meta.RunnerID != "" || meta.RunnerLabel != "" || meta.RunnerModel != "" || meta.RunnerCwd != "" {
 		t.Fatalf("expected cleared preference, got %#v", meta)
 	}
 }

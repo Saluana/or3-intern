@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +52,9 @@ func (h *channelCommandHandler) Handle(ctx context.Context, ev bus.Event) (bus.E
 		case "model":
 			h.handleModelCommand(ctx, ev, args)
 			return ev, true, nil
+		case "workspace", "cwd":
+			h.handleWorkspaceCommand(ctx, ev, args)
+			return ev, true, nil
 		case "reset":
 			h.handleResetCommand(ctx, ev)
 			return ev, true, nil
@@ -86,7 +91,9 @@ func channelCommandHelp() string {
 		"/runner <id> — choose a runner for this channel session",
 		"/models [runner] [provider] — list model IDs you can copy",
 		"/model <id> — choose a model by exact ID",
-		"/reset — clear saved runner/model preferences",
+		"/workspace <path> — set this channel session's working directory",
+		"/workspace reset — restore the default working directory",
+		"/reset — clear saved runner/model/workspace preferences",
 		"/approve <id> and /deny <id> — respond to approval prompts",
 	}, "\n")
 }
@@ -107,7 +114,16 @@ func (h *channelCommandHandler) settingsText(ctx context.Context, sessionKey str
 			model += " (default)"
 		}
 	}
-	return fmt.Sprintf("Current channel settings:\nRunner: %s\nModel: %s", runnerID, model)
+	workspace := strings.TrimSpace(meta.RunnerCwd)
+	if workspace == "" {
+		workspace = strings.TrimSpace(h.Config.WorkspaceDir)
+		if workspace == "" {
+			workspace = "process default"
+		} else {
+			workspace += " (default)"
+		}
+	}
+	return fmt.Sprintf("Current channel settings:\nRunner: %s\nModel: %s\nWorkspace: %s", runnerID, model, workspace)
 }
 
 func (h *channelCommandHandler) runnersText() string {
@@ -219,8 +235,82 @@ func (h *channelCommandHandler) handleResetCommand(ctx context.Context, ev bus.E
 			h.deliver(ctx, ev, "I couldn't reset channel preferences: "+err.Error())
 			return
 		}
+		if _, err := h.DB.SetChatSessionRunnerCwd(ctx, ev.SessionKey, ""); err != nil {
+			h.deliver(ctx, ev, "I cleared the runner/model preferences but couldn't reset the workspace: "+err.Error())
+			return
+		}
 	}
-	h.deliver(ctx, ev, "Channel runner/model preferences reset. Future turns will use the service defaults.")
+	h.deliver(ctx, ev, "Channel runner/model/workspace preferences reset. Future turns will use the service defaults.")
+}
+
+func (h *channelCommandHandler) handleWorkspaceCommand(ctx context.Context, ev bus.Event, args []string) {
+	if len(args) == 0 {
+		meta, _ := h.sessionMeta(ctx, ev.SessionKey)
+		cwd := strings.TrimSpace(meta.RunnerCwd)
+		if cwd == "" {
+			cwd = strings.TrimSpace(h.Config.WorkspaceDir)
+			if cwd == "" {
+				cwd = "the runner process default"
+			} else {
+				cwd += " (service default)"
+			}
+		}
+		h.deliver(ctx, ev, "Current workspace: "+cwd+"\nUse /workspace <absolute-path> or /workspace ~/path to change it. Use /workspace reset to restore the default.")
+		return
+	}
+	raw := strings.TrimSpace(strings.Join(args, " "))
+	if strings.EqualFold(raw, "reset") || strings.EqualFold(raw, "default") {
+		if h.DB != nil {
+			if _, err := h.DB.SetChatSessionRunnerCwd(ctx, ev.SessionKey, ""); err != nil {
+				h.deliver(ctx, ev, "I couldn't reset that workspace preference: "+err.Error())
+				return
+			}
+		}
+		h.deliver(ctx, ev, "Workspace reset. Future turns in this channel session will use the service default.")
+		return
+	}
+	cwd, err := resolveChannelWorkspacePath(raw)
+	if err != nil {
+		h.deliver(ctx, ev, "I couldn't use that workspace: "+err.Error()+"\nUse an absolute directory path or ~/path.")
+		return
+	}
+	if h.DB != nil {
+		if _, err := h.DB.SetChatSessionRunnerCwd(ctx, ev.SessionKey, cwd); err != nil {
+			h.deliver(ctx, ev, "I couldn't save that workspace preference: "+err.Error())
+			return
+		}
+	}
+	h.deliver(ctx, ev, "Workspace set to "+cwd+". Future turns in this channel session will run there.")
+}
+
+func resolveChannelWorkspacePath(raw string) (string, error) {
+	path := strings.TrimSpace(raw)
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New("workspace path must be absolute")
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("directory does not exist: %s", path)
+		}
+		return "", fmt.Errorf("inspect directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("path is not a directory: %s", path)
+	}
+	return path, nil
 }
 
 func (h *channelCommandHandler) applyPreferences(ctx context.Context, ev bus.Event) (bus.Event, bool, error) {
@@ -230,6 +320,7 @@ func (h *channelCommandHandler) applyPreferences(ctx context.Context, ev bus.Eve
 	}
 	savedRunnerID := strings.TrimSpace(meta.RunnerID)
 	model := strings.TrimSpace(meta.RunnerModel)
+	cwd := strings.TrimSpace(meta.RunnerCwd)
 	if savedRunnerID != "" {
 		if err := runners.ValidateSelectableRunner(h.Config, runners.RunnerID(savedRunnerID)); err != nil {
 			h.deliver(ctx, ev, "The saved runner for this channel is no longer available: "+err.Error()+"\nUse /runner <id> to choose a new runner or /reset to use defaults.")
@@ -248,7 +339,7 @@ func (h *channelCommandHandler) applyPreferences(ctx context.Context, ev bus.Eve
 		}
 		model = canonicalModel
 	}
-	if savedRunnerID == "" && model == "" {
+	if savedRunnerID == "" && model == "" && cwd == "" {
 		return ev, false, nil
 	}
 	if ev.Meta == nil {
@@ -259,6 +350,10 @@ func (h *channelCommandHandler) applyPreferences(ctx context.Context, ev bus.Eve
 	}
 	if model != "" {
 		ev.Meta["model"] = model
+	}
+	if cwd != "" {
+		ev.Meta["cwd"] = cwd
+		ev.Meta["_cwd"] = cwd
 	}
 	return ev, false, nil
 }

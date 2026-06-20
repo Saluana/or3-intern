@@ -523,13 +523,14 @@ func TestChannel_StartRegistersBotCommands(t *testing.T) {
 	defer func() { _ = ch.Stop(context.Background()) }()
 	select {
 	case commands := <-commandsSeen:
-		var sawRunner, sawModel bool
+		var sawRunner, sawModel, sawWorkspace bool
 		for _, command := range commands {
 			sawRunner = sawRunner || command["command"] == "runner"
 			sawModel = sawModel || command["command"] == "model"
+			sawWorkspace = sawWorkspace || command["command"] == "workspace"
 		}
-		if !sawRunner || !sawModel {
-			t.Fatalf("expected runner/model commands, got %#v", commands)
+		if !sawRunner || !sawModel || !sawWorkspace {
+			t.Fatalf("expected runner/model/workspace commands, got %#v", commands)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for command registration")

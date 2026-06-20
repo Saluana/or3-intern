@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+func TestUpdateRunnerChatSessionCwdClearsNativeReference(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	sess, err := d.CreateOrGetRunnerChatSession(ctx, RunnerChatSession{
+		ID: "rcs-workspace", AppSessionKey: "app-workspace", RunnerID: "opencode",
+		ContinuationMode: "native", NativeSessionRef: "native-old", Cwd: "/old",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	updated, err := d.UpdateRunnerChatSessionCwd(ctx, sess.ID, "/new")
+	if err != nil {
+		t.Fatalf("UpdateRunnerChatSessionCwd: %v", err)
+	}
+	if updated.Cwd != "/new" || updated.NativeSessionRef != "" {
+		t.Fatalf("unexpected updated session: %#v", updated)
+	}
+}
+
 func TestRunnerChatStoreTurnLifecycleAndActiveUniqueness(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

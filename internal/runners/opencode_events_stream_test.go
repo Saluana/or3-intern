@@ -17,10 +17,16 @@ import (
 
 func TestOpenCodeExecuteStreamsBusEvents(t *testing.T) {
 	const sessionID = "sess_stream"
+	const cwd = "/Users/brendon/.openclaw/Documents"
 	var events []RunnerRunEvent
 	var mu sync.Mutex
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/event" || r.URL.Path == "/session" || r.URL.Path == "/session/"+sessionID+"/message" {
+			if got := r.Header.Get("X-OpenCode-Directory"); got != cwd {
+				t.Errorf("%s directory header = %q, want %q", r.URL.Path, got, cwd)
+			}
+		}
 		switch r.URL.Path {
 		case "/global/health":
 			w.WriteHeader(http.StatusOK)
@@ -70,7 +76,7 @@ func TestOpenCodeExecuteStreamsBusEvents(t *testing.T) {
 
 	runtime := NewOpenCodeNativeRuntime()
 	_, err := runtime.Execute(context.Background(), NativeRuntimeExecuteRequest{
-		Run:    db.RunnerRun{ID: "run_1", JobID: "job_1", Task: "hello", Model: "mimo-v2.5"},
+		Run:    db.RunnerRun{ID: "run_1", JobID: "job_1", Task: "hello", Model: "mimo-v2.5", Cwd: cwd},
 		Chat:   RunnerChatCommandRequest{UserMessage: "hello"},
 		Config: config.RunnersConfig{NativeServerURLs: map[string]string{"opencode": server.URL}},
 		Env:    []string{"PATH="},

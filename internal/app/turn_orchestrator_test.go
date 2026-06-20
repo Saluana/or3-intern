@@ -34,6 +34,18 @@ func TestRunnerTurnRequestFromBusEvent(t *testing.T) {
 	}
 }
 
+func TestRunnerTurnRequestFromBusEventIncludesWorkspace(t *testing.T) {
+	req := RunnerTurnRequestFromBusEvent(config.Default(), bus.Event{
+		Type:       bus.EventUserMessage,
+		SessionKey: "telegram:123",
+		Message:    "pwd",
+		Meta:       map[string]any{"cwd": "/tmp/project", "_cwd": "/tmp/project"},
+	})
+	if req.Cwd != "/tmp/project" || req.Meta["_cwd"] != "/tmp/project" {
+		t.Fatalf("unexpected workspace mapping: %#v", req)
+	}
+}
+
 func TestRunnerTurnRequestFromBusEventDefaultRunner(t *testing.T) {
 	cfg := config.Default()
 	req := RunnerTurnRequestFromBusEvent(cfg, bus.Event{Type: bus.EventUserMessage, SessionKey: "cli:default", Message: "hi"})

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,16 @@ import (
 	"or3-intern/internal/jobs"
 	"or3-intern/internal/runners"
 )
+
+func TestRunnerChatStartErrorDetailOnlyExposesActionableFailures(t *testing.T) {
+	detail := runnerChatStartErrorDetail(errors.New("invalid cwd: cwd outside allowed directory: /tmp/project (allowed root: /workspace)"))
+	if !strings.Contains(detail, "outside allowed directory") {
+		t.Fatalf("detail = %q, want cwd validation guidance", detail)
+	}
+	if got := runnerChatStartErrorDetail(errors.New("database write failed: secret internal detail")); got != "" {
+		t.Fatalf("unexpected internal detail exposure: %q", got)
+	}
+}
 
 type runnerChatServiceFixture struct {
 	server     *serviceServer

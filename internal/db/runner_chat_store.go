@@ -361,6 +361,14 @@ func (d *DB) SetRunnerChatTurnUserMessageID(ctx context.Context, id string, mess
 	return err
 }
 
+// SetRunnerChatTurnAssistantMessageID binds the durable in-progress assistant
+// placeholder to a turn before runner events begin streaming.
+func (d *DB) SetRunnerChatTurnAssistantMessageID(ctx context.Context, id string, messageID int64) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_chat_turns SET assistant_message_id=? WHERE id=?`, messageID, id)
+	return err
+}
+
 // AppendRunnerChatEvent inserts a new event for a turn.
 func (d *DB) AppendRunnerChatEvent(ctx context.Context, ev RunnerChatEvent) error {
 	if strings.TrimSpace(ev.TurnID) == "" {

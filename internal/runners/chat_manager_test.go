@@ -61,8 +61,26 @@ func TestChatManagerStartTurnDoesNotAppendUserMessageOnActiveConflict(t *testing
 	if err := d.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE session_key=?`, sess.AppSessionKey).Scan(&count); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected only accepted user message, got %d messages", count)
+	if count != 2 {
+		t.Fatalf("expected accepted user message and durable assistant placeholder, got %d messages", count)
+	}
+	var role, payloadJSON string
+	if err := d.SQL.QueryRowContext(ctx,
+		`SELECT role, payload_json FROM messages WHERE session_key=? ORDER BY id DESC LIMIT 1`,
+		sess.AppSessionKey,
+	).Scan(&role, &payloadJSON); err != nil {
+		t.Fatalf("read assistant placeholder: %v", err)
+	}
+	if role != "assistant" || !strings.Contains(payloadJSON, `"status":"running"`) ||
+		!strings.Contains(payloadJSON, `"runner_chat_turn_id":"`+result.Turn.ID+`"`) {
+		t.Fatalf("unexpected assistant placeholder: role=%q payload=%s", role, payloadJSON)
+	}
+	run, ok, err := d.GetRunnerRun(ctx, result.JobID)
+	if err != nil || !ok {
+		t.Fatalf("GetRunnerRun: ok=%v err=%v", ok, err)
+	}
+	if run.TimeoutSeconds != 0 {
+		t.Fatalf("runner chat turn inherited hard timeout: %d", run.TimeoutSeconds)
 	}
 }
 
@@ -381,5 +399,50 @@ func TestChatManagerRunnerChatEventsPayloadPreservesCanonicalPayload(t *testing.
 	}
 	if !strings.Contains(string(encoded), `"item_type":"command_execution"`) {
 		t.Fatalf("expected canonical payload object, got %s", string(encoded))
+	}
+}
+
+func TestChatManagerRunnerChatEventsPayloadIncludesEveryPage(t *testing.T) {
+	d := openChatManagerTestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	sess, err := d.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{
+		ID:               "rcs-all-events",
+		AppSessionKey:    "app-all-events",
+		RunnerID:         string(RunnerOpenCode),
+		ContinuationMode: string(ContinuationNative),
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	turn, err := d.CreateRunnerChatTurn(ctx, db.RunnerChatTurn{
+		ID:               "rct-all-events",
+		SessionID:        sess.ID,
+		Status:           db.RunnerChatTurnStatusQueued,
+		UserMessage:      "long run",
+		ContinuationMode: string(ContinuationNative),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunnerChatTurn: %v", err)
+	}
+	const eventCount = runnerChatMessageEventPageSize + 5
+	for seq := 1; seq <= eventCount; seq++ {
+		if err := d.AppendRunnerChatEvent(ctx, db.RunnerChatEvent{
+			TurnID:      turn.ID,
+			SessionID:   sess.ID,
+			JobID:       "job-all-events",
+			Seq:         int64(seq),
+			Type:        "item.updated",
+			PayloadJSON: `{"item_type":"command_execution"}`,
+		}); err != nil {
+			t.Fatalf("AppendRunnerChatEvent seq=%d: %v", seq, err)
+		}
+	}
+	events := cm.runnerChatEventsPayload(turn.ID)
+	if len(events) != eventCount {
+		t.Fatalf("persisted %d of %d events", len(events), eventCount)
+	}
+	if events[len(events)-1]["seq"] != int64(eventCount) {
+		t.Fatalf("last event = %#v", events[len(events)-1])
 	}
 }

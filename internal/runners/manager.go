@@ -220,13 +220,17 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 		}
 	}
 
-	// Default timeout
-	timeoutSeconds := req.TimeoutSeconds
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = cfg.DefaultTimeoutSeconds
-	}
-	if timeoutSeconds > cfg.MaxTimeoutSeconds {
-		timeoutSeconds = cfg.MaxTimeoutSeconds
+	// Batch runner jobs retain the configured deadline. Durable runner-chat
+	// turns opt out and are controlled by explicit abort/service shutdown only.
+	timeoutSeconds := 0
+	if !req.NoTimeout {
+		timeoutSeconds = req.TimeoutSeconds
+		if timeoutSeconds <= 0 {
+			timeoutSeconds = cfg.DefaultTimeoutSeconds
+		}
+		if timeoutSeconds > cfg.MaxTimeoutSeconds {
+			timeoutSeconds = cfg.MaxTimeoutSeconds
+		}
 	}
 
 	// Resolve and validate cwd against allowed root
@@ -379,10 +383,13 @@ func (m *Manager) runOnce() (bool, error) {
 func (m *Manager) executeRun(run db.RunnerRun) {
 	defer m.recoverRunPanic(run)
 	timeout := time.Duration(run.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = m.TaskTimeout
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(m.ctx, timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(m.ctx)
 	}
-	runCtx, cancel := context.WithTimeout(m.ctx, timeout)
 	defer cancel()
 
 	if m.Jobs != nil {

@@ -2,6 +2,7 @@ package runners
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync/atomic"
@@ -113,6 +114,19 @@ func TestRespondToTurnApprovalLiveContinuation(t *testing.T) {
 	d, cm, broker, runtime := setupChatManagerForApproval(t)
 	ctx := context.Background()
 	sess, turn := seedTurnWithApproval(t, d, 0)
+	assistantMessageID, err := cm.appendMessage(ctx, sess.AppSessionKey, "assistant", "Waiting for approval", map[string]any{
+		"status":              db.RunnerChatTurnStatusApprovalRequired,
+		"approval_id":         4242,
+		"approval_request_id": 4242,
+		"approval_state":      "pending",
+	})
+	if err != nil {
+		t.Fatalf("append assistant message: %v", err)
+	}
+	if err := d.SetRunnerChatTurnAssistantMessageID(ctx, turn.ID, assistantMessageID); err != nil {
+		t.Fatalf("SetRunnerChatTurnAssistantMessageID: %v", err)
+	}
+	turn.AssistantMessageID = assistantMessageID
 	// Record a fake approval_required event with a native ref.
 	payload := []byte(`{"status":"approval_required","approval_id":4242,"approval_request_id":4242,"runner_permission":{"runner_id":"codex","kind":"filesystem","access":"read","target_path":"/tmp/x"},"native_request_ref":{"runner_id":"codex","kind":"approval","request_id":"7777","thread_id":"thread-1","method":"item/filechange/approval","summary":"Allow /tmp/x","issued_at":1700000000000}}`)
 	if err := d.AppendRunnerChatEvent(ctx, db.RunnerChatEvent{
@@ -165,6 +179,17 @@ func TestRespondToTurnApprovalLiveContinuation(t *testing.T) {
 	}
 	if updated.Status != db.RunnerChatTurnStatusRunning {
 		t.Fatalf("expected status=running, got %s", updated.Status)
+	}
+	var assistantPayloadJSON string
+	if err := d.SQL.QueryRowContext(ctx, `SELECT payload_json FROM messages WHERE id=?`, assistantMessageID).Scan(&assistantPayloadJSON); err != nil {
+		t.Fatalf("read resumed assistant payload: %v", err)
+	}
+	var assistantPayload map[string]any
+	if err := json.Unmarshal([]byte(assistantPayloadJSON), &assistantPayload); err != nil {
+		t.Fatalf("decode resumed assistant payload: %v", err)
+	}
+	if assistantPayload["status"] != db.RunnerChatTurnStatusRunning || assistantPayload["approval_state"] != nil {
+		t.Fatalf("assistant payload did not become resumable: %#v", assistantPayload)
 	}
 }
 

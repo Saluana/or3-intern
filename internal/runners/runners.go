@@ -311,6 +311,10 @@ type RunnerRunRequest struct {
 	Isolation        string
 	MaxTurns         int
 	Meta             map[string]any
+	// NoTimeout disables the runner execution deadline. Durable runner-chat
+	// turns use this because they are explicitly abortable and may remain
+	// productive for much longer than the configured batch-run timeout.
+	NoTimeout bool
 }
 
 // CommandSpec is the executable command built by an adapter.

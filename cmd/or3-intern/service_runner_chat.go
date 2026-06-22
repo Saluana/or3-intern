@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -493,14 +492,29 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 		}
 		return max, true
 	}
-	// Initial flush of persisted history.
-	events, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, 1000)
-	if err == nil {
-		if next, ok := flush(events); ok {
+	flushPending := func(limit int) bool {
+		for {
+			events, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, limit)
+			if err != nil {
+				return false
+			}
+			if len(events) == 0 {
+				return true
+			}
+			next, ok := flush(events)
+			if !ok {
+				return false
+			}
 			afterSeq = next
-		} else {
-			return
+			if len(events) < limit {
+				return true
+			}
 		}
+	}
+	// Initial flush of all persisted history. A reconnect to a completed turn
+	// must not silently stop after the first page of tool/content events.
+	if !flushPending(1000) {
+		return
 	}
 	if isTerminalRunnerChatStatus(turn.Status) {
 		_ = writeSSEEvent(w, "done", map[string]any{"status": turn.Status})
@@ -515,25 +529,18 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			batch, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, 200)
-			if err != nil {
-				_ = writeSSEEvent(w, "error", map[string]any{"error": fmt.Sprintf("%v", err)})
+			beforeSeq := afterSeq
+			if !flushPending(200) {
+				_ = writeSSEEvent(w, "error", map[string]any{"error": "runner chat events unavailable"})
 				return
 			}
-			if len(batch) > 0 {
-				next, ok := flush(batch)
-				if !ok {
-					return
-				}
-				afterSeq = next
+			if afterSeq > beforeSeq {
 				lastKeepalive = time.Now()
 			}
 			cur, err := store.GetRunnerChatTurn(r.Context(), turnID)
 			if err == nil && isTerminalRunnerChatStatus(cur.Status) {
 				// Drain any final events recorded after the last poll.
-				if tail, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, 200); err == nil && len(tail) > 0 {
-					_, _ = flush(tail)
-				}
+				_ = flushPending(200)
 				_ = writeSSEEvent(w, "done", map[string]any{
 					"status":               cur.Status,
 					"final_text":           cur.FinalText,

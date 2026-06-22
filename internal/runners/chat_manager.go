@@ -74,7 +74,7 @@ type runnerApprovalState struct {
 	HasNative     bool
 }
 
-const runnerChatMessageEventPayloadLimit = 300
+const runnerChatMessageEventPageSize = 1000
 
 // StartTurnResult contains the durable identifiers for a started turn.
 type StartTurnResult struct {
@@ -287,6 +287,7 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 		Isolation:        turn.Isolation,
 		MaxTurns:         maxTurns,
 		TimeoutSeconds:   req.TimeoutSeconds,
+		NoTimeout:        true,
 		Meta:             agentMeta,
 	}
 	run, err := cm.Manager.Enqueue(ctx, agentReq)
@@ -305,6 +306,37 @@ func (cm *ChatManager) StartTurn(ctx context.Context, sessionID string, req Star
 	turn.RunnerRunID = run.ID
 	turn.RunnerJobID = run.JobID
 	turn.Status = db.RunnerChatTurnStatusRunning
+	assistantPayload := map[string]any{
+		"transport":              "runner_chat",
+		"runner_id":              sess.RunnerID,
+		"runner_chat_session_id": sess.ID,
+		"runner_chat_turn_id":    turn.ID,
+		"runner_run_id":          run.ID,
+		"runner_job_id":          run.JobID,
+		"continuation_mode":      turn.ContinuationMode,
+		"status":                 db.RunnerChatTurnStatusRunning,
+		"user_message":           turn.UserMessage,
+	}
+	assistantMsgID, err := cm.appendMessage(context.Background(), sess.AppSessionKey, "assistant", "", assistantPayload)
+	if err != nil {
+		_ = cm.Manager.Abort(context.Background(), run.JobID)
+		_ = cm.DB.FinalizeRunnerChatTurn(context.Background(), turn.ID, db.RunnerChatTurnFinalize{
+			Status:       db.RunnerChatTurnStatusFailed,
+			ErrorMessage: fmt.Sprintf("persist assistant placeholder: %v", err),
+			CompletedAt:  db.NowMS(),
+		})
+		return StartTurnResult{}, fmt.Errorf("persist assistant placeholder: %w", err)
+	}
+	if err := cm.DB.SetRunnerChatTurnAssistantMessageID(context.Background(), turn.ID, assistantMsgID); err != nil {
+		_ = cm.Manager.Abort(context.Background(), run.JobID)
+		_ = cm.DB.FinalizeRunnerChatTurn(context.Background(), turn.ID, db.RunnerChatTurnFinalize{
+			Status:       db.RunnerChatTurnStatusFailed,
+			ErrorMessage: fmt.Sprintf("persist assistant message id: %v", err),
+			CompletedAt:  db.NowMS(),
+		})
+		return StartTurnResult{}, fmt.Errorf("persist assistant message id: %w", err)
+	}
+	turn.AssistantMessageID = assistantMsgID
 	log.Printf("chat manager: started runner chat turn runner=%s session=%s turn=%s job=%s mode=%s isolation=%s", sess.RunnerID, sess.ID, turn.ID, run.JobID, turn.Mode, turn.Isolation)
 
 	// Subscribe to job events to mirror them into runner_chat_events and
@@ -440,6 +472,9 @@ func (cm *ChatManager) RespondToTurnApproval(ctx context.Context, turnID string,
 		if respErr == nil {
 			cm.appendApprovalResponseEvent(ctx, turn, sess, "approve", RespondToTurnApprovalResult{Route: "native", ApprovalID: approvalID, NativeContinued: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession})
 			_ = cm.DB.MarkRunnerChatTurnApprovalResumed(ctx, turn.ID, db.NowMS())
+			if err := cm.markAssistantMessageRunning(ctx, turn.AssistantMessageID); err != nil {
+				log.Printf("chat manager: mark resumed assistant running failed: turn=%s message=%d err=%v", turn.ID, turn.AssistantMessageID, err)
+			}
 			cm.resumeTurnAfterNativeApproval(sess, turn)
 			return RespondToTurnApprovalResult{Route: "native", ApprovalID: approvalID, NativeContinued: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession}, nil
 		}
@@ -456,38 +491,48 @@ func (cm *ChatManager) RespondToTurnApproval(ctx context.Context, turnID string,
 // lastApprovalRef walks the persisted chat events for a turn and returns
 // the most recent approval id plus the native request ref attached to it.
 func (cm *ChatManager) lastApprovalRef(ctx context.Context, turn db.RunnerChatTurn) (int64, NativeRequestRef, bool) {
-	events, err := cm.DB.ListRunnerChatEvents(ctx, turn.ID, 0, 1000)
-	if err != nil {
-		return 0, NativeRequestRef{}, false
-	}
 	var approvalID int64
 	var ref NativeRequestRef
 	var hasRef bool
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
-		if ev.Type != "approval_required" {
-			continue
+	afterSeq := int64(0)
+	for {
+		events, err := cm.DB.ListRunnerChatEvents(ctx, turn.ID, afterSeq, runnerChatMessageEventPageSize)
+		if err != nil {
+			return 0, NativeRequestRef{}, false
 		}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err != nil {
-			continue
+		if len(events) == 0 {
+			break
 		}
-		if raw, ok := payload["approval_id"].(float64); ok && approvalID == 0 {
-			approvalID = int64(raw)
-		}
-		if raw, ok := payload["approval_request_id"].(float64); ok && approvalID == 0 {
-			approvalID = int64(raw)
-		}
-		if !hasRef {
+		for _, ev := range events {
+			afterSeq = ev.Seq
+			if ev.Type != "approval_required" {
+				continue
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err != nil {
+				continue
+			}
+			latestApprovalID := int64(0)
+			if raw, ok := payload["approval_id"].(float64); ok {
+				latestApprovalID = int64(raw)
+			}
+			if raw, ok := payload["approval_request_id"].(float64); ok && latestApprovalID == 0 {
+				latestApprovalID = int64(raw)
+			}
+			latestRef := NativeRequestRef{}
+			latestHasRef := false
 			if raw, ok := payload["native_request_ref"].(map[string]any); ok {
-				ref = nativeRequestRefFromMap(raw)
-				if ref.RequestID != "" {
-					hasRef = true
-				}
+				latestRef = nativeRequestRefFromMap(raw)
+				latestHasRef = latestRef.RequestID != ""
+			}
+			if latestApprovalID != 0 {
+				approvalID = latestApprovalID
+				ref = latestRef
+				hasRef = latestHasRef
 			}
 		}
-		if approvalID != 0 {
-			return approvalID, ref, hasRef
+		if len(events) < runnerChatMessageEventPageSize {
+			break
 		}
 	}
 	return approvalID, ref, hasRef
@@ -768,7 +813,7 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 		assistantPayload["runner_chat_events"] = events
 	}
 	assistantMsgID := turn.AssistantMessageID
-	if status == db.RunnerChatTurnStatusApprovalRequired || assistantMsgID == 0 {
+	if assistantMsgID == 0 {
 		var err error
 		assistantMsgID, err = cm.appendMessage(context.Background(), sess.AppSessionKey, "assistant", assistantContent, assistantPayload)
 		if err != nil {
@@ -1040,35 +1085,45 @@ func (cm *ChatManager) runnerChatEventsPayload(turnID string) []map[string]any {
 	if cm == nil || cm.DB == nil || strings.TrimSpace(turnID) == "" {
 		return nil
 	}
-	events, err := cm.DB.ListRunnerChatEvents(context.Background(), turnID, 0, runnerChatMessageEventPayloadLimit)
-	if err != nil {
-		log.Printf("chat manager: list events for assistant payload failed: turn=%s err=%v", turnID, err)
-		return nil
-	}
-	out := make([]map[string]any, 0, len(events))
-	for _, ev := range events {
-		item := map[string]any{
-			"type": ev.Type,
-			"seq":  ev.Seq,
+	var out []map[string]any
+	afterSeq := int64(0)
+	for {
+		events, err := cm.DB.ListRunnerChatEvents(context.Background(), turnID, afterSeq, runnerChatMessageEventPageSize)
+		if err != nil {
+			log.Printf("chat manager: list events for assistant payload failed: turn=%s err=%v", turnID, err)
+			return nil
 		}
-		if strings.TrimSpace(ev.JobID) != "" {
-			item["job_id"] = ev.JobID
+		if len(events) == 0 {
+			break
 		}
-		if strings.TrimSpace(ev.Stream) != "" {
-			item["stream"] = ev.Stream
-		}
-		if ev.Text != "" {
-			item["text"] = ev.Text
-		}
-		if strings.TrimSpace(ev.PayloadJSON) != "" {
-			var payload any
-			if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err == nil {
-				item["payload"] = payload
-			} else {
-				item["payload_json"] = ev.PayloadJSON
+		for _, ev := range events {
+			item := map[string]any{
+				"type": ev.Type,
+				"seq":  ev.Seq,
 			}
+			if strings.TrimSpace(ev.JobID) != "" {
+				item["job_id"] = ev.JobID
+			}
+			if strings.TrimSpace(ev.Stream) != "" {
+				item["stream"] = ev.Stream
+			}
+			if ev.Text != "" {
+				item["text"] = ev.Text
+			}
+			if strings.TrimSpace(ev.PayloadJSON) != "" {
+				var payload any
+				if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err == nil {
+					item["payload"] = payload
+				} else {
+					item["payload_json"] = ev.PayloadJSON
+				}
+			}
+			out = append(out, item)
+			afterSeq = ev.Seq
 		}
-		out = append(out, item)
+		if len(events) < runnerChatMessageEventPageSize {
+			break
+		}
 	}
 	return out
 }
@@ -1095,6 +1150,29 @@ func (cm *ChatManager) updateAssistantMessage(ctx context.Context, messageID int
 		`UPDATE messages SET content=?, payload_json=? WHERE id=?`,
 		content, string(payloadJSON), messageID)
 	return err
+}
+
+func (cm *ChatManager) markAssistantMessageRunning(ctx context.Context, messageID int64) error {
+	if cm == nil || cm.DB == nil || messageID <= 0 {
+		return nil
+	}
+	var content, payloadJSON string
+	if err := cm.DB.SQL.QueryRowContext(ctx,
+		`SELECT content, payload_json FROM messages WHERE id=?`, messageID,
+	).Scan(&content, &payloadJSON); err != nil {
+		return err
+	}
+	payload := map[string]any{}
+	if strings.TrimSpace(payloadJSON) != "" {
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return err
+		}
+	}
+	payload["status"] = db.RunnerChatTurnStatusRunning
+	delete(payload, "approval_id")
+	delete(payload, "approval_request_id")
+	delete(payload, "approval_state")
+	return cm.updateAssistantMessage(ctx, messageID, content, payload)
 }
 
 // appendMessage writes into the shared `messages` table and returns the new id.

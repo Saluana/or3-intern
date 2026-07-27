@@ -364,6 +364,7 @@ func (r *OpenCodeNativeRuntime) Info(ctx context.Context, cfg config.RunnersConf
 		info.Fallback = true
 		info.FallbackReason = "health check failed"
 		info.NextAction = "the managed server will be restarted on the next turn"
+		info.Models = r.modelsFromCLI(ctx, env)
 		return info
 	}
 	info.State = RuntimeStateReady

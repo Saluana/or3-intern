@@ -209,6 +209,42 @@ func TestOpenCodeInfoUsesConfiguredLoopbackWithoutBinary(t *testing.T) {
 	}
 }
 
+func TestOpenCodeInfoManagedHealthFailureKeepsCLIModels(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "opencode")
+	script := `#!/bin/sh
+if [ "$1" = "models" ]; then
+  printf '%s\n' \
+    'openrouter/mimo-v2.5' \
+    '{' \
+    '  "id": "mimo-v2.5",' \
+    '  "providerID": "openrouter",' \
+    '  "name": "MiMo v2.5"' \
+    '}'
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+
+	runtime := NewOpenCodeNativeRuntime()
+	runtime.endpoint = "http://127.0.0.1:1"
+	info := runtime.Info(context.Background(), config.RunnersConfig{
+		RuntimeMode: map[string]string{"opencode": "auto"},
+	}, []string{"PATH=" + dir})
+	if info.State != RuntimeStateError {
+		t.Fatalf("expected health error, got %+v", info)
+	}
+	if info.FallbackReason != "health check failed" {
+		t.Fatalf("fallback reason = %q", info.FallbackReason)
+	}
+	if len(info.Models) != 1 || info.Models[0].ID != "mimo-v2.5" || info.Models[0].Provider != "openrouter" {
+		t.Fatalf("models = %+v, want CLI fallback model", info.Models)
+	}
+}
+
 func TestOpenCodeNativeRuntimeDoesNotCapTurnRequestAtClientTimeout(t *testing.T) {
 	runtime := NewOpenCodeNativeRuntime()
 	if runtime.client.Timeout != 0 {

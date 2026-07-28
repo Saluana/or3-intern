@@ -95,15 +95,15 @@ or3-intern settings
 ### 5. Connect another device
 
 ```bash
-or3-intern pair --auto
+or3-intern devices create
 ```
 
-This flow checks readiness, applies safe repairs when possible, and helps you pair a phone or other device using a short code and simple access levels. Add `--name "Brendon's iPhone"` or `--role operator` when you already know the device label or access level.
+This prints a device token once. Paste it into OR3 Chat when adding the host. Add `--id brendons-iphone --name "Brendon's iPhone"` when you want a custom device label. Use `or3-intern pairing request` instead when you want a short-code approval flow.
 
 Use:
 
 ```bash
-or3-intern pair list
+or3-intern devices list
 ```
 
 to review already connected devices.
@@ -149,7 +149,7 @@ Common files and directories include:
 1. Run `setup`
 2. Run `health`
 3. Confirm `chat` works with a simple question
-4. Pair your app or phone with `pair --auto`
+4. Connect OR3 Chat with `devices create`, or start an approval flow with `pairing request`
 5. Review or adjust anything important with `settings`
 6. Review [configuration-reference.md](configuration-reference.md) when you need raw config keys
 7. Run `or3-intern doctor --strict` before exposing connected apps or service mode; use `or3-intern doctor --fix` for safe automatic repairs and `or3-intern doctor --fix --interactive` for guided fixes

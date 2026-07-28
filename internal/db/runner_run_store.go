@@ -241,45 +241,26 @@ func (d *DB) listRunnerRunsByStatus(ctx context.Context, status string) ([]Runne
 }
 
 func (d *DB) ClaimNextRunnerRun(ctx context.Context) (*RunnerRun, error) {
-	tx, err := d.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	row := tx.QueryRowContext(ctx,
-		`SELECT id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
-			pid, requested_at, started_at, completed_at, timeout_seconds,
-			exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json
-		 FROM runner_runs WHERE status=? ORDER BY requested_at ASC, id ASC LIMIT 1`,
-		RunnerRunStatusQueued)
+	now := NowMS()
+	row := d.SQL.QueryRowContext(ctx,
+		`UPDATE runner_runs
+		 SET status=?, started_at=?, attempts=attempts+1
+		 WHERE id=(
+		 	SELECT id FROM runner_runs
+		 	WHERE status=?
+		 	ORDER BY requested_at ASC, id ASC
+		 	LIMIT 1
+		 )
+		 AND status=?
+		 RETURNING id, job_id, parent_session_key, runner_id, task, cwd, model, mode, isolation, status,
+		 	pid, requested_at, started_at, completed_at, timeout_seconds,
+		 	exit_code, stdout_preview, stderr_preview, final_text_preview, error_message, attempts, meta_json`,
+		RunnerRunStatusRunning, now, RunnerRunStatusQueued, RunnerRunStatusQueued)
 	run, err := scanRunnerRun(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, err
-	}
-	now := NowMS()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE runner_runs SET status=?, started_at=?, attempts=attempts+1 WHERE id=? AND status=?`,
-		RunnerRunStatusRunning, now, run.ID, RunnerRunStatusQueued)
-	if err != nil {
-		return nil, err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if affected == 0 {
-		return nil, tx.Commit()
-	}
-	run.Status = RunnerRunStatusRunning
-	run.StartedAt = now
-	run.Attempts++
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &run, nil

@@ -148,14 +148,19 @@ func isKnownOpenCodeProvider(provider string) bool {
 func extractOpenCodeErrorMessage(value any) string {
 	switch v := value.(type) {
 	case map[string]any:
-		if strings.TrimSpace(asString(v["type"])) == "error" {
-			if errObj, ok := v["error"].(map[string]any); ok {
-				if data, ok := errObj["data"].(map[string]any); ok {
-					if msg := strings.TrimSpace(asString(data["message"])); msg != "" {
-						return msg
-					}
-				}
-				if msg := strings.TrimSpace(asString(errObj["message"])); msg != "" {
+		eventType := strings.ToLower(strings.TrimSpace(asString(v["type"])))
+		errorName := strings.ToLower(strings.TrimSpace(asString(v["name"])))
+		isErrorEnvelope := eventType == "error" ||
+			eventType == "session.error" ||
+			strings.HasSuffix(errorName, "error")
+		if errValue, ok := v["error"]; ok {
+			if msg := extractOpenCodeErrorMessage(errValue); msg != "" {
+				return msg
+			}
+		}
+		if isErrorEnvelope {
+			if data, ok := v["data"].(map[string]any); ok {
+				if msg := strings.TrimSpace(asString(data["message"])); msg != "" {
 					return msg
 				}
 			}

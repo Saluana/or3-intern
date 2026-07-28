@@ -228,6 +228,27 @@ func TestOpenCodeBusPreservesCumulativeTextBoundaryWhitespace(t *testing.T) {
 	}
 }
 
+func TestOpenCodeBusExtractsNestedSessionErrorMessage(t *testing.T) {
+	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{
+		"type": "session.error",
+		"properties": map[string]any{
+			"error": map[string]any{
+				"name": "APIError",
+				"data": map[string]any{
+					"message":    "Not Enough Credits",
+					"statusCode": 401,
+				},
+			},
+		},
+	}, newOpenCodeStreamState())
+	if !ok {
+		t.Fatal("expected session error payload")
+	}
+	if got := extractString(payload["message"]); got != "Not Enough Credits" {
+		t.Fatalf("session error message = %q, want Not Enough Credits", got)
+	}
+}
+
 func TestOpenCodeBusPreservesReasoningTextPartMetadata(t *testing.T) {
 	state := newOpenCodeStreamState()
 	payload, ok := openCodeBusEventToStructuredPayload(map[string]any{

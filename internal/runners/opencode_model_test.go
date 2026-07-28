@@ -30,3 +30,20 @@ func TestNormalizeOpenCodeModelIDWithoutCatalog(t *testing.T) {
 		t.Fatalf("model id = %q, want mimo-v2.5", got)
 	}
 }
+
+func TestExtractOpenCodeErrorMessageFromAPIErrorEnvelope(t *testing.T) {
+	value := map[string]any{
+		"info": map[string]any{
+			"error": map[string]any{
+				"name": "APIError",
+				"data": map[string]any{
+					"message":    "Not Enough Credits",
+					"statusCode": 401,
+				},
+			},
+		},
+	}
+	if got := extractOpenCodeErrorMessage(value); got != "Not Enough Credits" {
+		t.Fatalf("error message = %q, want Not Enough Credits", got)
+	}
+}

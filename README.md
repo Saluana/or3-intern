@@ -44,7 +44,7 @@ or3-intern version
     or3-intern service
     ```
 
-    Then pair from OR3 App at `/settings/pair`, or start from the computer with `or3-intern pair --auto` and enter the printed code in the app. See docs/v1/user-guide/app-integration/or3-app-connection-guide.md for the full web, Electron, iOS, Android, pairing, disconnect, and troubleshooting flow.
+    For the quickest local OR3 Chat setup, run `or3-intern devices create` and paste the one-time displayed token into the app. For an approval-based flow, use `or3-intern pairing request`. See docs/v1/user-guide/app-integration/or3-app-connection-guide.md for the full web, Electron, iOS, Android, pairing, disconnect, and troubleshooting flow.
 
 4. Install and authenticate a runner (OpenCode recommended), then check readiness:
 
@@ -104,7 +104,7 @@ Root help shows the full command catalog by default:
 - `or3-intern audit [verify]` inspect or verify the append-only audit chain
 - `or3-intern skills ...` list, inspect, search, install, update, check, and remove skills
 - `or3-intern approvals <list|show|approve|deny|allowlist>` inspect and resolve approval requests
-- `or3-intern devices <list|requests|approve|deny|rotate|revoke>` inspect paired devices and legacy pairing request helpers
+- `or3-intern devices <create|list|requests|approve|deny|rotate|revoke>` issue and manage device tokens, plus legacy pairing request helpers
 - `or3-intern pairing <list|request|approve-code|approve|deny|exchange>` manage first-class pairing workflows, including channel-bound identities
 - `or3-intern scope <link|list|resolve>` link multiple session keys to a shared history scope
 - `or3-intern migrate-jsonl /path/to/session.jsonl [session_key]`

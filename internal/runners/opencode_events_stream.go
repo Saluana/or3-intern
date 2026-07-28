@@ -198,9 +198,12 @@ func openCodeBusEventToStructuredPayload(bus map[string]any, state *openCodeStre
 		}, true
 	case "session.error":
 		return map[string]any{
-			"type":    "session.error",
-			"message": extractString(firstNonNil(props["message"], props["error"], mapField(props, "error"))),
-			"error":   props["error"],
+			"type": "session.error",
+			"message": firstNonEmpty(
+				extractString(firstNonNil(props["message"], props["error"], mapField(props, "error"))),
+				extractOpenCodeErrorMessage(props),
+			),
+			"error": props["error"],
 		}, true
 	case "session.idle":
 		if sessionID := firstNonEmpty(stringField(props, "sessionID"), stringField(props, "session_id")); sessionID != "" {

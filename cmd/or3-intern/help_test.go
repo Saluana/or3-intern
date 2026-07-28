@@ -79,8 +79,19 @@ func TestPrintHelpTopic_Root(t *testing.T) {
 	if !strings.Contains(got, "config-path") {
 		t.Fatalf("expected complete root help to include advanced commands, got %q", got)
 	}
-	if !strings.Contains(got, "doctor") || !strings.Contains(got, "approvals") {
+	if !strings.Contains(got, "doctor") || !strings.Contains(got, "approvals") || !strings.Contains(got, "devices") || !strings.Contains(got, "pairing") {
 		t.Fatalf("expected complete root help to include operator tools, got %q", got)
+	}
+}
+
+func TestPrintHelpTopic_DevicesCreate(t *testing.T) {
+	var out bytes.Buffer
+	if err := printHelpTopic(&out, []string{"devices", "create"}); err != nil {
+		t.Fatalf("printHelpTopic: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "or3-intern devices create") || !strings.Contains(got, "--id <id>") {
+		t.Fatalf("expected devices create help, got %q", got)
 	}
 }
 

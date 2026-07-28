@@ -639,13 +639,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "skills error:", err)
 			os.Exit(1)
 		}
-	case "approvals":
-		if err := runApprovalsCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
-				fmt.Fprintln(os.Stderr, "approvals error:", err)
-			}
-			os.Exit(1)
-		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
 		os.Exit(2)
@@ -727,7 +720,7 @@ func currentWorkingDir() string {
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
 	switch cmd {
-	case "capabilities", "embeddings", "scope":
+	case "approvals", "capabilities", "devices", "embeddings", "pairing", "scope":
 		return true
 	default:
 		return false

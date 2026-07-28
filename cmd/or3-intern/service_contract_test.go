@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
+	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
 	"or3-intern/internal/security"
 )
@@ -25,10 +27,249 @@ type serviceAppUsageRouteFixture struct {
 	Path   string `json:"path"`
 }
 
+type externalAgentProtocolFixture struct {
+	CreateSessionRequest    map[string]any `json:"create_session_request"`
+	SessionResponse         map[string]any `json:"session_response"`
+	SessionListResponse     map[string]any `json:"session_list_response"`
+	TurnResponse            map[string]any `json:"turn_response"`
+	StartedTurnResponse     map[string]any `json:"started_turn_response"`
+	TurnListResponse        map[string]any `json:"turn_list_response"`
+	EventResponse           map[string]any `json:"event_response"`
+	EventListResponse       map[string]any `json:"event_list_response"`
+	TurnAbortResponse       map[string]any `json:"turn_abort_response"`
+	TurnDecisionResponse    map[string]any `json:"turn_decision_response"`
+	RunnerApprovalRequest   map[string]any `json:"runner_approval_request"`
+	ApprovalDecisionRequest map[string]any `json:"approval_decision_request"`
+	ApprovalDenyResponse    map[string]any `json:"approval_deny_response"`
+	ApprovalListResponse    map[string]any `json:"approval_list_response"`
+	PairingApproveRequest   map[string]any `json:"pairing_approve_request"`
+	PairingResponse         map[string]any `json:"pairing_response"`
+	ArtifactResponse        map[string]any `json:"artifact_response"`
+	RunnerListResponse      map[string]any `json:"runner_list_response"`
+	ReadinessResponse       map[string]any `json:"readiness_response"`
+	HealthResponse          map[string]any `json:"health_response"`
+	CapabilitiesResponse    map[string]any `json:"capabilities_response"`
+	CapabilitiesRequired    []string       `json:"capabilities_required"`
+	HealthRequired          []string       `json:"health_required"`
+}
+
 func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
+	var fixture externalAgentProtocolFixture
+	loadFixtureJSON(t, "service_contract/external-agent-protocol.json", &fixture)
+
+	t.Run("create runner chat session", func(t *testing.T) {
+		body, err := json.Marshal(fixture.CreateSessionRequest)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var request runnerChatCreateSessionRequest
+		if err := decodeServiceJSONLoose(strings.NewReader(string(body)), &request); err != nil {
+			t.Fatalf("decodeServiceJSONLoose: %v", err)
+		}
+		if request.AppSessionKey != "or3-chat:workspace-1" ||
+			request.RunnerID != "codex" ||
+			request.ContinuationMode != "replay" ||
+			request.Mode != "review" ||
+			request.Isolation != "host_readonly" ||
+			request.Cwd != "/workspace" ||
+			request.MaxTurns != 12 ||
+			request.ApprovalAutopilot == nil ||
+			*request.ApprovalAutopilot {
+			t.Fatalf("unexpected create-session decode: %#v", request)
+		}
+	})
+
+	t.Run("security-sensitive requests stay body-only", func(t *testing.T) {
+		for name, payload := range map[string]map[string]any{
+			"pairing":         fixture.PairingApproveRequest,
+			"runner approval": fixture.RunnerApprovalRequest,
+			"approval":        fixture.ApprovalDecisionRequest,
+		} {
+			if len(payload) == 0 {
+				t.Fatalf("%s fixture is empty", name)
+			}
+			for _, forbidden := range []string{"url", "query", "bearer_token"} {
+				if _, ok := payload[forbidden]; ok {
+					t.Fatalf("%s fixture must not carry %q: %#v", name, forbidden, payload)
+				}
+			}
+		}
+	})
+
+	t.Run("pairing request body", func(t *testing.T) {
+		body, err := json.Marshal(fixture.PairingApproveRequest)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var request struct {
+			RendezvousID  string         `json:"rendezvous_id"`
+			PairingSecret string         `json:"pairing_secret"`
+			Proposal      map[string]any `json:"proposal"`
+			TrustLevel    string         `json:"trust_level"`
+			ExpiresAt     int64          `json:"expires_at"`
+		}
+		if err := decodeServiceJSONLoose(strings.NewReader(string(body)), &request); err != nil {
+			t.Fatalf("decodeServiceJSONLoose: %v", err)
+		}
+		if request.RendezvousID != "__RENDEZVOUS_ID__" ||
+			request.PairingSecret != "__PAIRING_SECRET__" ||
+			request.TrustLevel != "trusted" ||
+			request.Proposal["device_name"] != "OR3 Chat" {
+			t.Fatalf("unexpected pairing decode: %#v", request)
+		}
+	})
 }
 
 func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
+	var externalFixture externalAgentProtocolFixture
+	loadFixtureJSON(t, "service_contract/external-agent-protocol.json", &externalFixture)
+
+	t.Run("runner chat session response", func(t *testing.T) {
+		session := db.RunnerChatSession{
+			ID:               "rcs_fixture",
+			AppSessionKey:    "or3-chat:workspace-1",
+			RunnerID:         "codex",
+			ContinuationMode: "replay",
+			Model:            "gpt-5.6-codex",
+			Mode:             "review",
+			Isolation:        "host_readonly",
+			Cwd:              "/workspace",
+			MaxTurns:         12,
+			CreatedAt:        1000,
+			UpdatedAt:        2000,
+		}
+		actual := controlplane.BuildRunnerChatSessionResponse(session)
+		encoded, err := json.Marshal(actual)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var normalized map[string]any
+		if err := json.Unmarshal(encoded, &normalized); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(normalized, externalFixture.SessionResponse) {
+			t.Fatalf("runner chat session fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.SessionResponse, normalized)
+		}
+		listEncoded, err := json.Marshal(controlplane.BuildRunnerChatSessionListResponse([]db.RunnerChatSession{session}))
+		if err != nil {
+			t.Fatalf("Marshal list: %v", err)
+		}
+		var listNormalized map[string]any
+		if err := json.Unmarshal(listEncoded, &listNormalized); err != nil {
+			t.Fatalf("Unmarshal list: %v", err)
+		}
+		if !reflect.DeepEqual(listNormalized, externalFixture.SessionListResponse) {
+			t.Fatalf("runner chat session list fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.SessionListResponse, listNormalized)
+		}
+	})
+
+	t.Run("runner chat structured event response", func(t *testing.T) {
+		actual := controlplane.BuildRunnerChatEventResponse(db.RunnerChatEvent{
+			ID:          9,
+			TurnID:      "rct_fixture",
+			JobID:       "job_fixture",
+			Seq:         3,
+			TS:          3000,
+			Type:        "content.delta",
+			Stream:      "assistant",
+			Text:        "hello",
+			PayloadJSON: `{"type":"content.delta","stream_kind":"assistant_text","delta":"hello"}`,
+		})
+		encoded, err := json.Marshal(actual)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var normalized map[string]any
+		if err := json.Unmarshal(encoded, &normalized); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(normalized, externalFixture.EventResponse) {
+			t.Fatalf("runner chat event fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.EventResponse, normalized)
+		}
+	})
+
+	t.Run("runner chat turn response", func(t *testing.T) {
+		actual := controlplane.BuildRunnerChatTurnResponse(db.RunnerChatTurn{
+			ID:                 "rct_fixture",
+			SessionID:          "rcs_fixture",
+			Sequence:           1,
+			Status:             "succeeded",
+			ContinuationMode:   "replay",
+			RequestedAt:        3000,
+			StartedAt:          4000,
+			CompletedAt:        5000,
+			UserMessage:        "inspect the repository",
+			FinalText:          "done",
+			RunnerRunID:        "rr_fixture",
+			RunnerJobID:        "job_fixture",
+			UserMessageID:      11,
+			AssistantMessageID: 12,
+			Model:              "gpt-5.6-codex",
+			Mode:               "review",
+			Isolation:          "host_readonly",
+			Cwd:                "/workspace",
+		})
+		encoded, err := json.Marshal(actual)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var normalized map[string]any
+		if err := json.Unmarshal(encoded, &normalized); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(normalized, externalFixture.TurnResponse) {
+			t.Fatalf("runner chat turn fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.TurnResponse, normalized)
+		}
+	})
+
+	t.Run("health and capabilities required fields", func(t *testing.T) {
+		server := &serviceServer{config: config.Default(), jobs: jobs.NewRegistry(time.Minute, 32)}
+		for _, test := range []struct {
+			path     string
+			handle   serviceRouteHandler
+			required []string
+		}{
+			{path: "/internal/v1/health", handle: server.handleHealth, required: externalFixture.HealthRequired},
+			{path: "/internal/v1/capabilities", handle: server.handleCapabilities, required: externalFixture.CapabilitiesRequired},
+		} {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			test.handle(rec, req)
+			var payload map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+				t.Fatalf("Decode %s: %v", test.path, err)
+			}
+			for _, key := range test.required {
+				if _, ok := payload[key]; !ok {
+					t.Fatalf("%s response missing fixture field %q: %#v", test.path, key, payload)
+				}
+			}
+		}
+	})
+
+	t.Run("action response fixtures", func(t *testing.T) {
+		if externalFixture.TurnAbortResponse["status"] != "aborting" {
+			t.Fatalf("unexpected turn abort fixture: %#v", externalFixture.TurnAbortResponse)
+		}
+		if externalFixture.ApprovalDenyResponse["status"] != "denied" ||
+			externalFixture.ApprovalDenyResponse["request_id"] != float64(42) {
+			t.Fatalf("unexpected approval response fixture: %#v", externalFixture.ApprovalDenyResponse)
+		}
+		for name, response := range map[string]map[string]any{
+			"turn decision": externalFixture.TurnDecisionResponse,
+			"pairing":       externalFixture.PairingResponse,
+			"artifact":      externalFixture.ArtifactResponse,
+			"runner list":   externalFixture.RunnerListResponse,
+			"readiness":     externalFixture.ReadinessResponse,
+			"health":        externalFixture.HealthResponse,
+			"capabilities":  externalFixture.CapabilitiesResponse,
+		} {
+			if len(response) == 0 {
+				t.Fatalf("%s response fixture is empty", name)
+			}
+		}
+	})
+
 	t.Run("job stream attach", func(t *testing.T) {
 		jobs := jobs.NewRegistry(time.Minute, 32)
 		job := jobs.RegisterWithID("job_fixture", "turn")

@@ -138,6 +138,15 @@ func BuildRunnerChatSessionResponse(s db.RunnerChatSession) map[string]any {
 	return out
 }
 
+// BuildRunnerChatSessionListResponse renders the runner-chat session listing.
+func BuildRunnerChatSessionListResponse(sessions []db.RunnerChatSession) map[string]any {
+	items := make([]map[string]any, 0, len(sessions))
+	for _, session := range sessions {
+		items = append(items, BuildRunnerChatSessionResponse(session))
+	}
+	return map[string]any{"sessions": items}
+}
+
 // BuildRunnerChatTurnResponse converts a persisted runner_chat_turns row.
 func BuildRunnerChatTurnResponse(t db.RunnerChatTurn) map[string]any {
 	out := map[string]any{

@@ -19,6 +19,7 @@ import (
 
 const serviceRunnerChatBodyLimit = 64 * 1024
 const serviceRunnerChatPromptCompileTimeout = 8 * time.Second
+const serviceRunnerChatAppSessionKeyPrefixMaxBytes = 256
 
 func (s *serviceServer) runnerChatWriteUnavailable() bool {
 	return s == nil || s.chatManager == nil || s.chatManager.Manager == nil
@@ -62,6 +63,7 @@ type runnerChatStartTurnRequest struct {
 
 // handleRunnerChatSessions dispatches the runner-chat session/turn API:
 //
+//	GET  /internal/v1/runner-chat/sessions
 //	POST /internal/v1/runner-chat/sessions
 //	GET  /internal/v1/runner-chat/sessions/:id
 //	GET  /internal/v1/runner-chat/sessions/:id/turns
@@ -82,11 +84,14 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 	}
 	path := r.URL.Path
 	if path == "/internal/v1/runner-chat/sessions" || path == "/internal/v1/runner-chat/sessions/" {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleRunnerChatSessionsList(w, r, store)
+		case http.MethodPost:
+			s.handleRunnerChatSessionCreate(w, r)
+		default:
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
 		}
-		s.handleRunnerChatSessionCreate(w, r)
 		return
 	}
 	rel := strings.TrimPrefix(path, "/internal/v1/runner-chat/sessions/")
@@ -159,6 +164,37 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	}
+}
+
+func (s *serviceServer) handleRunnerChatSessionsList(w http.ResponseWriter, r *http.Request, store *db.DB) {
+	filter := db.RunnerChatSessionListFilter{}
+	query := r.URL.Query()
+	if values, present := query["limit"]; present {
+		raw := strings.TrimSpace(query.Get("limit"))
+		n, err := strconv.Atoi(raw)
+		if len(values) != 1 || raw == "" || err != nil || n <= 0 || n > db.MaxRunnerChatSessionListLimit {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit", "code": "validation_failed"})
+			return
+		}
+		filter.Limit = n
+	}
+	if values, present := query["app_session_key_prefix"]; present {
+		prefix := strings.TrimSpace(query.Get("app_session_key_prefix"))
+		if len(values) != 1 ||
+			prefix == "" ||
+			len(prefix) > serviceRunnerChatAppSessionKeyPrefixMaxBytes ||
+			strings.ContainsAny(prefix, "\x00\r\n") {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid app_session_key_prefix", "code": "validation_failed"})
+			return
+		}
+		filter.AppSessionKeyPrefix = prefix
+	}
+	sessions, err := store.ListRunnerChatSessions(r.Context(), filter)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat sessions list unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildRunnerChatSessionListResponse(sessions))
 }
 
 func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *http.Request) {

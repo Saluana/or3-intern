@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -24,6 +25,62 @@ func TestUpdateRunnerChatSessionCwdClearsNativeReference(t *testing.T) {
 	}
 	if updated.Cwd != "/new" || updated.NativeSessionRef != "" {
 		t.Fatalf("unexpected updated session: %#v", updated)
+	}
+}
+
+func TestListRunnerChatSessionsOrdersFiltersAndBounds(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	for _, sess := range []RunnerChatSession{
+		{ID: "rcs-old", AppSessionKey: "or3-chat:workspace-a:thread-1", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 100, UpdatedAt: 100},
+		{ID: "rcs-new", AppSessionKey: "or3-chat:workspace-a:thread-2", RunnerID: "opencode", ContinuationMode: "replay", CreatedAt: 200, UpdatedAt: 300},
+		{ID: "rcs-other", AppSessionKey: "or3-chat:workspace-b:thread-1", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 150, UpdatedAt: 200},
+		{ID: "rcs-wildcard", AppSessionKey: "literalXprefix:thread", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 400, UpdatedAt: 400},
+	} {
+		if _, err := d.CreateOrGetRunnerChatSession(ctx, sess); err != nil {
+			t.Fatalf("CreateOrGetRunnerChatSession(%s): %v", sess.ID, err)
+		}
+	}
+
+	filtered, err := d.ListRunnerChatSessions(ctx, RunnerChatSessionListFilter{
+		AppSessionKeyPrefix: "or3-chat:workspace-a:",
+		Limit:               10,
+	})
+	if err != nil {
+		t.Fatalf("ListRunnerChatSessions filtered: %v", err)
+	}
+	if len(filtered) != 2 || filtered[0].ID != "rcs-new" || filtered[1].ID != "rcs-old" {
+		t.Fatalf("unexpected filtered order: %#v", filtered)
+	}
+
+	limited, err := d.ListRunnerChatSessions(ctx, RunnerChatSessionListFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListRunnerChatSessions limited: %v", err)
+	}
+	if len(limited) != 1 || limited[0].ID != "rcs-wildcard" {
+		t.Fatalf("unexpected limited sessions: %#v", limited)
+	}
+
+	literalWildcard, err := d.ListRunnerChatSessions(ctx, RunnerChatSessionListFilter{
+		AppSessionKeyPrefix: "literal%prefix:",
+		Limit:               10,
+	})
+	if err != nil {
+		t.Fatalf("ListRunnerChatSessions literal wildcard: %v", err)
+	}
+	if len(literalWildcard) != 0 {
+		t.Fatalf("prefix must not use SQL wildcard semantics: %#v", literalWildcard)
+	}
+
+	whitespacePrefix, err := d.ListRunnerChatSessions(ctx, RunnerChatSessionListFilter{
+		AppSessionKeyPrefix: "   ",
+		Limit:               10,
+	})
+	if err != nil {
+		t.Fatalf("ListRunnerChatSessions whitespace prefix: %v", err)
+	}
+	if len(whitespacePrefix) != 0 {
+		t.Fatalf("a non-empty prefix must never widen to an unfiltered list: %#v", whitespacePrefix)
 	}
 }
 
@@ -79,6 +136,51 @@ func TestRunnerChatStoreTurnLifecycleAndActiveUniqueness(t *testing.T) {
 		ContinuationMode: "replay",
 	}); err != nil {
 		t.Fatalf("CreateRunnerChatTurn after finalize: %v", err)
+	}
+}
+
+func TestListRunnerChatTurnsLimitReturnsNewestInChronologicalOrder(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	sess, err := d.CreateOrGetRunnerChatSession(ctx, RunnerChatSession{
+		ID:               "rcs-turn-window",
+		AppSessionKey:    "or3-chat:workspace:thread",
+		RunnerID:         "codex",
+		ContinuationMode: "replay",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	for i := 1; i <= 5; i++ {
+		if _, err := d.CreateRunnerChatTurn(ctx, RunnerChatTurn{
+			ID:               fmt.Sprintf("rct-window-%d", i),
+			SessionID:        sess.ID,
+			Status:           RunnerChatTurnStatusSucceeded,
+			UserMessage:      fmt.Sprintf("turn %d", i),
+			ContinuationMode: "replay",
+			RequestedAt:      int64(i),
+			CompletedAt:      int64(i),
+		}); err != nil {
+			t.Fatalf("CreateRunnerChatTurn(%d): %v", i, err)
+		}
+	}
+
+	recent, err := d.ListRunnerChatTurns(ctx, sess.ID, 2)
+	if err != nil {
+		t.Fatalf("ListRunnerChatTurns limited: %v", err)
+	}
+	if len(recent) != 2 ||
+		recent[0].Sequence != 4 ||
+		recent[1].Sequence != 5 {
+		t.Fatalf("expected newest two turns in chronological order, got %#v", recent)
+	}
+
+	all, err := d.ListRunnerChatTurns(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("ListRunnerChatTurns unbounded: %v", err)
+	}
+	if len(all) != 5 || all[0].Sequence != 1 || all[4].Sequence != 5 {
+		t.Fatalf("expected full chronological history, got %#v", all)
 	}
 }
 

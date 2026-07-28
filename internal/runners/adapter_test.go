@@ -263,6 +263,16 @@ func TestAllRunners_IncludesAllAdapterIDs(t *testing.T) {
 		if !ids[id] {
 			t.Errorf("AllRunners missing %q", id)
 		}
+		var capabilities RunnerChatCapabilities
+		for _, spec := range all {
+			if spec.ID == id {
+				capabilities = spec.Supports.Chat
+				break
+			}
+		}
+		if !capabilities.Cancel || !capabilities.ApprovalDecisions || !capabilities.CustomCwd {
+			t.Errorf("AllRunners %q missing conservative chat action capabilities: %#v", id, capabilities)
+		}
 	}
 	for _, id := range []RunnerID{RunnerClaude, RunnerGemini} {
 		if ids[id] {

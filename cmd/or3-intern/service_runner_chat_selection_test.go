@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,11 +293,20 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 		}
 	}
 	codexCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["chat_capabilities"].(map[string]any)
-	if !ok || codexCaps["chatNativeSession"] != true || codexCaps["streamToolEvents"] != true {
+	if !ok ||
+		codexCaps["chatNativeSession"] != true ||
+		codexCaps["streamToolEvents"] != true ||
+		codexCaps["cancel"] != true ||
+		codexCaps["approvalDecisions"] != true ||
+		codexCaps["customCwd"] != true {
 		t.Fatalf("expected Codex native/tool chat capabilities to be enabled, got %#v", codexCaps)
 	}
 	openCodeCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerOpenCode))["chat_capabilities"].(map[string]any)
-	if !ok || openCodeCaps["chatNativeSession"] != true {
+	if !ok ||
+		openCodeCaps["chatNativeSession"] != true ||
+		openCodeCaps["cancel"] != true ||
+		openCodeCaps["approvalDecisions"] != true ||
+		openCodeCaps["customCwd"] != true {
 		t.Fatalf("expected OpenCode native session capability to remain enabled, got %#v", openCodeCaps)
 	}
 
@@ -699,6 +709,96 @@ func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 	}
 	if _, err := json.Marshal(turnRead); err != nil {
 		t.Fatalf("expected JSON-safe turn payload: %v", err)
+	}
+}
+
+func TestServiceRunnerChat_ListSessionsOrderingFilterAndValidation(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	server := &serviceServer{
+		config:      config.Default(),
+		database:    database,
+		jobs:        jobs.NewRegistry(time.Minute, 32),
+		chatManager: &runners.ChatManager{DB: database},
+	}
+	doGet := func(path string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		server.handleRunnerChatSessions(rec, req)
+		return rec, mustDecodeJSONBody(t, rec.Body)
+	}
+
+	ctx := context.Background()
+	for _, sess := range []db.RunnerChatSession{
+		{ID: "rcs-list-old", AppSessionKey: "or3-chat:workspace-a:thread-1", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 100, UpdatedAt: 100},
+		{ID: "rcs-list-new", AppSessionKey: "or3-chat:workspace-a:thread-2", RunnerID: "opencode", ContinuationMode: "replay", CreatedAt: 200, UpdatedAt: 300},
+		{ID: "rcs-list-other", AppSessionKey: "or3-chat:workspace-b:thread-1", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 150, UpdatedAt: 200},
+	} {
+		if _, err := database.CreateOrGetRunnerChatSession(ctx, sess); err != nil {
+			t.Fatalf("CreateOrGetRunnerChatSession(%s): %v", sess.ID, err)
+		}
+	}
+
+	prefix := url.QueryEscape("or3-chat:workspace-a:")
+	listRec, listed := doGet("/internal/v1/runner-chat/sessions?app_session_key_prefix=" + prefix + "&limit=2")
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected session list success, got status=%d payload=%#v", listRec.Code, listed)
+	}
+	items, ok := listed["sessions"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected two listed sessions, got %#v", listed)
+	}
+	if items[0].(map[string]any)["id"] != "rcs-list-new" || items[1].(map[string]any)["id"] != "rcs-list-old" {
+		t.Fatalf("expected sessions ordered by updated_at desc, got %#v", listed)
+	}
+
+	limitedRec, limited := doGet("/internal/v1/runner-chat/sessions?app_session_key_prefix=" + prefix + "&limit=1")
+	if limitedRec.Code != http.StatusOK {
+		t.Fatalf("expected limited session list success, got status=%d payload=%#v", limitedRec.Code, limited)
+	}
+	limitedItems, ok := limited["sessions"].([]any)
+	if !ok || len(limitedItems) != 1 || limitedItems[0].(map[string]any)["id"] != "rcs-list-new" {
+		t.Fatalf("expected bounded session list, got %#v", limited)
+	}
+
+	for i := 1; i <= 5; i++ {
+		if _, err := database.CreateRunnerChatTurn(ctx, db.RunnerChatTurn{
+			ID:               fmt.Sprintf("rct-list-window-%d", i),
+			SessionID:        "rcs-list-new",
+			Status:           db.RunnerChatTurnStatusSucceeded,
+			UserMessage:      fmt.Sprintf("turn %d", i),
+			ContinuationMode: "replay",
+			RequestedAt:      int64(i),
+			CompletedAt:      int64(i),
+		}); err != nil {
+			t.Fatalf("CreateRunnerChatTurn(%d): %v", i, err)
+		}
+	}
+	turnRec, turnPayload := doGet("/internal/v1/runner-chat/sessions/rcs-list-new/turns?limit=2")
+	turnItems, ok := turnPayload["turns"].([]any)
+	if turnRec.Code != http.StatusOK || !ok || len(turnItems) != 2 {
+		t.Fatalf("expected bounded turn list, got status=%d payload=%#v", turnRec.Code, turnPayload)
+	}
+	if turnItems[0].(map[string]any)["sequence"] != float64(4) ||
+		turnItems[1].(map[string]any)["sequence"] != float64(5) {
+		t.Fatalf("expected newest turns in chronological order, got %#v", turnPayload)
+	}
+
+	for _, path := range []string{
+		"/internal/v1/runner-chat/sessions?limit=",
+		"/internal/v1/runner-chat/sessions?limit=0",
+		"/internal/v1/runner-chat/sessions?limit=101",
+		"/internal/v1/runner-chat/sessions?limit=invalid",
+		"/internal/v1/runner-chat/sessions?limit=1&limit=2",
+		"/internal/v1/runner-chat/sessions?app_session_key_prefix=",
+		"/internal/v1/runner-chat/sessions?app_session_key_prefix=one&app_session_key_prefix=two",
+		"/internal/v1/runner-chat/sessions?app_session_key_prefix=" + url.QueryEscape(strings.Repeat("x", serviceRunnerChatAppSessionKeyPrefixMaxBytes+1)),
+	} {
+		rec, payload := doGet(path)
+		if rec.Code != http.StatusBadRequest || payload["code"] != "validation_failed" {
+			t.Fatalf("expected validation failure for %s, got status=%d payload=%#v", path, rec.Code, payload)
+		}
 	}
 }
 

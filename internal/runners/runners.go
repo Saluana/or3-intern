@@ -254,6 +254,15 @@ type RunnerChatCapabilities struct {
 	// specific-state fork primitive. Replay-mode fork is the universal
 	// fallback when this is false.
 	SupportsNativeFork bool `json:"supportsNativeFork"`
+	// Cancel means an active runner-chat turn can be aborted through the
+	// service's canonical turn endpoint.
+	Cancel bool `json:"cancel"`
+	// ApprovalDecisions means pending runner-chat approvals can be approved or
+	// rejected when the host approval broker is enabled and available.
+	ApprovalDecisions bool `json:"approvalDecisions"`
+	// CustomCwd means callers may submit a working directory. The runner
+	// manager still validates it against the host's configured RestrictDir.
+	CustomCwd bool `json:"customCwd"`
 }
 
 // RunnerSupports declares which features an adapter supports.

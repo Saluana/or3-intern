@@ -29,6 +29,11 @@ var ErrRunnerChatSessionNotFound = errors.New("runner chat session not found")
 // ErrRunnerChatTurnNotFound is returned when a turn lookup misses.
 var ErrRunnerChatTurnNotFound = errors.New("runner chat turn not found")
 
+const (
+	DefaultRunnerChatSessionListLimit = 50
+	MaxRunnerChatSessionListLimit     = 100
+)
+
 // RunnerChatSession is a row in runner_chat_sessions.
 type RunnerChatSession struct {
 	ID               string
@@ -44,6 +49,14 @@ type RunnerChatSession struct {
 	MetaJSON         string
 	CreatedAt        int64
 	UpdatedAt        int64
+}
+
+// RunnerChatSessionListFilter bounds and optionally scopes session discovery.
+// AppSessionKeyPrefix is matched literally; SQL wildcard characters have no
+// special meaning.
+type RunnerChatSessionListFilter struct {
+	AppSessionKeyPrefix string
+	Limit               int
 }
 
 // RunnerChatTurn is a row in runner_chat_turns.
@@ -169,6 +182,42 @@ func (d *DB) GetRunnerChatSession(ctx context.Context, id string) (RunnerChatSes
 	return sess, err
 }
 
+// ListRunnerChatSessions returns the most recently updated runner-chat
+// sessions. Results are always bounded and may be scoped to a literal
+// app_session_key prefix.
+func (d *DB) ListRunnerChatSessions(ctx context.Context, filter RunnerChatSessionListFilter) ([]RunnerChatSession, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = DefaultRunnerChatSessionListLimit
+	} else if filter.Limit > MaxRunnerChatSessionListLimit {
+		filter.Limit = MaxRunnerChatSessionListLimit
+	}
+	prefix := filter.AppSessionKeyPrefix
+	q := `SELECT id, app_session_key, runner_id, continuation_mode, native_session_ref,
+			model, mode, isolation, cwd, max_turns, meta_json, created_at, updated_at
+		FROM runner_chat_sessions`
+	args := make([]any, 0, 3)
+	if prefix != "" {
+		q += ` WHERE substr(app_session_key, 1, length(?))=?`
+		args = append(args, prefix, prefix)
+	}
+	q += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
+	args = append(args, filter.Limit)
+	rows, err := d.SQL.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]RunnerChatSession, 0, filter.Limit)
+	for rows.Next() {
+		sess, err := scanRunnerChatSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
 // UpdateRunnerChatSessionNativeRef updates the native session reference and
 // bumps updated_at.
 func (d *DB) UpdateRunnerChatSessionNativeRef(ctx context.Context, id, ref string) error {
@@ -292,11 +341,16 @@ func (d *DB) GetActiveRunnerChatTurn(ctx context.Context, sessionID string) (Run
 // ListRunnerChatTurns returns the most recent turns for a session in
 // chronological (ascending sequence) order. limit <= 0 means no limit.
 func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit int) ([]RunnerChatTurn, error) {
-	q := runnerChatTurnSelectSQL + ` WHERE session_id=? ORDER BY sequence ASC`
+	q := runnerChatTurnSelectSQL + ` WHERE session_id=?`
 	args := []any{sessionID}
 	if limit > 0 {
-		q += ` LIMIT ?`
+		// Select newest first so LIMIT keeps the current tail of a long
+		// session. Results are reversed below to retain the API's
+		// chronological response order.
+		q += ` ORDER BY sequence DESC LIMIT ?`
 		args = append(args, limit)
+	} else {
+		q += ` ORDER BY sequence ASC`
 	}
 	rows, err := d.SQL.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -311,7 +365,15 @@ func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit in
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if limit > 0 {
+		for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
+			out[left], out[right] = out[right], out[left]
+		}
+	}
+	return out, nil
 }
 
 // MarkRunnerChatTurnStarted transitions a queued turn to running.

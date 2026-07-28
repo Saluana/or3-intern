@@ -15,7 +15,9 @@ Requests and responses use JSON with snake_case field names. Unknown JSON fields
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/internal/v1/chat-runners` | List available external runners and the service default. |
+| `GET` | `/internal/v1/runner-chat/sessions` | List recent runner-chat sessions, optionally scoped by `app_session_key_prefix`; `limit` defaults to 50 and cannot exceed 100. |
 | `POST` | `/internal/v1/runner-chat/sessions` | Create or continue a runner chat session. |
+| `GET` | `/internal/v1/runner-chat/sessions/{id}/turns` | List turns chronologically; when `limit` is supplied, return the newest N turns rather than the oldest N. |
 | `POST` | `/internal/v1/runner-chat/sessions/{id}/turns` | Submit a foreground turn through a runner. |
 | `POST` | `/internal/v1/runner-runs` | Enqueue a persisted runner run. |
 | `GET` | `/internal/v1/runner-runs/{id}` | Read a persisted runner run by run ID or job ID. |
@@ -25,6 +27,19 @@ Requests and responses use JSON with snake_case field names. Unknown JSON fields
 | `POST` | `/internal/v1/runner-memory/pinned` | Replace pinned memory. |
 
 Runner-run job IDs use `job-runner-...`, run IDs use `rr_...`, and job kinds use `runner:<runner_id>`.
+
+Runner-chat session listing returns `{ "sessions": [...] }`, ordered by
+`updated_at` descending. `app_session_key_prefix` is matched literally (SQL
+wildcards have no special meaning), must be non-empty when supplied, and is
+limited to 256 UTF-8 bytes. Clients should use a product/workspace-specific
+prefix so they do not discover unrelated sessions on the same host.
+
+Each `/internal/v1/chat-runners` item advertises runner-chat action support in
+`chat_capabilities`. Clients must gate cancellation on `cancel`, approval
+decisions on `approvalDecisions` plus an enabled/available host approval
+broker, and free-form working-directory input on `customCwd`. The service still
+validates every submitted working directory against its configured runner
+root.
 
 ## Service Operations
 

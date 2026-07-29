@@ -673,6 +673,7 @@ export function createInternTransport(
                     method,
                     headers,
                     body,
+                    cache: 'no-store',
                     signal: scope.signal,
                 }
             );
@@ -800,6 +801,7 @@ export function createInternTransport(
                         method,
                         headers,
                         body,
+                        cache: 'no-store',
                         signal: scope.signal,
                     }
                 );

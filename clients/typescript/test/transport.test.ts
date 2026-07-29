@@ -89,6 +89,7 @@ describe('@or3/intern-client transport', () => {
         expect(headers.get('X-Or3-Session')).toBe('session-header');
         expect(headers.get('X-Client')).toBe('or3-chat');
         expect(calls[0]?.init?.body).toBe('{"message":"hello"}');
+        expect(calls[0]?.init?.cache).toBe('no-store');
         expect(responses).toEqual([200]);
     });
 

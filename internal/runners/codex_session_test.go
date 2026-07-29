@@ -182,25 +182,50 @@ func TestCodexSessionRespondTracksRPCWrite(t *testing.T) {
 	if err := sess.RespondToRequest(context.Background(), ref, NativeRequestDecision{Decision: "approve"}); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
-	// Drain two writes: requestResponse envelope, then id+result reply.
-	var envelope map[string]any
+	// The app-server protocol expects one JSON-RPC response keyed by the
+	// server-issued request id.
 	var reply map[string]any
-	select {
-	case envelope = <-writes:
-	case <-time.After(time.Second):
-		t.Fatal("did not see envelope write")
-	}
 	select {
 	case reply = <-writes:
 	case <-time.After(time.Second):
 		t.Fatal("did not see reply write")
 	}
-	if envelope["method"] != "requestResponse" {
-		t.Fatalf("envelope method = %v", envelope["method"])
-	}
 	idFloat, ok := reply["id"].(float64)
 	if !ok || int64(idFloat) != 9 {
 		t.Fatalf("reply id = %v", reply["id"])
+	}
+	result, _ := reply["result"].(map[string]any)
+	if result["decision"] != "accept" {
+		t.Fatalf("reply decision = %v", result["decision"])
+	}
+	select {
+	case extra := <-writes:
+		t.Fatalf("unexpected second response: %+v", extra)
+	default:
+	}
+}
+
+func TestCodexRPCDefersServerRequestUntilOperatorDecision(t *testing.T) {
+	writes := make(chan map[string]any, 1)
+	rpc := newCodexRPC(
+		&captureWriter{ch: writes},
+		strings.NewReader("{\"id\":7,\"method\":\"item/commandExecution/requestApproval\",\"params\":{}}\n"),
+	)
+	sawRequest := make(chan struct{}, 1)
+	rpc.start(nil, func(id int64, method string, params map[string]any) map[string]any {
+		sawRequest <- struct{}{}
+		return nil
+	})
+	select {
+	case <-sawRequest:
+	case <-time.After(time.Second):
+		t.Fatal("server request was not observed")
+	}
+	<-rpc.done
+	select {
+	case response := <-writes:
+		t.Fatalf("request was answered before the operator decided: %+v", response)
+	default:
 	}
 }
 

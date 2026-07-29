@@ -63,7 +63,10 @@ type StartTurnRequest struct {
 }
 
 type turnMirrorState struct {
-	permission *runnerApprovalState
+	permission              *runnerApprovalState
+	pendingPermissionTarget string
+	runtimeError            string
+	runtimeState            string
 }
 
 type runnerApprovalState struct {
@@ -586,6 +589,16 @@ func (cm *ChatManager) resumeTurnAfterNativeApproval(sess db.RunnerChatSession, 
 			log.Printf("chat manager: resume after approval skipped: turn=%s run_status=%s", turn.ID, run.Status)
 			return
 		}
+		resumeAfterSeq := int64(0)
+		if cm.Jobs != nil {
+			if snapshot, ok := cm.Jobs.Snapshot(turn.RunnerJobID); ok {
+				for _, event := range snapshot.Events {
+					if event.Sequence > resumeAfterSeq {
+						resumeAfterSeq = event.Sequence
+					}
+				}
+			}
+		}
 		if cm.Jobs != nil {
 			cm.Jobs.Reopen(turn.RunnerJobID)
 			cm.Jobs.Publish(turn.RunnerJobID, "resumed", map[string]any{
@@ -606,7 +619,7 @@ func (cm *ChatManager) resumeTurnAfterNativeApproval(sess db.RunnerChatSession, 
 			log.Printf("chat manager: resume after approval load session failed: turn=%s err=%v", turn.ID, err)
 			return
 		}
-		go cm.mirrorJobEvents(latestSess, latestTurn, turn.RunnerJobID)
+		go cm.mirrorJobEventsAfter(latestSess, latestTurn, turn.RunnerJobID, resumeAfterSeq)
 		if err := cm.Manager.ResumeNativeRunAfterApproval(ctx, run); err != nil {
 			log.Printf("chat manager: resume after approval failed: turn=%s err=%v", turn.ID, err)
 		}
@@ -666,6 +679,10 @@ func (cm *ChatManager) ReconcileOnStartup(ctx context.Context) error {
 var ErrUnsupportedNativeSession = errors.New("native chat session is not supported by this runner")
 
 func (cm *ChatManager) mirrorJobEvents(sess db.RunnerChatSession, turn db.RunnerChatTurn, jobID string) {
+	cm.mirrorJobEventsAfter(sess, turn, jobID, 0)
+}
+
+func (cm *ChatManager) mirrorJobEventsAfter(sess db.RunnerChatSession, turn db.RunnerChatTurn, jobID string, afterSeq int64) {
 	if cm.Jobs == nil {
 		return
 	}
@@ -678,6 +695,9 @@ func (cm *ChatManager) mirrorJobEvents(sess db.RunnerChatSession, turn db.Runner
 	// Replay any events that already arrived before subscription.
 	state := &turnMirrorState{}
 	for _, ev := range snapshot.Events {
+		if ev.Sequence <= afterSeq {
+			continue
+		}
 		cm.persistJobEvent(turn, sess, jobID, state, ev)
 	}
 	if isTerminalJobStatus(snapshot.Status) {
@@ -687,6 +707,9 @@ func (cm *ChatManager) mirrorJobEvents(sess db.RunnerChatSession, turn db.Runner
 
 	finalSnapshot := snapshot
 	for ev := range ch {
+		if ev.Sequence <= afterSeq {
+			continue
+		}
 		cm.persistJobEvent(turn, sess, jobID, state, ev)
 		if isTerminalEventType(ev.Type) {
 			// Pull a fresh snapshot to capture final status/data.
@@ -723,6 +746,7 @@ func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerCha
 		return
 	}
 	for _, normalizedEvent := range normalized {
+		cm.captureRuntimeTerminalState(state, normalizedEvent)
 		payload := string(normalizedEvent.Payload)
 		if payload == "" {
 			rawPayload, _ := json.Marshal(ev.Data)
@@ -750,6 +774,26 @@ func (cm *ChatManager) persistJobEvent(turn db.RunnerChatTurn, sess db.RunnerCha
 	cm.maybePersistNativeSessionRef(sess, jobID, ev)
 }
 
+func (cm *ChatManager) captureRuntimeTerminalState(state *turnMirrorState, event RunnerChatEvent) {
+	if state == nil {
+		return
+	}
+	if event.Type == runtimeEventRuntimeError {
+		if message := strings.TrimSpace(event.Text); message != "" {
+			state.runtimeError = message
+		}
+		return
+	}
+	if event.Type != runtimeEventTurnCompleted || len(event.Payload) == 0 {
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return
+	}
+	state.runtimeState = strings.ToLower(strings.TrimSpace(asString(payload["state"])))
+}
+
 func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.RunnerChatTurn, snap jobs.Snapshot, state *turnMirrorState) {
 	if latest, err := cm.DB.GetRunnerChatSession(context.Background(), sess.ID); err == nil {
 		sess = latest
@@ -760,6 +804,15 @@ func (cm *ChatManager) finalizeFromSnapshot(sess db.RunnerChatSession, turn db.R
 	status := mapJobStatusToTurnStatus(snap.Status)
 	if status == "" {
 		status = db.RunnerChatTurnStatusFailed
+	}
+	if state != nil {
+		switch state.runtimeState {
+		case "failed", "error", "systemerror", "timed_out", "timeout":
+			status = db.RunnerChatTurnStatusFailed
+			if strings.TrimSpace(state.runtimeError) != "" {
+				errMessage = state.runtimeError
+			}
+		}
 	}
 	if state != nil && state.permission != nil {
 		status = db.RunnerChatTurnStatusApprovalRequired
@@ -881,7 +934,15 @@ func (cm *ChatManager) approvedRunnerPermission(ctx context.Context, sess db.Run
 }
 
 func (cm *ChatManager) maybeCaptureRunnerPermission(turn db.RunnerChatTurn, sess db.RunnerChatSession, jobID string, state *turnMirrorState, raw RunnerRunEvent) {
-	if state == nil || state.permission != nil {
+	if state == nil {
+		return
+	}
+	if RunnerID(sess.RunnerID) == RunnerCodex {
+		if target, ok := detectCodexPendingFileChangeTarget(raw); ok {
+			state.pendingPermissionTarget = target
+		}
+	}
+	if state.permission != nil {
 		return
 	}
 	var permission RunnerPermissionRequest
@@ -891,23 +952,17 @@ func (cm *ChatManager) maybeCaptureRunnerPermission(turn db.RunnerChatTurn, sess
 	switch RunnerID(sess.RunnerID) {
 	case RunnerOpenCode:
 		permission, ok = detectOpenCodePermissionRequest(raw)
-		if !ok {
-			// Fallback: detect a structured permission request ref even when
-			// the stderr heuristic does not match. This ensures the chat
-			// manager can drive the live continuation flow whenever the
-			// runner emits a structured event with an id.
-			if ref, ok2 := detectOpenCodePermissionRequestRef(raw, sess.NativeSessionRef); ok2 {
-				nativeRef = ref
-				hasNative = true
-			}
+		// Capture the native request even when permission detection also
+		// succeeds; the ref is what lets Approve/Deny continue the live turn.
+		if ref, ok2 := detectOpenCodePermissionRequestRef(raw, sess.NativeSessionRef); ok2 {
+			nativeRef = ref
+			hasNative = true
 		}
 	case RunnerCodex:
 		permission, ok = detectCodexStructuredPermissionRequest(raw)
-		if !ok {
-			if ref, ok2 := detectCodexPermissionRequestRef(raw); ok2 {
-				nativeRef = ref
-				hasNative = true
-			}
+		if ref, ok2 := detectCodexPermissionRequestRef(raw); ok2 {
+			nativeRef = ref
+			hasNative = true
 		}
 	default:
 		return
@@ -918,11 +973,19 @@ func (cm *ChatManager) maybeCaptureRunnerPermission(turn db.RunnerChatTurn, sess
 	if !ok {
 		// Synthesise a minimal permission request from the native ref so the
 		// approval pipeline stays consistent.
+		access := runnerPermissionAccessRead
+		method := strings.ToLower(strings.TrimSpace(nativeRef.Method))
+		if strings.Contains(method, "filechange") ||
+			strings.Contains(method, "commandexecution") ||
+			strings.Contains(method, "applypatch") ||
+			strings.Contains(method, "write") {
+			access = runnerPermissionAccessWrite
+		}
 		permission = RunnerPermissionRequest{
 			RunnerID:   string(nativeRef.RunnerID),
 			Kind:       runnerPermissionKindFilesystem,
-			Access:     runnerPermissionAccessRead,
-			TargetPath: nativeRef.Summary,
+			Access:     access,
+			TargetPath: firstNonEmptyStr(nativeRef.Summary, state.pendingPermissionTarget),
 		}
 		if normalized, ok2 := NormalizeRunnerPermissionRequest(permission); ok2 {
 			permission = normalized

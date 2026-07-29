@@ -303,6 +303,29 @@ func TestCodexRPCFinalTextDoesNotDuplicateCompletedAgentMessage(t *testing.T) {
 	}
 }
 
+func TestCodexRPCFinalAnswerReplacesCommentaryText(t *testing.T) {
+	rpc := &codexRPC{}
+	rpc.captureNotificationText("item/agentMessage/delta", map[string]any{"delta": "I need permission."})
+	rpc.captureNotificationText("item/completed", map[string]any{
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"phase": "commentary",
+			"text":  "I need permission.",
+		},
+	})
+	rpc.captureNotificationText("item/agentMessage/delta", map[string]any{"delta": "Created the file."})
+	rpc.captureNotificationText("item/completed", map[string]any{
+		"item": map[string]any{
+			"type":  "agentMessage",
+			"phase": "final_answer",
+			"text":  "Created the file.",
+		},
+	})
+	if got := rpc.finalText(); got != "Created the file." {
+		t.Fatalf("final text = %q, want only final answer", got)
+	}
+}
+
 func TestReasoningOptionsUseSemanticOrder(t *testing.T) {
 	got := sortedUniqueStrings([]string{"xhigh", "medium", "low", "high", "none", "max"})
 	want := []string{"none", "low", "medium", "high", "xhigh", "max"}
@@ -837,6 +860,73 @@ func TestOpenCodeExecuteStopsOnPermissionRequest(t *testing.T) {
 	}
 }
 
+func TestOpenCodeRespondToNativeRequestUsesCurrentReplyRoute(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode reply body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	runtime.endpoint = server.URL
+	ref := NativeRequestRef{
+		RunnerID:  RunnerOpenCode,
+		RequestID: "permission-1",
+		SessionID: "session-1",
+		Kind:      NativeRequestApproval,
+	}
+	runtime.trackRequest(ref)
+
+	if err := runtime.RespondToNativeRequest(context.Background(), ref, NativeRequestDecision{
+		Decision: "approve",
+	}); err != nil {
+		t.Fatalf("RespondToNativeRequest: %v", err)
+	}
+	if gotPath != "/api/session/session-1/permission/permission-1/reply" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotBody["reply"] != "once" {
+		t.Fatalf("reply body = %#v", gotBody)
+	}
+	if len(runtime.listRequests()) != 0 {
+		t.Fatal("expected resolved request to be untracked")
+	}
+}
+
+func TestOpenCodeRespondToNativeRequestMapsDenyToReject(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode reply body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	runtime := NewOpenCodeNativeRuntime()
+	runtime.endpoint = server.URL
+	ref := NativeRequestRef{
+		RunnerID:  RunnerOpenCode,
+		RequestID: "permission-2",
+		SessionID: "session-2",
+		Kind:      NativeRequestApproval,
+	}
+
+	if err := runtime.RespondToNativeRequest(context.Background(), ref, NativeRequestDecision{
+		Decision: "deny",
+	}); err != nil {
+		t.Fatalf("RespondToNativeRequest: %v", err)
+	}
+	if gotBody["reply"] != "reject" {
+		t.Fatalf("reply body = %#v", gotBody)
+	}
+}
+
 func TestStructuredRunnerPermissionDetection(t *testing.T) {
 	payload := json.RawMessage(`{"type":"permission.write","params":{"path":"/tmp/project/file.txt","reason":"write file"}}`)
 	req, ok := detectOpenCodePermissionRequest(RunnerRunEvent{Type: "structured", Payload: payload})
@@ -863,6 +953,29 @@ func TestStructuredRunnerPermissionDetection(t *testing.T) {
 	}
 	if req.RunnerID != string(RunnerCodex) || req.TargetPath != "/tmp/project" {
 		t.Fatalf("unexpected codex permission: %+v", req)
+	}
+
+	commandPayload := json.RawMessage(`{"type":"item/commandExecution/requestApproval","method":"item/commandExecution/requestApproval","request_id":0,"params":{"cwd":"/tmp/project","command":"/bin/zsh -lc \"printf approved > /Users/example/out.txt\"","reason":"Allow me to create /Users/example/out.txt?"},"native_request_ref":{"kind":"approval","request_id":"0","method":"item/commandExecution/requestApproval","thread_id":"thread-1","summary":"Allow me to create /Users/example/out.txt?"}}`)
+	commandEvent := RunnerRunEvent{Type: "structured", Payload: commandPayload}
+	req, ok = detectCodexStructuredPermissionRequest(commandEvent)
+	if !ok {
+		t.Fatal("expected codex command permission request")
+	}
+	if req.Access != runnerPermissionAccessWrite || req.TargetPath != "/Users/example/out.txt" {
+		t.Fatalf("unexpected codex command permission: %+v", req)
+	}
+	ref, ok := detectCodexPermissionRequestRef(commandEvent)
+	if !ok {
+		t.Fatal("expected codex native approval ref")
+	}
+	if ref.RequestID != "0" || ref.ThreadID != "thread-1" || ref.Kind != NativeRequestApproval {
+		t.Fatalf("unexpected codex native approval ref: %+v", ref)
+	}
+
+	commandWithoutReason := json.RawMessage(`{"type":"item/commandExecution/requestApproval","method":"item/commandExecution/requestApproval","request_id":1,"params":{"cwd":"/tmp/project","command":"/bin/zsh -c 'printf approved > /Users/example/without-reason.txt'"}}`)
+	req, ok = detectCodexStructuredPermissionRequest(RunnerRunEvent{Type: "structured", Payload: commandWithoutReason})
+	if !ok || req.TargetPath != "/Users/example/without-reason.txt" {
+		t.Fatalf("unexpected command target without reason: %+v", req)
 	}
 }
 

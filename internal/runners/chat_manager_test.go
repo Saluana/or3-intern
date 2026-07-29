@@ -351,6 +351,68 @@ func TestChatManagerPersistsNormalizedRunnerEvents(t *testing.T) {
 	}
 }
 
+func TestChatManagerRuntimeFailureOverridesSuccessfulWrapperExit(t *testing.T) {
+	d := openChatManagerTestDB(t)
+	cm := testChatManager(d)
+	ctx := context.Background()
+	sess, err := d.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{
+		ID:               "rcs-runtime-failure",
+		AppSessionKey:    "app-runtime-failure",
+		RunnerID:         string(RunnerCodex),
+		ContinuationMode: string(ContinuationReplay),
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	turn, err := d.CreateRunnerChatTurn(ctx, db.RunnerChatTurn{
+		ID:               "rct-runtime-failure",
+		SessionID:        sess.ID,
+		Status:           db.RunnerChatTurnStatusQueued,
+		UserMessage:      "hello",
+		ContinuationMode: string(ContinuationReplay),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunnerChatTurn: %v", err)
+	}
+	state := &turnMirrorState{}
+	cm.persistJobEvent(turn, sess, "job-runtime-failure", state, jobs.Event{
+		Sequence: 1,
+		Type:     "structured",
+		Data: map[string]any{
+			"payload": map[string]any{
+				"type":    "error",
+				"message": "The selected model is not supported.",
+			},
+		},
+	})
+	cm.persistJobEvent(turn, sess, "job-runtime-failure", state, jobs.Event{
+		Sequence: 2,
+		Type:     "structured",
+		Data: map[string]any{
+			"payload": map[string]any{
+				"type": "turn.completed",
+				"turn": map[string]any{"status": "failed"},
+			},
+		},
+	})
+	if state.runtimeState != "failed" {
+		t.Fatalf("runtime state = %q, want failed", state.runtimeState)
+	}
+
+	cm.finalizeFromSnapshot(sess, turn, jobs.Snapshot{Status: "completed"}, state)
+
+	latest, err := d.GetRunnerChatTurn(ctx, turn.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatTurn: %v", err)
+	}
+	if latest.Status != db.RunnerChatTurnStatusFailed {
+		t.Fatalf("status = %q, want failed", latest.Status)
+	}
+	if !strings.Contains(latest.ErrorMessage, "not supported") {
+		t.Fatalf("error = %q, want runtime model error", latest.ErrorMessage)
+	}
+}
+
 func TestChatManagerRunnerChatEventsPayloadPreservesCanonicalPayload(t *testing.T) {
 	d := openChatManagerTestDB(t)
 	cm := testChatManager(d)

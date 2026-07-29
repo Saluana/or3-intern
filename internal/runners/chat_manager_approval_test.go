@@ -193,6 +193,164 @@ func TestRespondToTurnApprovalLiveContinuation(t *testing.T) {
 	}
 }
 
+func TestNativeCodexApprovalEventAttachesBrokerRequestToTurn(t *testing.T) {
+	d, cm, _, runtime := setupChatManagerForApproval(t)
+	ctx := context.Background()
+	sess, turn := seedTurnWithApproval(t, d, 0)
+	turn.Mode = "review"
+	raw := RunnerRunEvent{
+		Type: "structured",
+		Payload: json.RawMessage(`{
+			"type":"item/commandExecution/requestApproval",
+			"method":"item/commandExecution/requestApproval",
+			"request_id":0,
+			"params":{
+				"cwd":"/tmp/project",
+				"command":"/bin/zsh -lc \"printf approved > /Users/example/out.txt\"",
+				"reason":"Allow me to create /Users/example/out.txt?"
+			},
+			"native_request_ref":{
+				"kind":"approval",
+				"request_id":"0",
+				"method":"item/commandExecution/requestApproval",
+				"thread_id":"thread-1",
+				"summary":"Allow me to create /Users/example/out.txt?"
+			}
+		}`),
+	}
+	state := &turnMirrorState{}
+
+	cm.maybeCaptureRunnerPermission(turn, sess, "job-1", state, raw)
+
+	if state.permission == nil {
+		t.Fatal("expected native event to create a broker-backed approval")
+	}
+	approvalID, ref, hasRef := cm.lastApprovalRef(ctx, turn)
+	if approvalID == 0 {
+		t.Fatal("expected approval id attached to the turn")
+	}
+	if !hasRef || ref.RequestID != "0" || ref.ThreadID != "thread-1" {
+		t.Fatalf("unexpected native request ref: %+v, hasRef=%v", ref, hasRef)
+	}
+
+	res, err := cm.RespondToTurnApproval(ctx, turn.ID, RespondToTurnApprovalOpts{
+		Decision: "approve",
+		Actor:    "test",
+	})
+	if err != nil {
+		t.Fatalf("RespondToTurnApproval: %v", err)
+	}
+	if !res.NativeContinued || runtime.responded.Load() != 1 {
+		t.Fatalf("expected native continuation, result=%+v responded=%d", res, runtime.responded.Load())
+	}
+}
+
+func TestNativeCodexFileChangeApprovalAttachesBrokerRequestToTurn(t *testing.T) {
+	_, cm, _, _ := setupChatManagerForApproval(t)
+	ctx := context.Background()
+	sess, turn := seedTurnWithApproval(t, cm.DB, 0)
+	turn.Mode = "review"
+	fileChangeStarted := RunnerRunEvent{
+		Type: "structured",
+		Payload: json.RawMessage(`{
+			"type":"item/started",
+			"method":"item/started",
+			"params":{
+				"item":{
+					"type":"fileChange",
+					"changes":[{"path":"/Users/example/file.txt","kind":{"type":"add"}}]
+				}
+			}
+		}`),
+	}
+	raw := RunnerRunEvent{
+		Type: "structured",
+		Payload: json.RawMessage(`{
+			"type":"item/fileChange/requestApproval",
+			"method":"item/fileChange/requestApproval",
+			"request_id":0,
+			"params":{
+				"grantRoot":null,
+				"itemId":"call-file-change",
+				"reason":null,
+				"threadId":"thread-1",
+				"turnId":"turn-1"
+			},
+			"native_request_ref":{
+				"kind":"approval",
+				"request_id":"0",
+				"method":"item/fileChange/requestApproval",
+				"thread_id":"thread-1",
+				"turn_id":"turn-1"
+			}
+		}`),
+	}
+	state := &turnMirrorState{}
+
+	cm.maybeCaptureRunnerPermission(turn, sess, "job-file-change", state, fileChangeStarted)
+	cm.maybeCaptureRunnerPermission(turn, sess, "job-file-change", state, raw)
+
+	if state.permission == nil {
+		t.Fatal("expected file-change request to create a broker-backed approval")
+	}
+	if state.permission.Request.TargetPath != "/Users/example/file.txt" {
+		t.Fatalf("unexpected approval target: %q", state.permission.Request.TargetPath)
+	}
+	approvalID, ref, hasRef := cm.lastApprovalRef(ctx, turn)
+	if approvalID == 0 {
+		t.Fatal("expected approval id attached to the turn")
+	}
+	if !hasRef || ref.RequestID != "0" || ref.Method != "item/fileChange/requestApproval" {
+		t.Fatalf("unexpected native request ref: %+v, hasRef=%v", ref, hasRef)
+	}
+}
+
+func TestResumedMirrorSkipsTheAlreadyResolvedNativeRequest(t *testing.T) {
+	d, cm, _, _ := setupChatManagerForApproval(t)
+	ctx := context.Background()
+	sess, turn := seedTurnWithApproval(t, d, 0)
+	const jobID = "job-resumed-approval"
+	cm.Jobs.RegisterWithID(jobID, "runner")
+	cm.Jobs.Publish(jobID, "structured", map[string]any{
+		"payload": map[string]any{
+			"type":       "item/commandExecution/requestApproval",
+			"method":     "item/commandExecution/requestApproval",
+			"request_id": 0,
+			"params": map[string]any{
+				"command": "/bin/zsh -c 'printf ok > /Users/example/out.txt'",
+			},
+		},
+	})
+	cm.Jobs.PauseForApproval(jobID, nil)
+	snapshot, ok := cm.Jobs.Snapshot(jobID)
+	if !ok {
+		t.Fatal("expected paused job snapshot")
+	}
+	var resumeAfterSeq int64
+	for _, event := range snapshot.Events {
+		if event.Sequence > resumeAfterSeq {
+			resumeAfterSeq = event.Sequence
+		}
+	}
+	cm.Jobs.Reopen(jobID)
+	cm.Jobs.Complete(jobID, "succeeded", map[string]any{
+		"final_text": "done",
+	})
+
+	cm.mirrorJobEventsAfter(sess, turn, jobID, resumeAfterSeq)
+
+	if approvalID, _, _ := cm.lastApprovalRef(ctx, turn); approvalID != 0 {
+		t.Fatalf("resolved request was replayed as approval %d", approvalID)
+	}
+	updated, err := d.GetRunnerChatTurn(ctx, turn.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatTurn: %v", err)
+	}
+	if updated.Status != db.RunnerChatTurnStatusSucceeded {
+		t.Fatalf("expected resumed turn to succeed, got %s", updated.Status)
+	}
+}
+
 func TestRespondToTurnApprovalDeadRuntimeFallback(t *testing.T) {
 	d, cm, broker, runtime := setupChatManagerForApproval(t)
 	ctx := context.Background()

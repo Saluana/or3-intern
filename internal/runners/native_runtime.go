@@ -565,25 +565,44 @@ func (r *OpenCodeNativeRuntime) RespondToNativeRequest(ctx context.Context, ref 
 	if sessionID == "" {
 		return errors.New("opencode request is missing session id")
 	}
-	body := map[string]any{"response": decision.Decision}
-	if strings.EqualFold(decision.Decision, "reject") || strings.EqualFold(decision.Decision, "deny") {
-		body["response"] = "denied"
+	reply := "reject"
+	switch strings.ToLower(strings.TrimSpace(decision.Decision)) {
+	case "approve", "accept", "allow":
+		if decision.AlwaysAllow {
+			reply = "always"
+		} else {
+			reply = "once"
+		}
+	case "reject", "deny", "decline", "cancel":
+		reply = "reject"
 	}
-	if strings.EqualFold(decision.Decision, "approve") {
-		body["response"] = "always"
-	}
+	replyBody := map[string]any{"reply": reply}
+	legacyBody := map[string]any{"response": reply}
 	if decision.Message != "" {
-		body["message"] = decision.Message
+		replyBody["message"] = decision.Message
+		legacyBody["message"] = decision.Message
 	}
-	// Best-effort: try a few plausible endpoints. The server may have
-	// renamed the route across versions; the chat manager handles failures
-	// by falling back to the existing approval-token retry.
-	candidates := []string{
-		fmt.Sprintf("%s/session/%s/permissions/%s", endpoint, sessionID, ref.RequestID),
-		fmt.Sprintf("%s/permissions/%s", endpoint, ref.RequestID),
+	// OpenCode 1.18 exposes both its v2 and compatibility reply routes.
+	// Keep the legacy response endpoint last for older managed servers.
+	candidates := []struct {
+		url  string
+		body map[string]any
+	}{
+		{
+			url:  fmt.Sprintf("%s/api/session/%s/permission/%s/reply", endpoint, sessionID, ref.RequestID),
+			body: replyBody,
+		},
+		{
+			url:  fmt.Sprintf("%s/permission/%s/reply", endpoint, ref.RequestID),
+			body: replyBody,
+		},
+		{
+			url:  fmt.Sprintf("%s/session/%s/permissions/%s", endpoint, sessionID, ref.RequestID),
+			body: legacyBody,
+		},
 	}
-	for _, url := range candidates {
-		_, err := httpPostJSON(ctx, r.client, url, body, nil)
+	for _, candidate := range candidates {
+		_, err := httpPostJSON(ctx, r.client, candidate.url, candidate.body, nil)
 		if err == nil {
 			r.untrackRequest(ref.RequestID)
 			return nil
@@ -1168,7 +1187,9 @@ func (r *CodexNativeRuntime) executeOnce(ctx context.Context, req NativeRuntimeE
 			case sess.rpc.turnDone <- errNativeApprovalRequired:
 			default:
 			}
-			return map[string]any{"error": map[string]any{"code": -32001, "message": "approval required in OR3"}}
+			// Keep the server request open. OR3 responds with the operator's
+			// decision through RespondToNativeRequest.
+			return nil
 		},
 	)
 	defer func() {
@@ -1354,7 +1375,6 @@ func (r *CodexNativeRuntime) ContinuePendingTurn(ctx context.Context, req Native
 	if sess == nil || (jobID != "" && jobID != req.Run.JobID) {
 		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(started).Milliseconds()}, fmt.Errorf("codex session is not alive for job %s", req.Run.JobID)
 	}
-	sess.rpc.beginTurn()
 	if err := sess.rpc.waitForTurn(ctx); err != nil {
 		if errors.Is(err, errNativeApprovalRequired) {
 			return ProcessOutput{ExitCode: -1, StderrPreview: errNativeApprovalRequired.Error(), DurationMS: time.Since(started).Milliseconds()}, errNativeApprovalRequired
@@ -1455,7 +1475,9 @@ func (c *codexRPC) start(onNotification func(string, map[string]any), onRequest 
 				requestHandler := c.onRequest
 				c.handlerMu.RUnlock()
 				if method != "" && requestHandler != nil {
-					_ = c.write(map[string]any{"id": id, "jsonrpc": "2.0", "result": requestHandler(id, method, params)})
+					if result := requestHandler(id, method, params); result != nil {
+						_ = c.write(map[string]any{"id": id, "jsonrpc": "2.0", "result": result})
+					}
 					continue
 				}
 				c.handleResponse(id, msg)
@@ -1593,6 +1615,14 @@ func (c *codexRPC) captureNotificationText(method string, params map[string]any)
 	}
 	completed := codexCompletedAgentMessageText(method, params)
 	if completed == "" {
+		return
+	}
+	item := mapField(params, "item")
+	if strings.EqualFold(strings.TrimSpace(asString(item["phase"])), "final_answer") {
+		c.textMu.Lock()
+		c.text.Reset()
+		c.text.WriteString(completed)
+		c.textMu.Unlock()
 		return
 	}
 	c.textMu.Lock()

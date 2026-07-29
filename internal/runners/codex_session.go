@@ -325,32 +325,23 @@ func (s *codexSession) RespondToRequest(ctx context.Context, ref NativeRequestRe
 	if err != nil {
 		return fmt.Errorf("invalid request id %q: %w", ref.RequestID, err)
 	}
-	// Codex approval responses typically use the standard
-	// "request_id"-keyed envelope; downstream methods may also accept the
-	// raw decision. We send both shapes so the active turn can resume.
-	payload := map[string]any{
-		"request_id": id,
-		"decision":   decision.Decision,
-		"approve":    strings.EqualFold(decision.Decision, "approve"),
-		"reason":     decision.Message,
-	}
-	if len(decision.Raw) > 0 {
-		var raw map[string]any
-		if err := json.Unmarshal(decision.Raw, &raw); err == nil {
-			for k, v := range raw {
-				payload[k] = v
-			}
+	codexDecision := "decline"
+	switch strings.ToLower(strings.TrimSpace(decision.Decision)) {
+	case "approve", "accept", "allow":
+		if decision.AlwaysAllow {
+			codexDecision = "acceptForSession"
+		} else {
+			codexDecision = "accept"
 		}
+	case "cancel":
+		codexDecision = "cancel"
+	case "reject", "deny", "decline":
+		codexDecision = "decline"
 	}
 	if err := s.rpc.write(map[string]any{
-		"method": "requestResponse",
-		"params": payload,
-	}); err != nil {
-		return err
-	}
-	if err := s.rpc.write(map[string]any{
-		"id":     id,
-		"result": map[string]any{"decision": decision.Decision, "approve": strings.EqualFold(decision.Decision, "approve")},
+		"id":      id,
+		"jsonrpc": "2.0",
+		"result":  map[string]any{"decision": codexDecision},
 	}); err != nil {
 		return err
 	}
@@ -390,18 +381,32 @@ func detectCodexPermissionRequestRef(raw RunnerRunEvent) (NativeRequestRef, bool
 	if err := json.Unmarshal(raw.Payload, &obj); err != nil {
 		return NativeRequestRef{}, false
 	}
-	method := firstNonEmpty(asString(obj["method"]), asString(obj["type"]))
+	embedded := mapAnyValue(obj, "native_request_ref")
+	method := firstNonEmpty(
+		asString(embedded["method"]),
+		asString(obj["method"]),
+		asString(obj["type"]),
+	)
 	kind := codexRequestKind(method)
+	if embeddedKind := NativeRequestKind(asString(embedded["kind"])); embeddedKind != "" {
+		kind = embeddedKind
+	}
 	if kind == NativeRequestUnknown {
 		return NativeRequestRef{}, false
 	}
 	idValue, ok := obj["id"]
 	if !ok {
+		idValue, ok = obj["request_id"]
+	}
+	if !ok {
+		idValue, ok = embedded["request_id"]
+	}
+	if !ok {
 		if req := mapAnyValue(obj, "request"); req != nil {
-			idValue = req["id"]
+			idValue, ok = req["id"]
 		}
 	}
-	if idValue == nil {
+	if !ok || idValue == nil {
 		return NativeRequestRef{}, false
 	}
 	id, err := parseInt64String(fmt.Sprint(idValue))
@@ -419,8 +424,10 @@ func detectCodexPermissionRequestRef(raw RunnerRunEvent) (NativeRequestRef, bool
 		RunnerID:  RunnerCodex,
 		Kind:      kind,
 		RequestID: fmt.Sprintf("%d", id),
+		SessionID: asString(embedded["session_id"]),
+		ThreadID:  firstNonEmpty(asString(embedded["thread_id"]), asString(params["threadId"])),
 		Method:    method,
-		Summary:   summary,
+		Summary:   firstNonEmpty(asString(embedded["summary"]), summary),
 		IssuedAt:  time.Now().UnixMilli(),
 	}
 	if rawBytes, err := json.Marshal(obj); err == nil {

@@ -115,6 +115,41 @@ func detectCodexStructuredPermissionRequest(raw RunnerRunEvent) (RunnerPermissio
 	return detectStructuredRunnerPermission(raw.Payload, string(RunnerCodex))
 }
 
+func detectCodexPendingFileChangeTarget(raw RunnerRunEvent) (string, bool) {
+	if raw.Type != "structured" || len(raw.Payload) == 0 {
+		return "", false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw.Payload, &obj); err != nil {
+		return "", false
+	}
+	params := mapAnyValue(obj, "params")
+	item := mapAnyValue(params, "item")
+	if item == nil {
+		item = mapAnyValue(obj, "item")
+	}
+	if !strings.EqualFold(asString(item["type"]), "fileChange") {
+		return "", false
+	}
+	changes, _ := item["changes"].([]any)
+	for _, rawChange := range changes {
+		change, _ := rawChange.(map[string]any)
+		target := strings.TrimSpace(firstNonEmptyRunnerPermission(
+			asString(change["path"]),
+			asString(change["target_path"]),
+			asString(change["targetPath"]),
+		))
+		if target == "" {
+			continue
+		}
+		target = filepath.Clean(target)
+		if target != "." && target != string(filepath.Separator) {
+			return target, true
+		}
+	}
+	return "", false
+}
+
 func detectCodexPermissionRequest(text string) (RunnerPermissionRequest, bool) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" || !strings.Contains(strings.ToLower(trimmed), "approvals are disabled") {
@@ -145,18 +180,27 @@ func detectStructuredRunnerPermission(payload json.RawMessage, runnerID string) 
 	params := mapAnyValue(obj, "params")
 	permission := mapAnyValue(obj, "permission")
 	request := mapAnyValue(obj, "request")
-	raw := firstNonNilRunnerPermission(
-		params["target_path"], params["targetPath"], params["path"], params["file"], params["cwd"],
-		permission["target_path"], permission["targetPath"], permission["path"], permission["file"], permission["cwd"],
-		request["target_path"], request["targetPath"], request["path"], request["file"], request["cwd"],
-		obj["target_path"], obj["targetPath"], obj["path"], obj["file"], obj["cwd"],
-	)
+	var raw any
+	if strings.Contains(typeValue, "command") {
+		// Command approvals often report the runner cwd as well as the actual
+		// out-of-workspace target in the human-readable reason. Prefer the
+		// reason so policy is evaluated against what the command will touch.
+		raw = firstNonNilRunnerPermission(
+			params["reason"], params["message"], params["command"],
+			request["reason"], request["message"], request["command"],
+			permission["reason"], permission["message"], permission["command"],
+		)
+	}
 	if raw == nil {
 		raw = firstNonNilRunnerPermission(
-			params["command"], params["reason"],
+			params["target_path"], params["targetPath"], params["path"], params["file"],
+			permission["target_path"], permission["targetPath"], permission["path"], permission["file"],
+			request["target_path"], request["targetPath"], request["path"], request["file"],
+			obj["target_path"], obj["targetPath"], obj["path"], obj["file"],
+			params["reason"], params["command"], params["cwd"],
 			permission["command"], permission["reason"], permission["message"],
 			request["command"], request["reason"], request["message"],
-			obj["command"], obj["message"], obj["raw"],
+			obj["command"], obj["message"], obj["cwd"], obj["raw"],
 		)
 	}
 	target := pathFromPermissionValue(raw)
@@ -200,11 +244,15 @@ func pathFromPermissionValue(value any) string {
 	switch v := value.(type) {
 	case string:
 		fields := strings.Fields(v)
+		var found string
 		for _, field := range fields {
-			trimmed := strings.Trim(field, "`'\".,:;()[]{}")
+			trimmed := strings.Trim(field, "`'\".,:;?!()[]{}")
 			if strings.HasPrefix(trimmed, string(filepath.Separator)) || strings.HasPrefix(trimmed, "~/") {
-				return filepath.Clean(trimmed)
+				found = filepath.Clean(trimmed)
 			}
+		}
+		if found != "" {
+			return found
 		}
 		return filepath.Clean(strings.Trim(v, "`'\""))
 	case map[string]any:

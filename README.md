@@ -86,6 +86,7 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 Root help shows the full command catalog by default:
 
 - `or3-intern setup` guided first-run setup using scenario and safety choices
+- `or3-intern connect` one-command, account-bound remote access through OR3 Cloud
 - `or3-intern chat` interactive CLI
 - `or3-intern health [--check|--fix|--json]` normal readiness checks and safe repairs
 - `or3-intern status [--advanced]` plain-language safety and access summary

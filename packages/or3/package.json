@@ -1,0 +1,22 @@
+{
+  "name": "or3",
+  "version": "0.1.0",
+  "description": "One-command OR3 Connect bootstrap",
+  "license": "GPL-3.0",
+  "type": "module",
+  "bin": {
+    "or3": "./bin/or3.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Saluana/or3-intern.git",
+    "directory": "packages/or3"
+  }
+}

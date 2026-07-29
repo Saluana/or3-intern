@@ -30,6 +30,7 @@ var rootHelpSections = []struct {
 		Title: "Simple commands",
 		Items: []helpItem{
 			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
+			{Name: "connect", Description: "Connect this computer securely to OR3 Cloud"},
 			{Name: "chat", Description: "Start chatting with OR3"},
 			{Name: "health", Description: "Check if OR3 is ready to work"},
 			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
@@ -72,6 +73,28 @@ var rootHelpSections = []struct {
 }
 
 var helpTopics = map[string]helpCommand{
+	"connect": {
+		Usage:   "or3-intern connect [status|doctor|disconnect|uninstall] [options]",
+		Summary: "Connect this computer securely to OR3 Cloud.",
+		Description: []string{
+			"Opens a browser sign-in, confirms a matching code, and installs a small background service so this computer stays reachable after logout or restart.",
+			"Remote access requires an OR3 Cloud account. Local and offline use never requires an account.",
+			"Credentials are saved with owner-only permissions and tunnel secrets are never placed in process arguments.",
+		},
+		Subcommands: []helpItem{
+			{Name: "status", Description: "Show the saved remote connection"},
+			{Name: "doctor", Description: "Check the tunnel client and remote reachability"},
+			{Name: "disconnect", Description: "Revoke remote access and stop the background service"},
+			{Name: "uninstall", Description: "Remove local remote-access state and service files"},
+		},
+		Flags: []helpItem{
+			{Name: "--name <name>", Description: "Friendly computer name shown in OR3"},
+			{Name: "--no-service", Description: "Keep the connection in this terminal instead of installing a service"},
+			{Name: "--no-browser", Description: "Print the sign-in link without opening it"},
+			{Name: "--cloud-url <url>", Description: "Use a self-hosted or staging OR3 Cloud endpoint"},
+		},
+		Examples: []string{"or3-intern connect", "or3-intern connect --name \"Studio Mac\"", "or3-intern connect status", "or3-intern connect disconnect"},
+	},
 	"configure": {
 		Usage:   "or3-intern configure [--section provider|storage|runtime|context|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",
 		Summary: "Advanced configuration wizard for manual or scripted edits.",

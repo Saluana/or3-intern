@@ -236,6 +236,17 @@ func main() {
 			}
 			cmd = "chat"
 			args = []string{"chat"}
+		case "connect":
+			ctx, cancel := connectSignalContext()
+			defer cancel()
+			if err := runConnectCommand(ctx, cfgPathOrDefault(cfgPath), args[1:], os.Stdout, os.Stderr); err != nil {
+				if isUsageError(err) {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				fmt.Fprintln(os.Stderr, "connect error:", err)
+				os.Exit(1)
+			}
 		}
 		if cmd != "chat" {
 			return
@@ -667,7 +678,7 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
-	case "config-path", "version", "configure", "init", "setup", "settings":
+	case "config-path", "version", "configure", "init", "setup", "settings", "connect":
 		return true
 	default:
 		return false

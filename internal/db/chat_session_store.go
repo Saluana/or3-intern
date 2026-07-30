@@ -180,6 +180,92 @@ func (d *DB) GetChatSessionMeta(ctx context.Context, sessionKey string) (ChatSes
 	return m, err
 }
 
+// SetChatSessionRunnerPreference overwrites runner/model preferences for a
+// session. Empty values intentionally clear existing preferences.
+func (d *DB) SetChatSessionRunnerPreference(ctx context.Context, sessionKey, runnerID, runnerLabel, runnerModel string) (ChatSessionMeta, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ChatSessionMeta{}, errors.New("session_key required")
+	}
+	now := NowMS()
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return ChatSessionMeta{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := ensureSessionTx(ctx, tx, sessionKey); err != nil {
+		return ChatSessionMeta{}, err
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO chat_session_meta(
+			session_key, host_id, title, runner_id, runner_label,
+			runner_chat_session_id, runner_continuation_mode, runner_model, runner_mode,
+			runner_isolation, runner_cwd, message_count, last_message_preview, last_message_at,
+			parent_session_key, fork_anchor_message_id, forked_from_runner_id, fork_strategy,
+			archived, created_at, updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(session_key) DO UPDATE SET
+			runner_id=excluded.runner_id,
+			runner_label=excluded.runner_label,
+			runner_model=excluded.runner_model,
+			updated_at=excluded.updated_at`,
+		sessionKey, "", "", strings.TrimSpace(runnerID), strings.TrimSpace(runnerLabel),
+		"", "", strings.TrimSpace(runnerModel), "",
+		"", "", 0, "", 0,
+		"", 0, "", "",
+		0, now, now,
+	)
+	if err != nil {
+		return ChatSessionMeta{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ChatSessionMeta{}, err
+	}
+	return d.GetChatSessionMeta(ctx, sessionKey)
+}
+
+// SetChatSessionRunnerCwd overwrites the working-directory preference for a
+// session. An empty value intentionally restores the service default.
+func (d *DB) SetChatSessionRunnerCwd(ctx context.Context, sessionKey, cwd string) (ChatSessionMeta, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ChatSessionMeta{}, errors.New("session_key required")
+	}
+	now := NowMS()
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return ChatSessionMeta{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := ensureSessionTx(ctx, tx, sessionKey); err != nil {
+		return ChatSessionMeta{}, err
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO chat_session_meta(
+			session_key, host_id, title, runner_id, runner_label,
+			runner_chat_session_id, runner_continuation_mode, runner_model, runner_mode,
+			runner_isolation, runner_cwd, message_count, last_message_preview, last_message_at,
+			parent_session_key, fork_anchor_message_id, forked_from_runner_id, fork_strategy,
+			archived, created_at, updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(session_key) DO UPDATE SET
+			runner_cwd=excluded.runner_cwd,
+			updated_at=excluded.updated_at`,
+		sessionKey, "", "", "", "",
+		"", "", "", "",
+		"", strings.TrimSpace(cwd), 0, "", 0,
+		"", 0, "", "",
+		0, now, now,
+	)
+	if err != nil {
+		return ChatSessionMeta{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ChatSessionMeta{}, err
+	}
+	return d.GetChatSessionMeta(ctx, sessionKey)
+}
+
 // ListChatSessions returns metadata rows ordered by updated_at DESC.
 func (d *DB) ListChatSessions(ctx context.Context, filter ChatSessionListFilter) ([]ChatSessionMeta, error) {
 	if filter.Limit <= 0 || filter.Limit > 200 {

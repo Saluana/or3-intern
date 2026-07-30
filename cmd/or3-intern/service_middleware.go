@@ -15,11 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
-	"or3-intern/internal/db"
 	or3log "or3-intern/internal/log"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/tools"
 )
 
@@ -168,7 +167,7 @@ func (l *serviceRateLimiter) Allow(r *http.Request, limit int) bool {
 }
 
 func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {
-	if s == nil || s.runtime == nil || s.runtime.Audit == nil || r == nil {
+	if s == nil || s.serviceAudit() == nil || r == nil {
 		return
 	}
 	identity := serviceAuthIdentityFromContext(r.Context())
@@ -184,7 +183,7 @@ func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {
 	if remote := remoteIPKey(r.RemoteAddr); remote != "" {
 		payload["remote_addr"] = remote
 	}
-	_ = s.runtime.Audit.Record(r.Context(), "service.request", "", identity.Actor, payload)
+	_ = s.serviceAudit().Record(r.Context(), "service.request", "", identity.Actor, payload)
 }
 
 func serviceRequestIDFromContext(ctx context.Context) string {
@@ -211,7 +210,7 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, statusCode int, p
 		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
 	}
 	payload := serviceErrorPayload(r, public)
-	if code := agent.PublicErrorCode(err); code != "" {
+	if code := serviceerrors.PublicErrorCode(err); code != "" {
 		payload["code"] = code
 	}
 	writeServiceJSON(w, statusCode, payload)
@@ -522,23 +521,6 @@ func serviceApprovalRequiredPayload(sessionKey string, meta map[string]any, err 
 	return payload
 }
 
-func serviceTurnFallbackText(err error, observer *serviceObserver) (string, bool) {
-	if err == nil || !strings.Contains(err.Error(), "max tool loops exceeded") {
-		return "", false
-	}
-	message := "I couldn't finish that because the tool calls kept failing or looping."
-	if observer != nil {
-		lastToolError := strings.TrimSpace(observer.lastToolError)
-		if lastToolError != "" {
-			if len(lastToolError) > 180 {
-				lastToolError = lastToolError[:180] + "..."
-			}
-			message += " Last tool error: " + lastToolError
-		}
-	}
-	return message, true
-}
-
 func remoteIPKey(raw string) string {
 	addr := strings.TrimSpace(raw)
 	if addr == "" {
@@ -556,40 +538,6 @@ func remoteIPKey(raw string) string {
 
 func newServiceRequestID() string {
 	return strconv.FormatInt(time.Now().UnixNano(), 36)
-}
-
-func validateServiceToolCapabilities(registry *tools.Registry, names []string, maxCapability string) error {
-	ceiling := tools.CapabilityLevel(strings.ToLower(strings.TrimSpace(maxCapability)))
-	if ceiling == "" || registry == nil || len(names) == 0 {
-		return nil
-	}
-	for _, name := range names {
-		toolName := strings.TrimSpace(name)
-		if toolName == "" {
-			continue
-		}
-		tool := registry.Get(toolName)
-		if tool == nil {
-			continue
-		}
-		if capabilityRank(tools.ToolCapability(tool, nil)) > capabilityRank(ceiling) {
-			return fmt.Errorf("tool exceeds service capability ceiling: %s", toolName)
-		}
-	}
-	return nil
-}
-
-func capabilityRank(level tools.CapabilityLevel) int {
-	switch level {
-	case tools.CapabilityPrivileged:
-		return 3
-	case tools.CapabilityGuarded:
-		return 2
-	case tools.CapabilitySafe:
-		return 1
-	default:
-		return 0
-	}
 }
 
 func beginSSE(w http.ResponseWriter) error {
@@ -743,7 +691,7 @@ func serviceLifecyclePayload(sessionKey string, meta map[string]any, extra map[s
 
 func isTerminalStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "failed", "aborted", db.SubagentStatusSucceeded, db.SubagentStatusInterrupted:
+	case "completed", "failed", "aborted":
 		return true
 	default:
 		return false

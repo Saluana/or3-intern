@@ -15,9 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/bus"
 	"or3-intern/internal/db"
+	"or3-intern/internal/streaming"
 )
 
 const (
@@ -1002,7 +1002,7 @@ func classifyRuntimeLogLine(text string) string {
 func (o bridgeObserver) OnTextDelta(context.Context, string) {}
 
 func (o bridgeObserver) OnToolCall(ctx context.Context, name string, arguments string) {
-	o.bridge.emit(chatToolCallMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, arguments: arguments})
+	o.bridge.emit(chatToolCallMsg{sessionKey: streaming.ConversationSessionFromContext(ctx), name: name, arguments: arguments})
 }
 
 func (o bridgeObserver) OnToolResult(ctx context.Context, name string, result string, err error) {
@@ -1010,18 +1010,18 @@ func (o bridgeObserver) OnToolResult(ctx context.Context, name string, result st
 	if err != nil {
 		errText = err.Error()
 	}
-	o.bridge.emit(chatToolResultMsg{sessionKey: agent.ConversationSessionFromContext(ctx), name: name, result: result, err: errText})
+	o.bridge.emit(chatToolResultMsg{sessionKey: streaming.ConversationSessionFromContext(ctx), name: name, result: result, err: errText})
 }
 
 func (o bridgeObserver) OnCompletion(context.Context, string, bool) {}
 
 func (o bridgeObserver) OnError(ctx context.Context, err error) {
 	if err != nil {
-		o.bridge.emit(chatErrorMsg{sessionKey: agent.ConversationSessionFromContext(ctx), err: err.Error()})
+		o.bridge.emit(chatErrorMsg{sessionKey: streaming.ConversationSessionFromContext(ctx), err: err.Error()})
 	}
 }
 
-func (d *Deliverer) Observer() agent.ConversationObserver {
+func (d *Deliverer) Observer() streaming.ConversationObserver {
 	if d == nil || d.bridge == nil {
 		return nil
 	}

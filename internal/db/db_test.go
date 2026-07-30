@@ -164,7 +164,7 @@ func TestOpen_InvalidPath(t *testing.T) {
 func TestOpen_CreatesApprovalAndPairingTables(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	for _, table := range []string{"paired_devices", "pairing_requests", "approval_requests", "approval_allowlists", "approval_tokens", "skill_run_plans"} {
+	for _, table := range []string{"paired_devices", "pairing_requests", "approval_requests", "approval_allowlists", "approval_tokens"} {
 		row := d.SQL.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table)
 		var name string
 		if err := row.Scan(&name); err != nil {
@@ -200,9 +200,6 @@ func TestApprovalStore_RoundTripAndReopen(t *testing.T) {
 	}
 	if _, err := d.CreateApprovalAllowlist(ctx, ApprovalAllowlistRecord{Domain: "exec", ScopeJSON: `{"host_id":"local"}`, MatcherJSON: `{"program":"echo"}`, CreatedBy: "cli", CreatedAt: 5}); err != nil {
 		t.Fatalf("CreateApprovalAllowlist: %v", err)
-	}
-	if _, err := d.CreateSkillRunPlan(ctx, SkillRunPlanRecord{SkillID: "runner", SkillDir: "/tmp/runner", Entrypoint: "hello", TimeoutSeconds: 30, CommandJSON: `["bash","/tmp/runner/tool.sh"]`, ScriptHash: "hash", EnvBindingHash: "env", PlanHash: "plan", ExecutionHostID: "local", Status: "pending_approval", CreatedAt: 6}); err != nil {
-		t.Fatalf("CreateSkillRunPlan: %v", err)
 	}
 	if _, err := d.UpsertPairedDevice(ctx, PairedDeviceRecord{DeviceID: pairing.DeviceID, Role: pairing.Role, DisplayName: pairing.DisplayName, TokenHash: []byte("token"), Status: "active", CreatedAt: 6, LastSeenAt: 6}); err != nil {
 		t.Fatalf("UpsertPairedDevice: %v", err)
@@ -1042,355 +1039,6 @@ func TestResetSessionHistory(t *testing.T) {
 	}
 }
 
-func TestOpen_CreatesSubagentJobsTable(t *testing.T) {
-	d := openTestDB(t)
-	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='subagent_jobs'`)
-	var name string
-	if err := row.Scan(&name); err != nil {
-		t.Fatalf("expected subagent_jobs table, got err=%v", err)
-	}
-	if name != "subagent_jobs" {
-		t.Fatalf("expected subagent_jobs table, got %q", name)
-	}
-}
-
-func TestSubagentJobs_Lifecycle(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-1",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-1",
-		Channel:          "cli",
-		ReplyTo:          "user",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	queued, err := d.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		t.Fatalf("ListQueuedSubagentJobs: %v", err)
-	}
-	if len(queued) != 1 || queued[0].ID != job.ID {
-		t.Fatalf("expected queued job, got %#v", queued)
-	}
-	claimed, err := d.ClaimNextSubagentJob(ctx)
-	if err != nil {
-		t.Fatalf("ClaimNextSubagentJob: %v", err)
-	}
-	if claimed == nil || claimed.Status != SubagentStatusRunning || claimed.Attempts != 1 {
-		t.Fatalf("expected running claimed job, got %#v", claimed)
-	}
-	if err := d.MarkSubagentSucceeded(ctx, job.ID, "preview", "artifact-1"); err != nil {
-		t.Fatalf("MarkSubagentSucceeded: %v", err)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected stored job")
-	}
-	if stored.Status != SubagentStatusSucceeded || stored.ResultPreview != "preview" || stored.ArtifactID != "artifact-1" || stored.FinishedAt == 0 {
-		t.Fatalf("unexpected stored job after success: %#v", stored)
-	}
-}
-
-func TestSubagentJobs_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{ID: "job-concurrent", ParentSessionKey: "parent", ChildSessionKey: "child", Task: "do work"}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	claimedIDs := make(chan string, 8)
-	errs := make(chan error, 8)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			claimed, err := d.ClaimNextSubagentJob(ctx)
-			if err != nil {
-				errs <- err
-				return
-			}
-			if claimed != nil {
-				claimedIDs <- claimed.ID
-			}
-		}()
-	}
-	close(start)
-	wg.Wait()
-	close(errs)
-	close(claimedIDs)
-	for err := range errs {
-		t.Fatalf("ClaimNextSubagentJob: %v", err)
-	}
-	var got []string
-	for id := range claimedIDs {
-		got = append(got, id)
-	}
-	if len(got) != 1 || got[0] != job.ID {
-		t.Fatalf("expected exactly one claimer for %q, got %#v", job.ID, got)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok || stored.Status != SubagentStatusRunning || stored.Attempts != 1 {
-		t.Fatalf("expected single running claimed job, got ok=%v job=%#v", ok, stored)
-	}
-}
-
-func TestSubagentJobs_ReconcileRunning(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-2",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-2",
-		Channel:          "cli",
-		ReplyTo:          "user",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, job.ParentSessionKey, "user", "start", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
-		t.Fatalf("MarkSubagentRunning: %v", err)
-	}
-	if err := d.MarkRunningSubagentsInterrupted(ctx, "restart"); err != nil {
-		t.Fatalf("MarkRunningSubagentsInterrupted: %v", err)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected stored job")
-	}
-	if stored.Status != SubagentStatusInterrupted || stored.ErrorText != "restart" || stored.FinishedAt == 0 {
-		t.Fatalf("unexpected interrupted job: %#v", stored)
-	}
-}
-
-func TestSubagentJobs_ListRunning(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-running-list",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-running-list",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
-		t.Fatalf("MarkSubagentRunning: %v", err)
-	}
-	running, err := d.ListRunningSubagentJobs(ctx)
-	if err != nil {
-		t.Fatalf("ListRunningSubagentJobs: %v", err)
-	}
-	if len(running) != 1 || running[0].ID != job.ID {
-		t.Fatalf("expected running job list to include %q, got %#v", job.ID, running)
-	}
-}
-
-func TestSubagentJobs_EnqueueWithLimit(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			errCh <- d.EnqueueSubagentJobLimited(ctx, SubagentJob{
-				ID:               "job-limit-" + string(rune('a'+i)),
-				ParentSessionKey: "parent",
-				ChildSessionKey:  "parent:subagent:" + string(rune('a'+i)),
-				Task:             "do work",
-			}, 1)
-		}(i)
-	}
-	wg.Wait()
-	close(errCh)
-	var successCount int
-	var fullCount int
-	for err := range errCh {
-		switch {
-		case err == nil:
-			successCount++
-		case errors.Is(err, ErrSubagentQueueFull):
-			fullCount++
-		default:
-			t.Fatalf("unexpected enqueue error: %v", err)
-		}
-	}
-	if successCount != 1 || fullCount != 1 {
-		t.Fatalf("expected one success and one queue-full error, got success=%d full=%d", successCount, fullCount)
-	}
-	queued, err := d.ListQueuedSubagentJobs(ctx)
-	if err != nil {
-		t.Fatalf("ListQueuedSubagentJobs: %v", err)
-	}
-	if len(queued) != 1 {
-		t.Fatalf("expected exactly one queued job, got %#v", queued)
-	}
-}
-
-func TestSubagentJobs_ListSubagentJobs(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	now := NowMS()
-	enqueue := func(id, parent, status string, requestedAt, finishedAt int64) {
-		t.Helper()
-		job := SubagentJob{
-			ID:               id,
-			ParentSessionKey: parent,
-			ChildSessionKey:  parent + ":subagent:" + id,
-			Task:             "task " + id,
-			Status:           status,
-			RequestedAt:      requestedAt,
-			FinishedAt:       finishedAt,
-			MetadataJSON:     `{"secret":"do-not-leak"}`,
-		}
-		if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-			t.Fatalf("EnqueueSubagentJob %s: %v", id, err)
-		}
-	}
-	enqueue("a-queued", "alice", SubagentStatusQueued, now-3000, 0)
-	enqueue("b-running", "alice", SubagentStatusRunning, now-2000, 0)
-	enqueue("c-succeeded", "bob", SubagentStatusSucceeded, now-5000, now-1000)
-	enqueue("d-failed", "alice", SubagentStatusFailed, now-4500, now-500)
-	enqueue("e-interrupted", "alice", SubagentStatusInterrupted, now-4000, now-100)
-
-	t.Run("default returns newest first", func(t *testing.T) {
-		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{})
-		if err != nil {
-			t.Fatalf("ListSubagentJobs: %v", err)
-		}
-		if len(jobs) != 5 {
-			t.Fatalf("want 5 jobs, got %d", len(jobs))
-		}
-		if jobs[0].ID != "e-interrupted" {
-			t.Fatalf("want newest activity first, got %s", jobs[0].ID)
-		}
-	})
-
-	t.Run("active filter", func(t *testing.T) {
-		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: "active"})
-		if err != nil {
-			t.Fatalf("ListSubagentJobs active: %v", err)
-		}
-		if len(jobs) != 2 {
-			t.Fatalf("want 2 active jobs, got %d", len(jobs))
-		}
-		for _, job := range jobs {
-			if job.Status != SubagentStatusQueued && job.Status != SubagentStatusRunning {
-				t.Fatalf("unexpected status %q in active filter", job.Status)
-			}
-		}
-	})
-
-	t.Run("terminal filter", func(t *testing.T) {
-		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: "terminal"})
-		if err != nil {
-			t.Fatalf("ListSubagentJobs terminal: %v", err)
-		}
-		if len(jobs) != 3 {
-			t.Fatalf("want 3 terminal jobs, got %d", len(jobs))
-		}
-	})
-
-	t.Run("specific status filter", func(t *testing.T) {
-		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: SubagentStatusFailed})
-		if err != nil {
-			t.Fatalf("ListSubagentJobs failed: %v", err)
-		}
-		if len(jobs) != 1 || jobs[0].ID != "d-failed" {
-			t.Fatalf("want d-failed, got %#v", jobs)
-		}
-	})
-
-	t.Run("parent session filter", func(t *testing.T) {
-		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{ParentSessionKey: "bob"})
-		if err != nil {
-			t.Fatalf("ListSubagentJobs parent: %v", err)
-		}
-		if len(jobs) != 1 || jobs[0].ID != "c-succeeded" {
-			t.Fatalf("want c-succeeded, got %#v", jobs)
-		}
-	})
-
-	t.Run("limit applied", func(t *testing.T) {
-		jobs, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Limit: 2})
-		if err != nil {
-			t.Fatalf("ListSubagentJobs limit: %v", err)
-		}
-		if len(jobs) != 2 {
-			t.Fatalf("want 2 jobs, got %d", len(jobs))
-		}
-	})
-
-	t.Run("invalid status rejected", func(t *testing.T) {
-		_, err := d.ListSubagentJobs(ctx, SubagentJobFilter{Status: "bogus"})
-		if err == nil {
-			t.Fatal("expected error for invalid status filter")
-		}
-	})
-}
-
-func TestSubagentJobs_FinalizePersistsSummaryAtomically(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "job-finalize",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "parent:subagent:job-finalize",
-		Task:             "do work",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	if _, err := d.AppendMessage(ctx, job.ParentSessionKey, "user", "start", nil); err != nil {
-		t.Fatalf("AppendMessage parent: %v", err)
-	}
-	if err := d.MarkSubagentRunning(ctx, job.ID); err != nil {
-		t.Fatalf("MarkSubagentRunning: %v", err)
-	}
-	if err := d.FinalizeSubagentJob(ctx, job, SubagentStatusSucceeded, "done", "artifact-1", "", "summary text", map[string]any{"subagent_job_id": job.ID}); err != nil {
-		t.Fatalf("FinalizeSubagentJob: %v", err)
-	}
-	stored, ok, err := d.GetSubagentJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetSubagentJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected stored job")
-	}
-	if stored.Status != SubagentStatusSucceeded || stored.ResultPreview != "done" || stored.ArtifactID != "artifact-1" {
-		t.Fatalf("unexpected finalized job: %#v", stored)
-	}
-	msgs, err := d.GetLastMessages(ctx, job.ParentSessionKey, 10)
-	if err != nil {
-		t.Fatalf("GetLastMessages: %v", err)
-	}
-	if len(msgs) == 0 || msgs[len(msgs)-1].Content != "summary text" {
-		t.Fatalf("expected parent summary message, got %#v", msgs)
-	}
-}
-
 func TestLinkSession(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -1578,10 +1226,10 @@ func TestBackupRestore_PreservesCurrentSchemaAndData(t *testing.T) {
 	}
 
 	var count int
-	if err := restored.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('messages','memory_pinned','memory_docs','subagent_jobs')`).Scan(&count); err != nil {
+	if err := restored.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('messages','memory_pinned','memory_docs')`).Scan(&count); err != nil {
 		t.Fatalf("schema table count: %v", err)
 	}
-	if count != 4 {
+	if count != 3 {
 		t.Fatalf("expected restored backup to preserve current schema, got %d tables", count)
 	}
 }
@@ -2630,35 +2278,35 @@ func TestDiagnosticLogEventQueryBoundsAndPattern(t *testing.T) {
 	}
 }
 
-func TestOpen_CreatesAgentCLIRunsTable(t *testing.T) {
+func TestOpen_CreatesRunnerRunsTable(t *testing.T) {
 	d := openTestDB(t)
-	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_cli_runs'`)
+	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='runner_runs'`)
 	var name string
 	if err := row.Scan(&name); err != nil {
-		t.Fatalf("expected agent_cli_runs table, got err=%v", err)
+		t.Fatalf("expected runner_runs table, got err=%v", err)
 	}
-	if name != "agent_cli_runs" {
-		t.Fatalf("expected agent_cli_runs table, got %q", name)
+	if name != "runner_runs" {
+		t.Fatalf("expected runner_runs table, got %q", name)
 	}
 }
 
-func TestOpen_CreatesAgentCLIEventsTable(t *testing.T) {
+func TestOpen_CreatesRunnerRunEventsTable(t *testing.T) {
 	d := openTestDB(t)
-	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='agent_cli_events'`)
+	row := d.SQL.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='runner_run_events'`)
 	var name string
 	if err := row.Scan(&name); err != nil {
-		t.Fatalf("expected agent_cli_events table, got err=%v", err)
+		t.Fatalf("expected runner_run_events table, got err=%v", err)
 	}
-	if name != "agent_cli_events" {
-		t.Fatalf("expected agent_cli_events table, got %q", name)
+	if name != "runner_run_events" {
+		t.Fatalf("expected runner_run_events table, got %q", name)
 	}
 }
 
-func TestAgentCLIRuns_Lifecycle(t *testing.T) {
+func TestRunnerRuns_Lifecycle(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	run := AgentCLIRun{
-		ID:               "acr-1",
+	run := RunnerRun{
+		ID:               "rr-1",
 		JobID:            "job-1",
 		ParentSessionKey: "parent",
 		RunnerID:         "codex",
@@ -2666,49 +2314,49 @@ func TestAgentCLIRuns_Lifecycle(t *testing.T) {
 		Mode:             "safe_edit",
 		Isolation:        "host_workspace_write",
 	}
-	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	if err := d.EnqueueRunnerRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueRunnerRun: %v", err)
 	}
-	queued, err := d.ListQueuedAgentCLIRuns(ctx)
+	queued, err := d.ListQueuedRunnerRuns(ctx)
 	if err != nil {
-		t.Fatalf("ListQueuedAgentCLIRuns: %v", err)
+		t.Fatalf("ListQueuedRunnerRuns: %v", err)
 	}
 	if len(queued) != 1 || queued[0].ID != run.ID {
 		t.Fatalf("expected queued run, got %#v", queued)
 	}
-	claimed, err := d.ClaimNextAgentCLIRun(ctx)
+	claimed, err := d.ClaimNextRunnerRun(ctx)
 	if err != nil {
-		t.Fatalf("ClaimNextAgentCLIRun: %v", err)
+		t.Fatalf("ClaimNextRunnerRun: %v", err)
 	}
-	if claimed == nil || claimed.Status != AgentCLIStatusRunning || claimed.Attempts != 1 {
+	if claimed == nil || claimed.Status != RunnerRunStatusRunning || claimed.Attempts != 1 {
 		t.Fatalf("expected running claimed run, got %#v", claimed)
 	}
-	if err := d.FinalizeAgentCLIRun(ctx, run.ID, AgentCLIFinalizeInput{
-		Status:           AgentCLIStatusSucceeded,
+	if err := d.FinalizeRunnerRun(ctx, run.ID, RunnerRunFinalizeInput{
+		Status:           RunnerRunStatusSucceeded,
 		ExitCode:         0,
 		StdoutPreview:    "all good",
 		FinalTextPreview: "tests fixed",
 		CompletedAt:      NowMS(),
 	}); err != nil {
-		t.Fatalf("FinalizeAgentCLIRun: %v", err)
+		t.Fatalf("FinalizeRunnerRun: %v", err)
 	}
-	stored, ok, err := d.GetAgentCLIRun(ctx, run.ID)
+	stored, ok, err := d.GetRunnerRun(ctx, run.ID)
 	if err != nil {
-		t.Fatalf("GetAgentCLIRun: %v", err)
+		t.Fatalf("GetRunnerRun: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected stored run")
 	}
-	if stored.Status != AgentCLIStatusSucceeded || stored.StdoutPreview != "all good" || stored.FinalTextPreview != "tests fixed" {
+	if stored.Status != RunnerRunStatusSucceeded || stored.StdoutPreview != "all good" || stored.FinalTextPreview != "tests fixed" {
 		t.Fatalf("unexpected stored run after success: %#v", stored)
 	}
 }
 
-func TestAgentCLIRuns_GetByJobID(t *testing.T) {
+func TestRunnerRuns_GetByJobID(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	run := AgentCLIRun{
-		ID:               "acr-2",
+	run := RunnerRun{
+		ID:               "rr-2",
 		JobID:            "job-2",
 		ParentSessionKey: "parent",
 		RunnerID:         "opencode",
@@ -2716,23 +2364,23 @@ func TestAgentCLIRuns_GetByJobID(t *testing.T) {
 		Mode:             "safe_edit",
 		Isolation:        "host_workspace_write",
 	}
-	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	if err := d.EnqueueRunnerRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueRunnerRun: %v", err)
 	}
-	stored, ok, err := d.GetAgentCLIRun(ctx, "job-2")
+	stored, ok, err := d.GetRunnerRun(ctx, "job-2")
 	if err != nil {
-		t.Fatalf("GetAgentCLIRun by job_id: %v", err)
+		t.Fatalf("GetRunnerRun by job_id: %v", err)
 	}
-	if !ok || stored.ID != "acr-2" {
+	if !ok || stored.ID != "rr-2" {
 		t.Fatalf("expected run by job_id, got ok=%v run=%#v", ok, stored)
 	}
 }
 
-func TestAgentCLIRuns_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
+func TestRunnerRuns_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	run := AgentCLIRun{
-		ID:               "acr-concurrent",
+	run := RunnerRun{
+		ID:               "rr-concurrent",
 		JobID:            "job-concurrent",
 		ParentSessionKey: "parent",
 		RunnerID:         "codex",
@@ -2740,8 +2388,8 @@ func TestAgentCLIRuns_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
 		Mode:             "safe_edit",
 		Isolation:        "host_workspace_write",
 	}
-	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	if err := d.EnqueueRunnerRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueRunnerRun: %v", err)
 	}
 
 	start := make(chan struct{})
@@ -2753,7 +2401,7 @@ func TestAgentCLIRuns_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			claimed, err := d.ClaimNextAgentCLIRun(ctx)
+			claimed, err := d.ClaimNextRunnerRun(ctx)
 			if err != nil {
 				errs <- err
 				return
@@ -2768,7 +2416,7 @@ func TestAgentCLIRuns_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
 	close(errs)
 	close(claimedIDs)
 	for err := range errs {
-		t.Fatalf("ClaimNextAgentCLIRun: %v", err)
+		t.Fatalf("ClaimNextRunnerRun: %v", err)
 	}
 	var got []string
 	for id := range claimedIDs {
@@ -2779,11 +2427,11 @@ func TestAgentCLIRuns_ConcurrentClaimNextClaimsOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestAgentCLIRuns_ReconcileRunning(t *testing.T) {
+func TestRunnerRuns_ReconcileRunning(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	run := AgentCLIRun{
-		ID:               "acr-reconcile",
+	run := RunnerRun{
+		ID:               "rr-reconcile",
 		JobID:            "job-reconcile",
 		ParentSessionKey: "parent",
 		RunnerID:         "codex",
@@ -2791,44 +2439,44 @@ func TestAgentCLIRuns_ReconcileRunning(t *testing.T) {
 		Mode:             "safe_edit",
 		Isolation:        "host_workspace_write",
 	}
-	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	if err := d.EnqueueRunnerRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueRunnerRun: %v", err)
 	}
-	claimed, err := d.ClaimNextAgentCLIRun(ctx)
+	claimed, err := d.ClaimNextRunnerRun(ctx)
 	if err != nil {
-		t.Fatalf("ClaimNextAgentCLIRun: %v", err)
+		t.Fatalf("ClaimNextRunnerRun: %v", err)
 	}
-	if claimed == nil || claimed.Status != AgentCLIStatusRunning {
+	if claimed == nil || claimed.Status != RunnerRunStatusRunning {
 		t.Fatalf("expected running, got %#v", claimed)
 	}
-	if err := d.MarkRunningAgentCLIRunsAborted(ctx, "restart"); err != nil {
-		t.Fatalf("MarkRunningAgentCLIRunsAborted: %v", err)
+	if err := d.MarkRunningRunnerRunsAborted(ctx, "restart"); err != nil {
+		t.Fatalf("MarkRunningRunnerRunsAborted: %v", err)
 	}
-	stored, _, err := d.GetAgentCLIRun(ctx, run.ID)
+	stored, _, err := d.GetRunnerRun(ctx, run.ID)
 	if err != nil {
-		t.Fatalf("GetAgentCLIRun: %v", err)
+		t.Fatalf("GetRunnerRun: %v", err)
 	}
-	if stored.Status != AgentCLIStatusAborted {
+	if stored.Status != RunnerRunStatusAborted {
 		t.Fatalf("expected aborted after reconcile, got %q", stored.Status)
 	}
 }
 
-func TestAgentCLIRuns_Events(t *testing.T) {
+func TestRunnerRuns_Events(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	events := []AgentCLIEvent{
-		{RunID: "acr-events", JobID: "job-events", Seq: 1, TS: "2025-01-01T00:00:00Z", Type: "started", Stream: "", Chunk: "", PayloadJSON: `{"runner_id":"codex"}`},
-		{RunID: "acr-events", JobID: "job-events", Seq: 2, TS: "2025-01-01T00:00:01Z", Type: "output", Stream: "stdout", Chunk: "hello", PayloadJSON: ""},
-		{RunID: "acr-events", JobID: "job-events", Seq: 3, TS: "2025-01-01T00:00:02Z", Type: "completion", Stream: "", Chunk: "", PayloadJSON: `{"exit_code":0}`},
+	events := []RunnerRunEvent{
+		{RunID: "rr-events", JobID: "job-events", Seq: 1, TS: "2025-01-01T00:00:00Z", Type: "started", Stream: "", Chunk: "", PayloadJSON: `{"runner_id":"codex"}`},
+		{RunID: "rr-events", JobID: "job-events", Seq: 2, TS: "2025-01-01T00:00:01Z", Type: "output", Stream: "stdout", Chunk: "hello", PayloadJSON: ""},
+		{RunID: "rr-events", JobID: "job-events", Seq: 3, TS: "2025-01-01T00:00:02Z", Type: "completion", Stream: "", Chunk: "", PayloadJSON: `{"exit_code":0}`},
 	}
 	for _, e := range events {
-		if err := d.AppendAgentCLIEvent(ctx, e); err != nil {
-			t.Fatalf("AppendAgentCLIEvent seq=%d: %v", e.Seq, err)
+		if err := d.AppendRunnerRunEvent(ctx, e); err != nil {
+			t.Fatalf("AppendRunnerRunEvent seq=%d: %v", e.Seq, err)
 		}
 	}
-	list, err := d.ListAgentCLIEvents(ctx, "job-events", 0, 100)
+	list, err := d.ListRunnerRunEvents(ctx, "job-events", 0, 100)
 	if err != nil {
-		t.Fatalf("ListAgentCLIEvents: %v", err)
+		t.Fatalf("ListRunnerRunEvents: %v", err)
 	}
 	if len(list) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(list))
@@ -2838,9 +2486,9 @@ func TestAgentCLIRuns_Events(t *testing.T) {
 			t.Errorf("event %d: expected seq=%d, got %d", i, int64(i+1), e.Seq)
 		}
 	}
-	after, err := d.ListAgentCLIEvents(ctx, "job-events", 1, 100)
+	after, err := d.ListRunnerRunEvents(ctx, "job-events", 1, 100)
 	if err != nil {
-		t.Fatalf("ListAgentCLIEvents after_seq=1: %v", err)
+		t.Fatalf("ListRunnerRunEvents after_seq=1: %v", err)
 	}
 	if len(after) != 2 {
 		t.Fatalf("expected 2 events after seq 1, got %d", len(after))
@@ -2850,27 +2498,27 @@ func TestAgentCLIRuns_Events(t *testing.T) {
 	}
 }
 
-func TestAgentCLIRuns_EventUniqueConstraint(t *testing.T) {
+func TestRunnerRuns_EventUniqueConstraint(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	e := AgentCLIEvent{RunID: "acr-dup", JobID: "job-dup", Seq: 1, TS: "2025-01-01T00:00:00Z", Type: "started"}
-	if err := d.AppendAgentCLIEvent(ctx, e); err != nil {
-		t.Fatalf("AppendAgentCLIEvent: %v", err)
+	e := RunnerRunEvent{RunID: "rr-dup", JobID: "job-dup", Seq: 1, TS: "2025-01-01T00:00:00Z", Type: "started"}
+	if err := d.AppendRunnerRunEvent(ctx, e); err != nil {
+		t.Fatalf("AppendRunnerRunEvent: %v", err)
 	}
-	if err := d.AppendAgentCLIEvent(ctx, e); err != nil {
-		t.Fatalf("second AppendAgentCLIEvent should be no-op, got: %v", err)
+	if err := d.AppendRunnerRunEvent(ctx, e); err != nil {
+		t.Fatalf("second AppendRunnerRunEvent should be no-op, got: %v", err)
 	}
-	list, _ := d.ListAgentCLIEvents(ctx, "job-dup", 0, 100)
+	list, _ := d.ListRunnerRunEvents(ctx, "job-dup", 0, 100)
 	if len(list) != 1 {
 		t.Fatalf("expected 1 event (dedup), got %d", len(list))
 	}
 }
 
-func TestAgentCLIRuns_AbortQueued(t *testing.T) {
+func TestRunnerRuns_AbortQueued(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	run := AgentCLIRun{
-		ID:               "acr-abort",
+	run := RunnerRun{
+		ID:               "rr-abort",
 		JobID:            "job-abort",
 		ParentSessionKey: "parent",
 		RunnerID:         "claude",
@@ -2878,27 +2526,27 @@ func TestAgentCLIRuns_AbortQueued(t *testing.T) {
 		Mode:             "review",
 		Isolation:        "host_readonly",
 	}
-	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	if err := d.EnqueueRunnerRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueRunnerRun: %v", err)
 	}
-	aborted, changed, err := d.AbortQueuedAgentCLIRun(ctx, "acr-abort", "user cancelled")
+	aborted, changed, err := d.AbortQueuedRunnerRun(ctx, "rr-abort", "user cancelled")
 	if err != nil {
-		t.Fatalf("AbortQueuedAgentCLIRun: %v", err)
+		t.Fatalf("AbortQueuedRunnerRun: %v", err)
 	}
 	if !changed {
 		t.Fatal("expected change")
 	}
-	if aborted.Status != AgentCLIStatusAborted || aborted.ErrorMessage != "user cancelled" {
+	if aborted.Status != RunnerRunStatusAborted || aborted.ErrorMessage != "user cancelled" {
 		t.Fatalf("unexpected aborted run: %#v", aborted)
 	}
 }
 
-func TestAgentCLIRuns_EnqueueWithLimit(t *testing.T) {
+func TestRunnerRuns_EnqueueWithLimit(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	for i := 0; i < 4; i++ {
-		run := AgentCLIRun{
-			ID:               fmt.Sprintf("acr-limit-%d", i),
+		run := RunnerRun{
+			ID:               fmt.Sprintf("rr-limit-%d", i),
 			JobID:            fmt.Sprintf("job-limit-%d", i),
 			ParentSessionKey: "parent",
 			RunnerID:         "codex",
@@ -2906,39 +2554,39 @@ func TestAgentCLIRuns_EnqueueWithLimit(t *testing.T) {
 			Mode:             "safe_edit",
 			Isolation:        "host_workspace_write",
 		}
-		if err := d.EnqueueAgentCLIRunLimited(ctx, run, 3); err != nil {
-			if errors.Is(err, ErrAgentCLIQueueFull) && i >= 3 {
+		if err := d.EnqueueRunnerRunLimited(ctx, run, 3); err != nil {
+			if errors.Is(err, ErrRunnerRunQueueFull) && i >= 3 {
 				continue
 			}
-			t.Fatalf("EnqueueAgentCLIRunLimited i=%d: %v", i, err)
+			t.Fatalf("EnqueueRunnerRunLimited i=%d: %v", i, err)
 		}
 	}
-	queued, err := d.ListQueuedAgentCLIRuns(ctx)
+	queued, err := d.ListQueuedRunnerRuns(ctx)
 	if err != nil {
-		t.Fatalf("ListQueuedAgentCLIRuns: %v", err)
+		t.Fatalf("ListQueuedRunnerRuns: %v", err)
 	}
 	if len(queued) != 3 {
 		t.Fatalf("expected 3 queued, got %d", len(queued))
 	}
 }
 
-func TestFinalizeAgentCLIRun_ErrNoRowsWhenNotRunning(t *testing.T) {
+func TestFinalizeRunnerRun_ErrNoRowsWhenNotRunning(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	run := AgentCLIRun{
-		ID:               "acr-noop",
+	run := RunnerRun{
+		ID:               "rr-noop",
 		JobID:            "job-noop",
 		ParentSessionKey: "parent",
 		RunnerID:         "codex",
 		Task:             "will not run",
 		Mode:             "safe_edit",
 	}
-	if err := d.EnqueueAgentCLIRun(ctx, run); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
+	if err := d.EnqueueRunnerRun(ctx, run); err != nil {
+		t.Fatalf("EnqueueRunnerRun: %v", err)
 	}
 	// Finalize while still queued should return ErrNoRows.
-	err := d.FinalizeAgentCLIRun(ctx, run.ID, AgentCLIFinalizeInput{
-		Status:      AgentCLIStatusSucceeded,
+	err := d.FinalizeRunnerRun(ctx, run.ID, RunnerRunFinalizeInput{
+		Status:      RunnerRunStatusSucceeded,
 		ExitCode:    0,
 		CompletedAt: NowMS(),
 	})
@@ -2946,96 +2594,13 @@ func TestFinalizeAgentCLIRun_ErrNoRowsWhenNotRunning(t *testing.T) {
 		t.Fatalf("expected sql.ErrNoRows for non-running run, got %v", err)
 	}
 	// Finalize non-existent run should also return ErrNoRows.
-	err = d.FinalizeAgentCLIRun(ctx, "nonexistent", AgentCLIFinalizeInput{
-		Status:      AgentCLIStatusSucceeded,
+	err = d.FinalizeRunnerRun(ctx, "nonexistent", RunnerRunFinalizeInput{
+		Status:      RunnerRunStatusSucceeded,
 		ExitCode:    0,
 		CompletedAt: NowMS(),
 	})
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected sql.ErrNoRows for missing run, got %v", err)
-	}
-}
-
-func TestFinalizeSubagentJob_ErrNoRowsWhenNotRunning(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-	job := SubagentJob{
-		ID:               "sub-noop",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "child",
-		Task:             "will not run",
-	}
-	if err := d.EnqueueSubagentJob(ctx, job); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	// Finalize while still queued should return ErrNoRows.
-	err := d.FinalizeSubagentJob(ctx, job, SubagentStatusSucceeded, "", "", "", "", "")
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("expected sql.ErrNoRows for non-running job, got %v", err)
-	}
-}
-
-func TestSubagentAndAgentCLI_LifecycleTransitionsMatch(t *testing.T) {
-	d := openTestDB(t)
-	ctx := context.Background()
-
-	// Both stores should reject finalization when not in running state.
-	sj := SubagentJob{
-		ID:               "dual-job",
-		ParentSessionKey: "parent",
-		ChildSessionKey:  "child",
-		Task:             "dual",
-	}
-	ar := AgentCLIRun{
-		ID:               "dual-run",
-		JobID:            "dual-job-run",
-		ParentSessionKey: "parent",
-		RunnerID:         "codex",
-		Task:             "dual",
-		Mode:             "safe_edit",
-	}
-
-	if err := d.EnqueueSubagentJob(ctx, sj); err != nil {
-		t.Fatalf("EnqueueSubagentJob: %v", err)
-	}
-	if err := d.EnqueueAgentCLIRun(ctx, ar); err != nil {
-		t.Fatalf("EnqueueAgentCLIRun: %v", err)
-	}
-
-	// Both should reject non-running finalization.
-	if err := d.FinalizeSubagentJob(ctx, sj, SubagentStatusSucceeded, "", "", "", "", ""); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("subagent finalize non-running: expected ErrNoRows, got %v", err)
-	}
-	if err := d.FinalizeAgentCLIRun(ctx, ar.ID, AgentCLIFinalizeInput{
-		Status: AgentCLIStatusSucceeded, CompletedAt: NowMS(),
-	}); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("agent CLI finalize non-running: expected ErrNoRows, got %v", err)
-	}
-
-	// Both should support claiming and transition to running.
-	claimedJob, err := d.ClaimNextSubagentJob(ctx)
-	if err != nil {
-		t.Fatalf("ClaimNextSubagentJob: %v", err)
-	}
-	if claimedJob == nil || claimedJob.Status != SubagentStatusRunning {
-		t.Errorf("expected subagent to be claimed and running")
-	}
-	claimedRun, err := d.ClaimNextAgentCLIRun(ctx)
-	if err != nil {
-		t.Fatalf("ClaimNextAgentCLIRun: %v", err)
-	}
-	if claimedRun == nil || claimedRun.Status != AgentCLIStatusRunning {
-		t.Errorf("expected agent CLI run to be claimed and running")
-	}
-
-	// Both should successfully finalize from running state.
-	if err := d.FinalizeSubagentJob(ctx, *claimedJob, SubagentStatusSucceeded, "", "", "", "", ""); err != nil {
-		t.Errorf("subagent finalize running: %v", err)
-	}
-	if err := d.FinalizeAgentCLIRun(ctx, claimedRun.ID, AgentCLIFinalizeInput{
-		Status: AgentCLIStatusSucceeded, CompletedAt: NowMS(),
-	}); err != nil {
-		t.Errorf("agent CLI finalize running: %v", err)
 	}
 }
 

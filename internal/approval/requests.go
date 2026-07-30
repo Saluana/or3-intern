@@ -62,7 +62,6 @@ func (b *Broker) DenyRequest(ctx context.Context, requestID int64, actor string,
 	if err != nil {
 		return err
 	}
-	b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusDenied, firstNonEmpty(note, "approval denied"))
 	_ = b.audit(ctx, "approval.resolved", map[string]any{
 		"request_id": requestID, "subject_hash": req.SubjectHash,
 		"host_id": req.ExecutionHostID, "outcome": "denied", "actor": actor,
@@ -75,7 +74,6 @@ func (b *Broker) CancelRequest(ctx context.Context, requestID int64, actor strin
 	if err != nil {
 		return err
 	}
-	b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusCancelled, firstNonEmpty(note, "approval canceled"))
 	_ = b.audit(ctx, "approval.resolved", map[string]any{
 		"request_id": requestID, "subject_hash": req.SubjectHash,
 		"host_id": req.ExecutionHostID, "outcome": "canceled", "actor": actor,
@@ -89,25 +87,11 @@ func (b *Broker) ExpirePendingRequests(ctx context.Context, actor string) (int64
 	if err != nil {
 		return 0, err
 	}
-	for _, requestID := range expiredIDs {
-		b.syncSkillRunPlanResolution(ctx, requestID, db.SkillRunStatusExpired, "approval expired")
-	}
+	_ = expiredIDs
 	if count > 0 {
 		_ = b.audit(ctx, "approval.expired", map[string]any{"count": count, "actor": actor, "host_id": b.hostID()})
 	}
 	return count, nil
-}
-
-func (b *Broker) syncSkillRunPlanResolution(ctx context.Context, requestID int64, status string, lastError string) {
-	if b == nil || b.DB == nil || requestID <= 0 {
-		return
-	}
-	if _, err := b.DB.UpdateSkillRunPlansByApprovalRequest(ctx, requestID, []string{string(db.SkillRunStatusPendingApproval)}, status, strings.TrimSpace(lastError), b.now().UnixMilli()); err != nil {
-		_ = b.audit(ctx, "approval.plan_sync_failed", map[string]any{
-			"request_id": requestID, "status": strings.TrimSpace(status),
-			"error": err.Error(), "host_id": b.hostID(),
-		})
-	}
 }
 
 func (b *Broker) allowlistRecordFromRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (db.ApprovalAllowlistRecord, error) {
@@ -193,16 +177,4 @@ func (b *Broker) allowlistPayloadFromRequest(req db.ApprovalRequestRecord) (stri
 	default:
 		return "", "", AllowlistMatchKeys{}, nil
 	}
-}
-
-func (b *Broker) createAllowlistFromRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (int64, error) {
-	input, err := b.allowlistRecordFromRequest(ctx, req, actor)
-	if err != nil {
-		return 0, err
-	}
-	rec, err := b.AddAllowlistRecord(ctx, input)
-	if err != nil {
-		return 0, err
-	}
-	return rec.ID, nil
 }

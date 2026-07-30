@@ -100,107 +100,7 @@ func RegisterFirstSliceFields() {
 		UserIntents:      []string{"set custom provider key", "repair provider credentials"},
 	})
 
-	Register(ConfigFieldMetadata{
-		Section:          "provider",
-		Key:              "model",
-		Path:             "provider.model",
-		Label:            "Default Model",
-		Description:      "The default model to use for chat and agents",
-		Risk:             RiskSafe,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"change model", "switch to different ai model"},
-	})
-
-	// Tools and execution policy
-	Register(ConfigFieldMetadata{
-		Section:          "tools",
-		Key:              "enable_exec",
-		Path:             "tools.enableExec",
-		Label:            "Enable Shell Execution",
-		Description:      "Allow tools to execute shell commands",
-		Risk:             RiskDanger,
-		RestartRequired:  true,
-		RequiresApproval: true,
-		RequiresStepUp:   true,
-		Rollback: RollbackBehavior{
-			Safe:            true,
-			RestartRequired: true,
-		},
-		UserIntents: []string{"enable command execution", "allow shell commands"},
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "tools",
-		Key:              "exec_allowed_programs",
-		Path:             "tools.execAllowedPrograms",
-		Label:            "Allowed Programs",
-		Description:      "List of programs that can be executed by tools",
-		Risk:             RiskWarning,
-		RestartRequired:  true,
-		RequiresApproval: true,
-		RequiresStepUp:   true,
-		Rollback: RollbackBehavior{
-			Safe:            true,
-			RestartRequired: true,
-		},
-		UserIntents: []string{"add allowed program", "whitelist executable"},
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "tools",
-		Key:              "restrict_to_workspace",
-		Path:             "tools.restrictToWorkspace",
-		Label:            "Restrict to Workspace",
-		Description:      "Restrict file operations to workspace directory only",
-		Risk:             RiskNotice,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"restrict file access", "limit to workspace"},
-	})
-
 	// Hardening and security
-	Register(ConfigFieldMetadata{
-		Section:          "hardening",
-		Key:              "guarded_tools",
-		Path:             "hardening.guardedTools",
-		Label:            "Guarded Tools",
-		Description:      "Require approval for sensitive tool operations",
-		Risk:             RiskNotice,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"enable tool guards", "require approval for tools"},
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "hardening",
-		Key:              "privileged_tools",
-		Path:             "hardening.privilegedTools",
-		Label:            "Privileged Tools",
-		Description:      "Enable privileged tool mode with elevated permissions",
-		Risk:             RiskDanger,
-		RestartRequired:  true,
-		RequiresApproval: true,
-		RequiresStepUp:   true,
-		Rollback: RollbackBehavior{
-			Safe:            true,
-			RestartRequired: true,
-		},
-		UserIntents: []string{"enable privileged mode", "allow elevated tools"},
-	})
-
 	// Skills configuration
 	Register(ConfigFieldMetadata{
 		Section:          "skills",
@@ -453,40 +353,6 @@ func RegisterFirstSliceFields() {
 		UserIntents: []string{"require step-up", "enable extra verification"},
 	})
 
-	// Agent CLI configuration
-	Register(ConfigFieldMetadata{
-		Section:          "agentCLI",
-		Key:              "enabled",
-		Path:             "agentCLI.enabled",
-		Label:            "Enable External CLI Agents",
-		Description:      "Enable external agent CLI delegation",
-		Risk:             RiskWarning,
-		RestartRequired:  true,
-		RequiresApproval: true,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe:            true,
-			RestartRequired: true,
-		},
-		UserIntents: []string{"enable cli agents", "allow external agents"},
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "agentCLI",
-		Key:              "disabled_runners",
-		Path:             "agentCLI.disabledRunners",
-		Label:            "Disabled Runners",
-		Description:      "List of disabled runner IDs",
-		Risk:             RiskNotice,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback: RollbackBehavior{
-			Safe: true,
-		},
-		UserIntents: []string{"disable runner", "block specific agent"},
-	})
-
 	Register(ConfigFieldMetadata{
 		Section:          "admin_brain",
 		Key:              "provider_status",
@@ -514,20 +380,6 @@ func RegisterFirstSliceFields() {
 		RequiresStepUp:   false,
 		Rollback:         RollbackBehavior{Safe: true},
 		AdvancedOnly:     true,
-	})
-
-	Register(ConfigFieldMetadata{
-		Section:          "context",
-		Key:              "task_card_enforce_plan",
-		Path:             "context.taskCard.enforcePlan",
-		Label:            "Require plan before writes",
-		Description:      "Block write, exec, web, MCP, skill, and subagent tools until create_plan establishes an active task plan",
-		Risk:             RiskNotice,
-		RestartRequired:  false,
-		RequiresApproval: false,
-		RequiresStepUp:   false,
-		Rollback:         RollbackBehavior{Safe: true},
-		UserIntents:      []string{"require plan", "plan gate", "create plan before write"},
 	})
 
 	Register(ConfigFieldMetadata{

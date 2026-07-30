@@ -204,7 +204,6 @@ func TestRegisterFirstSliceFields(t *testing.T) {
 		{"provider", "api_base", "provider.apiBase"},
 		{"provider", "api_key", "provider.apiKey"},
 		{"provider", "openai_api_key", "providers.profiles.openai.apiKey"},
-		{"tools", "enable_exec", "tools.enableExec"},
 		{"service", "enabled", "service.enabled"},
 		{"skills", "trust_policy", "skills.trustPolicy"},
 		{"skills_entry", "enabled", "skills.entries.*.enabled"},
@@ -257,28 +256,24 @@ func TestRegisterFirstSliceFields(t *testing.T) {
 		}
 	})
 
-	t.Run("Enable exec is danger risk", func(t *testing.T) {
-		meta, ok := Get("tools", "enable_exec")
-		if !ok {
-			t.Error("Get(tools, enable_exec) returned false")
-			return
+	t.Run("Legacy runner-only fields are not registered", func(t *testing.T) {
+		removed := []struct {
+			section string
+			key     string
+			path    string
+		}{
+			{"provider", "model", "provider.model"},
+			{"hardening", "guarded_tools", "hardening.guardedTools"},
+			{"hardening", "privileged_tools", "hardening.privilegedTools"},
+			{"runners", "disabled_runners", "runners.disabledRunners"},
 		}
-		if meta.Risk != RiskDanger {
-			t.Errorf("Enable exec risk = %v, want %v", meta.Risk, RiskDanger)
-		}
-		if !meta.RestartRequired {
-			t.Error("Enable exec should require restart")
-		}
-	})
-
-	t.Run("Model selection is safe", func(t *testing.T) {
-		meta, ok := Get("provider", "model")
-		if !ok {
-			t.Error("Get(provider, model) returned false")
-			return
-		}
-		if meta.Risk != RiskSafe {
-			t.Errorf("Model risk = %v, want %v", meta.Risk, RiskSafe)
+		for _, field := range removed {
+			if meta, ok := Get(field.section, field.key); ok {
+				t.Fatalf("Get(%s, %s) returned stale metadata: %+v", field.section, field.key, meta)
+			}
+			if meta, ok := GetByPath(field.path); ok {
+				t.Fatalf("GetByPath(%s) returned stale metadata: %+v", field.path, meta)
+			}
 		}
 	})
 

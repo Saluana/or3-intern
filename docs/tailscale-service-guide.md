@@ -143,43 +143,16 @@ The broad `/10` is easier while you are getting the system working. A single-IP 
 
 Tailscale is private networking, not application auth.
 
-The service still expects:
-
-- a shared-secret bearer token, or
-- a paired-device token with the `operator` role
-
-The unauthenticated exceptions are only the pairing bootstrap routes:
-
-- `POST /internal/v1/pairing/requests`
-- `POST /internal/v1/pairing/exchange`
+The service still expects a signed bearer token for normal API access.
 
 That means a working Tailscale connection does not remove the need for:
 
 - `OR3_SERVICE_SECRET`
-- device pairing when you want operator access from the app
+- secure QR enrollment when you want app access
 
-## Step 5: Pair devices in the least confusing way
+## Step 5: Enroll devices
 
-If you just want the simple guided path, use:
-
-```bash
-or3-intern connect-device
-```
-
-That flow checks prerequisites, repairs missing safe defaults when possible, creates a pairing code, and guides you through the access level.
-
-If you want the lower-level commands:
-
-```bash
-or3-intern devices requests
-or3-intern devices approve <pairing-request-id>
-or3-intern devices list
-```
-
-Useful rule:
-
-- use `connect-device` when you want the happy path
-- use `devices ...` when you are inspecting or repairing state
+Use OR3 App host mode to create a secure QR invite, then scan or paste that invite from the remote app.
 
 ## Recommended copy-paste setup
 

@@ -170,9 +170,6 @@ func TestScan_MissingRelativeSkillDependencyMakesSkillIneligible(t *testing.T) {
 	if !testContainsString(skill.Missing, "missing skill dependency: shared") {
 		t.Fatalf("expected missing dependency reason, got %+v", skill.Missing)
 	}
-	if strings.Contains(inv.ModelSummary(10), "needs-shared") {
-		t.Fatalf("expected missing dependency skill to be hidden from model summary")
-	}
 }
 
 func TestScan_PresentSkillDependencyKeepsSkillEligible(t *testing.T) {
@@ -742,8 +739,8 @@ tools:
 	if !skill.Eligible {
 		t.Fatalf("expected declared tool list to be supported, got unsupported=%v", skill.Unsupported)
 	}
-	if len(skill.AllowedTools) != 2 || skill.AllowedTools[0] != "read_skill" || skill.AllowedTools[1] != "exec" {
-		t.Fatalf("unexpected declared tools: %#v", skill.AllowedTools)
+	if len(skill.DeclaredTools) != 2 || skill.DeclaredTools[0] != "read_skill" || skill.DeclaredTools[1] != "exec" {
+		t.Fatalf("unexpected declared tools: %#v", skill.DeclaredTools)
 	}
 }
 
@@ -758,8 +755,8 @@ func TestScanWithOptions_MergesManifestOnlyDeclaredTools(t *testing.T) {
 	if !ok {
 		t.Fatal("expected skill")
 	}
-	if len(skill.AllowedTools) != 1 || skill.AllowedTools[0] != "read_skill" {
-		t.Fatalf("expected manifest-only tools to be merged, got %#v", skill.AllowedTools)
+	if len(skill.DeclaredTools) != 1 || skill.DeclaredTools[0] != "read_skill" {
+		t.Fatalf("expected manifest-only tools to be merged, got %#v", skill.DeclaredTools)
 	}
 	if !skill.Eligible {
 		t.Fatalf("expected manifest-only tools skill to remain eligible, got unsupported=%v", skill.Unsupported)

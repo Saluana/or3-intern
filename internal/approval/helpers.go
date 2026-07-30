@@ -23,6 +23,8 @@ func normalizeRole(role string) string {
 		return RoleViewer
 	case RoleOperator:
 		return RoleOperator
+	case RoleConnect:
+		return RoleConnect
 	case RoleServiceClient:
 		return RoleServiceClient
 	case RoleWebUI:

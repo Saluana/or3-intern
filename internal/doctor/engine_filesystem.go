@@ -10,30 +10,8 @@ import (
 
 func filesystemFindings(cfg config.Config, opts Options) []Finding {
 	findings := []Finding{}
-	if !cfg.Tools.RestrictToWorkspace {
-		findings = append(findings, Finding{
-			ID:       "filesystem.workspace_restriction_disabled",
-			Area:     "filesystem",
-			Severity: SeverityWarn,
-			Summary:  "workspace restriction is disabled",
-			Detail:   "File tools are not bounded to a workspace directory.",
-			FixMode:  FixModeManual,
-			FixHint:  "Enable workspace restriction or explicitly scope writable paths.",
-		})
-	}
 	workspaceDir := strings.TrimSpace(cfg.WorkspaceDir)
-	if cfg.Tools.RestrictToWorkspace && workspaceDir == "" {
-		findings = append(findings, Finding{
-			ID:       "filesystem.workspace_dir_empty",
-			Area:     "filesystem",
-			Severity: severityFor(opts.Mode, SeverityError, false),
-			Summary:  "workspace restriction is enabled but workspaceDir is empty",
-			Detail:   "Restricted file tools need a concrete workspace root.",
-			FixMode:  FixModeManual,
-			FixHint:  "Set tools.restrictToWorkspace=false or configure workspaceDir.",
-		})
-	}
-	if cfg.Tools.RestrictToWorkspace && workspaceDir != "" {
+	if workspaceDir != "" {
 		if _, err := os.Stat(workspaceDir); err != nil {
 			findings = append(findings, Finding{
 				ID:       "filesystem.workspace_dir_missing",

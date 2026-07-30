@@ -370,12 +370,70 @@ func TestChannel_FetchUpdatesPublishesApprovalCallback(t *testing.T) {
 	}
 }
 
+func TestChannel_FetchUpdatesPublishesModelProviderCallback(t *testing.T) {
+	requests := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/bottoken/getUpdates":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": []map[string]any{{
+					"update_id": 5,
+					"callback_query": map[string]any{
+						"id":   "cb-models",
+						"data": "or3:models:opencode:openrouter",
+						"from": map[string]any{"id": 456, "username": "alice"},
+						"message": map[string]any{
+							"message_id": 99,
+							"chat":       map[string]any{"id": 123, "type": "private"},
+						},
+					},
+				}},
+			})
+		case "/bottoken/answerCallbackQuery":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}}
+	b := bus.New(1)
+	if err := ch.fetchUpdates(context.Background(), b); err != nil {
+		t.Fatalf("fetchUpdates: %v", err)
+	}
+	select {
+	case ev := <-b.Channel():
+		if ev.Channel != "telegram" || ev.SessionKey != "telegram:123" || ev.From != "456" || ev.Message != "/models opencode openrouter" {
+			t.Fatalf("unexpected callback event: %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for callback event")
+	}
+
+	var sawAnswer bool
+	requestCount := len(requests)
+	for i := 0; i < requestCount; i++ {
+		if <-requests == "/bottoken/answerCallbackQuery" {
+			sawAnswer = true
+		}
+	}
+	if !sawAnswer {
+		t.Fatal("expected callback query answer")
+	}
+}
+
 func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 	d := openTelegramTestDB(t)
 	store := &artifacts.Store{Dir: t.TempDir(), DB: d}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/bottoken/setMyCommands":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
 		case "/bottoken/getUpdates":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ok": true,
@@ -430,6 +488,89 @@ func TestChannel_FetchUpdatesPublishesPhotoAttachment(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for telegram media event")
+	}
+}
+
+func TestChannel_StartRegistersBotCommands(t *testing.T) {
+	commandsSeen := make(chan []map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/bottoken/setMyCommands":
+			var body struct {
+				Commands []map[string]any `json:"commands"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode commands: %v", err)
+			}
+			commandsSeen <- body.Commands
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+		case "/bottoken/getUpdates":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []map[string]any{}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, PollSeconds: 1, OpenAccess: true}}
+	b := bus.New(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ch.Start(ctx, b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+	select {
+	case commands := <-commandsSeen:
+		var sawRunner, sawModel, sawWorkspace bool
+		for _, command := range commands {
+			sawRunner = sawRunner || command["command"] == "runner"
+			sawModel = sawModel || command["command"] == "model"
+			sawWorkspace = sawWorkspace || command["command"] == "workspace"
+		}
+		if !sawRunner || !sawModel || !sawWorkspace {
+			t.Fatalf("expected runner/model/workspace commands, got %#v", commands)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for command registration")
+	}
+}
+
+func TestChannel_DeliverSplitsLongMessagesAndKeepsMarkupOnFirstPart(t *testing.T) {
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bottoken/sendMessage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		payloads = append(payloads, body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": len(payloads)}})
+	}))
+	defer server.Close()
+
+	ch := &Channel{Config: config.TelegramChannelConfig{Token: "token", APIBase: server.URL, DefaultChatID: "123", OpenAccess: true}}
+	markup := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "OpenRouter", "callback_data": "or3:models:opencode:openrouter"}}}}
+	if err := ch.Deliver(context.Background(), "", strings.Repeat("model-line\n", 600), map[string]any{"telegram_reply_markup": markup}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if len(payloads) < 2 {
+		t.Fatalf("expected split messages, got %#v", payloads)
+	}
+	if _, ok := payloads[0]["reply_markup"]; !ok {
+		t.Fatalf("expected markup on first payload, got %#v", payloads[0])
+	}
+	if _, ok := payloads[1]["reply_markup"]; ok {
+		t.Fatalf("did not expect markup on later payload, got %#v", payloads[1])
+	}
+	for _, payload := range payloads {
+		if len([]rune(payload["text"].(string))) > telegramMessageTextLimit {
+			t.Fatalf("payload exceeds Telegram limit: %d", len([]rune(payload["text"].(string))))
+		}
 	}
 }
 

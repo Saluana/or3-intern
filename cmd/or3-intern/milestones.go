@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	MilestoneSetupComplete   = "setup_complete"
-	MilestonePairingComplete = "pairing_complete"
+	MilestoneSetupComplete     = "setup_complete"
+	MilestonePairingComplete   = "pairing_complete"
 	MilestoneFirstChatComplete = "first_chat_complete"
 )
 
@@ -42,9 +42,8 @@ func PrintSetupSuccess(out io.Writer, cfg config.Config, readyToChat bool) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "What you can do next:")
 	fmt.Fprintln(out, "  1. Start chatting: `or3-intern chat`")
-	fmt.Fprintln(out, "  2. Pair a phone or device: `or3-intern pair --auto`")
-	fmt.Fprintln(out, "  3. Check system health: `or3-intern health`")
-	fmt.Fprintln(out, "  4. Review settings: `or3-intern settings`")
+	fmt.Fprintln(out, "  2. Check system health: `or3-intern health`")
+	fmt.Fprintln(out, "  3. Review settings: `or3-intern settings`")
 }
 
 // PrintPairingSuccess prints the pairing completion success message.
@@ -54,7 +53,7 @@ func PrintPairingSuccess(out io.Writer, deviceName, role string) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "What you can do next:")
 	fmt.Fprintln(out, "  1. Open the OR3 app and start chatting")
-	fmt.Fprintln(out, "  2. Check connected devices: `or3-intern connect-device list`")
+	fmt.Fprintln(out, "  2. Review secure devices in OR3 App settings")
 }
 
 // PrintFirstChatSuccess prints the first chat completion success message (one-time).

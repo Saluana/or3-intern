@@ -186,11 +186,6 @@ func isAdvancedCustomReadiness(cfg Config) bool {
 	if cfg.Security.Profiles.Enabled {
 		return true
 	}
-	for _, server := range cfg.Tools.MCPServers {
-		if server.Enabled {
-			return true
-		}
-	}
 	if len(cfg.ModelRouting.Chat.Fallbacks) > 0 || len(cfg.ModelRouting.Embeddings.Fallbacks) > 0 {
 		return true
 	}
@@ -214,15 +209,6 @@ func AdvancedCustomReadinessIssues(cfg Config) []ReadinessIssue {
 			Title: "Access profiles enabled",
 			Fix:   "Access profiles change per-channel behavior. This is expected if intentional.",
 		})
-	}
-	for name, server := range cfg.Tools.MCPServers {
-		if server.Enabled {
-			issues = append(issues, ReadinessIssue{
-				Field: "tools.mcpServers." + name,
-				Title: "MCP server enabled: " + name,
-				Fix:   "MCP servers add external tool capabilities.",
-			})
-		}
 	}
 	if len(cfg.ModelRouting.Chat.Fallbacks) > 0 {
 		issues = append(issues, ReadinessIssue{

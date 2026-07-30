@@ -33,11 +33,17 @@ func isUsageError(err error) bool {
 
 func runPreRuntimeCommand(ctx context.Context, cmd string, cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker, args []string, stdout, stderr io.Writer) (bool, error) {
 	switch cmd {
+	case "approvals":
+		return true, runApprovalsCommand(ctx, broker, args, stdout, stderr)
 	case "capabilities":
 		return true, runCapabilitiesCommand(cfg, broker, args, stdout, stderr)
+	case "devices":
+		return true, runDevicesCommand(ctx, broker, args, stdout, stderr)
 	case "embeddings":
 		cp := controlplane.NewLocal(cfg, database, provider, audit, broker)
 		return true, runEmbeddingsCommand(ctx, cp, args, stdout, stderr)
+	case "pairing":
+		return true, runPairingCommand(ctx, broker, args, stdout, stderr)
 	case "scope":
 		cp := controlplane.NewLocal(cfg, database, provider, audit, broker)
 		return true, runScopeCommand(ctx, cp, args, stdout, stderr)

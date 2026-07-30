@@ -50,7 +50,7 @@ The loader checks:
 - required config flags
 - explicit per-skill disable flags
 
-Ineligible skills remain inspectable through `read_skill` and `or3-intern skills info/check`.
+Ineligible skills remain inspectable through `or3-intern skills info` and `or3-intern skills check`.
 
 ## Per-skill configuration
 
@@ -108,26 +108,15 @@ User-invocable skills can be triggered explicitly:
 /my-skill raw arguments here
 ```
 
-For `command-dispatch: tool`, the runtime forwards the raw argument string directly to the selected tool. Otherwise the runtime starts a normal model turn seeded with the selected `SKILL.md`.
+For `command-dispatch: tool`, runner-first builds should treat the configured command tool as runner-facing metadata. Otherwise the runtime starts a normal runner turn seeded with the selected `SKILL.md`.
 
 ## Skill execution
 
-Use `run_skill` as the preferred execution tool when a skill needs a local script or entrypoint.
+Runner-first builds no longer expose host-local `run_skill` or `run_skill_script` tools. Skills are loaded as catalog/context bundles for the selected runner, and local command entrypoints are metadata the runner can use through its own execution path and OR3's normal approval boundaries.
 
-- `run_skill` performs preflight before approval, freezes a persistent SkillRunPlan, and returns structured states such as `pending_approval`, `preflight_failed`, `succeeded`, and `failed`.
-- When approval is required, the result includes a `plan_id`. After approval, callers can resume the same frozen plan either by retrying the same arguments or by calling `run_skill` with that `plan_id`.
-- `run_skill_script` still exists as a compatibility wrapper, but it now runs through the same frozen-plan path.
-
-### Preflight drift checks
-
-`preflight_failed` means the plan could no longer be executed safely after it was frozen. Common causes are:
-
-- the skill metadata changed or the skill is no longer approved
-- the entrypoint or script contents changed
-- the current environment binding no longer matches the one captured in the plan
-- sandbox prerequisites changed between planning and execution
-
-When that happens, create a new plan instead of forcing the old one through approval.
+- keep `skills.enableExec` disabled unless local command entrypoints are intentionally available to runner workflows
+- use trust policy and quarantine settings to decide which skill bundles can be surfaced
+- rely on runner permissions and service approvals for actual subprocess execution
 
 ### Adding entrypoints
 
@@ -146,7 +135,7 @@ Define reusable skill entrypoints in `skill.json`:
 
 Guidance:
 
-- keep entrypoint names stable because approvals and caller prompts reference them
+- keep entrypoint names stable because runner prompts and automation may reference them
 - prefer entrypoints over raw bundle paths when the skill has a supported command surface
 - use `{baseDir}` in manifest commands when an entrypoint needs an absolute path inside the skill bundle
 

@@ -457,15 +457,6 @@ func findSecretsToMigrate(cfg *config.Config) []secretMigration {
 		}
 	}
 
-	// Tools API keys
-	if cfg.Tools.BraveAPIKey != "" && !strings.HasPrefix(cfg.Tools.BraveAPIKey, "secret:") {
-		migrations = append(migrations, secretMigration{
-			ConfigPath: "tools.braveApiKey",
-			SecretName: "brave-api-key",
-			Value:      cfg.Tools.BraveAPIKey,
-		})
-	}
-
 	// Channel tokens
 	if cfg.Channels.Telegram.Token != "" && !strings.HasPrefix(cfg.Channels.Telegram.Token, "secret:") {
 		migrations = append(migrations, secretMigration{
@@ -535,48 +526,13 @@ func findSecretsToMigrate(cfg *config.Config) []secretMigration {
 		})
 	}
 
-	// MCP server headers and env
-	for serverName, server := range cfg.Tools.MCPServers {
-		for key, val := range server.Headers {
-			if !strings.HasPrefix(val, "secret:") {
-				migrations = append(migrations, secretMigration{
-					ConfigPath: fmt.Sprintf("tools.mcpServers.%s.headers.%s", serverName, key),
-					SecretName: fmt.Sprintf("mcp-%s-header-%s", serverName, key),
-					Value:      val,
-				})
-			}
-		}
-		for key, val := range server.Env {
-			if !strings.HasPrefix(val, "secret:") && isSensitiveEnvKey(key) {
-				migrations = append(migrations, secretMigration{
-					ConfigPath: fmt.Sprintf("tools.mcpServers.%s.env.%s", serverName, key),
-					SecretName: fmt.Sprintf("mcp-%s-env-%s", serverName, key),
-					Value:      val,
-				})
-			}
-		}
-	}
-
 	return migrations
-}
-
-func isSensitiveEnvKey(key string) bool {
-	upper := strings.ToUpper(key)
-	sensitivePatterns := []string{"TOKEN", "SECRET", "PASSWORD", "KEY", "API", "CREDENTIAL", "AUTH"}
-	for _, pattern := range sensitivePatterns {
-		if strings.Contains(upper, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 func setConfigValue(cfg *config.Config, path, value string) error {
 	switch path {
 	case "provider.apiKey":
 		cfg.Provider.APIKey = value
-	case "tools.braveApiKey":
-		cfg.Tools.BraveAPIKey = value
 	case "channels.telegram.token":
 		cfg.Channels.Telegram.Token = value
 	case "channels.slack.appToken":
@@ -604,43 +560,6 @@ func setConfigValue(cfg *config.Config, path, value string) error {
 			}
 			profile.APIKey = value
 			cfg.Providers[name] = profile
-			return nil
-		}
-		if strings.HasPrefix(path, "tools.mcpServers.") {
-			rest := strings.TrimPrefix(path, "tools.mcpServers.")
-			section := ""
-			sectionIndex := -1
-			for _, candidate := range []string{".headers.", ".env."} {
-				if idx := strings.Index(rest, candidate); idx >= 0 {
-					section = strings.Trim(candidate, ".")
-					sectionIndex = idx
-					break
-				}
-			}
-			if sectionIndex < 0 {
-				return fmt.Errorf("unsupported config path: %s", path)
-			}
-			serverName := rest[:sectionIndex]
-			key := rest[sectionIndex+len(section)+2:]
-			server, ok := cfg.Tools.MCPServers[serverName]
-			if !ok {
-				return fmt.Errorf("mcp server not found: %s", serverName)
-			}
-			switch section {
-			case "headers":
-				if server.Headers == nil {
-					server.Headers = map[string]string{}
-				}
-				server.Headers[key] = value
-			case "env":
-				if server.Env == nil {
-					server.Env = map[string]string{}
-				}
-				server.Env[key] = value
-			default:
-				return fmt.Errorf("unsupported config path: %s", path)
-			}
-			cfg.Tools.MCPServers[serverName] = server
 			return nil
 		}
 		return fmt.Errorf("unsupported config path: %s", path)

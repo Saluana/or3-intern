@@ -8,7 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"or3-intern/internal/config"
-	"or3-intern/internal/mcp"
 )
 
 func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
@@ -25,14 +24,14 @@ func TestConfigureTUIFormNavigationHighlightsSelectedField(t *testing.T) {
 		t.Fatalf("expected field cursor 2, got %d", finalModel.fieldCursor)
 	}
 	view := finalModel.View()
-	if !strings.Contains(view, "Field 3/9") {
+	if !strings.Contains(view, "Field 3/20") {
 		t.Fatalf("expected field position hint in view, got %q", view)
 	}
-	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Chat model") {
-		t.Fatalf("expected selected field summary for Chat model, got %q", view)
+	if !strings.Contains(view, "Selected field") || !strings.Contains(view, "Embedding model") {
+		t.Fatalf("expected selected field summary for embedding model, got %q", view)
 	}
-	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "main AI model") {
-		t.Fatalf("expected selected field panel to show current value and plain-language help, got %q", view)
+	if !strings.Contains(view, "Current value:") || !strings.Contains(view, "searchable memory") {
+		t.Fatalf("expected selected field panel to show current value and field help, got %q", view)
 	}
 	if !strings.Contains(view, "▶ ") {
 		t.Fatalf("expected visible selection indicator, got %q", view)
@@ -75,7 +74,7 @@ func TestConfigureTUISectionPickerShowsExpandedSections(t *testing.T) {
 		titles = append(titles, entry.title)
 	}
 	view := strings.Join(titles, " | ")
-	for _, label := range []string{"Runtime", "Context", "Tools", "Skills", "Security", "Hardening", "Automation"} {
+	for _, label := range []string{"Runtime", "Context", "Skills", "Security", "Hardening", "Automation"} {
 		if !strings.Contains(view, label) {
 			t.Fatalf("expected %q in section picker, got %q", label, view)
 		}
@@ -87,20 +86,11 @@ func TestConfigureTUIAppliesContextFields(t *testing.T) {
 	if changed, err := applyChoiceSelection(&cfg, "context", "", "context_mode", "balanced"); err != nil || !changed {
 		t.Fatalf("apply context mode: changed=%v err=%v", changed, err)
 	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_max_input_tokens", "12345"); err != nil || !changed {
-		t.Fatalf("apply context max input: changed=%v err=%v", changed, err)
+	if changed, err := applyFieldValue(&cfg, "context", "", "context_pressure_warning", "65"); err != nil || !changed {
+		t.Fatalf("apply context pressure warning: changed=%v err=%v", changed, err)
 	}
-	if changed := setToggleFieldValue(&cfg, "context", "", "context_manager_enabled", true); !changed {
-		t.Fatal("expected context manager toggle to apply")
-	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_model", "mini-context"); err != nil || !changed {
-		t.Fatalf("apply context manager model: changed=%v err=%v", changed, err)
-	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_manager_idle_prune", "120"); err != nil || !changed {
-		t.Fatalf("apply context manager idle prune: changed=%v err=%v", changed, err)
-	}
-	if cfg.Context.Mode != "balanced" || cfg.Context.MaxInputTokens != 12345 || !cfg.ContextManager.Enabled || cfg.ContextManager.Model != "mini-context" || cfg.ContextManager.IdlePruneSeconds != 120 {
-		t.Fatalf("unexpected context config: %+v manager=%+v", cfg.Context, cfg.ContextManager)
+	if cfg.Context.Mode != "balanced" || cfg.Context.Pressure.WarningPercent != 65 {
+		t.Fatalf("unexpected context config: %+v", cfg.Context)
 	}
 }
 
@@ -128,10 +118,10 @@ func TestConfigureTUIDiscordEnableDefaultsClosedInboundAccess(t *testing.T) {
 
 func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	cfg := config.Default()
-	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "skills", "security", "hardening", "session", "automation", "service"}
 	for _, section := range sections {
 		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
-			if len(strings.Fields(field.Description)) < 8 {
+			if len(strings.Fields(field.Description)) < 5 {
 				t.Fatalf("expected helpful description for %s/%s, got %q", section, field.Key, field.Description)
 			}
 		}
@@ -143,12 +133,6 @@ func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 			}
 		}
 	}
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}
-	for _, field := range buildMCPFields(cfg, "files") {
-		if len(strings.Fields(field.Description)) < 6 {
-			t.Fatalf("expected helpful description for mcp/%s, got %q", field.Key, field.Description)
-		}
-	}
 }
 
 func TestConfigureTUIScreenAdaptersImplementInterface(t *testing.T) {
@@ -156,11 +140,9 @@ func TestConfigureTUIScreenAdaptersImplementInterface(t *testing.T) {
 		configureProviderScreen{},
 		configureWorkspaceScreen{},
 		configureChannelsScreen{},
-		configureMCPScreen{},
 		configureContextScreen{},
 		configureSafetyScreen{},
 		configureServiceScreen{},
-		configureDocIndexScreen{},
 		configureReviewScreen{},
 		configureSuccessScreen{},
 	}
@@ -187,15 +169,6 @@ func TestConfigureTUIScreenAdaptersHandleScreenUpdates(t *testing.T) {
 		}
 	})
 
-	t.Run("mcp add flow", func(t *testing.T) {
-		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{Restricted: []string{"mcp"}})
-		model.screen = configureScreenMCPServerList
-		handled, _ := model.screenAdapter().Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, &model)
-		if !handled || model.screen != configureScreenMCPNameInput {
-			t.Fatalf("expected mcp adapter to start name input, handled=%v screen=%v", handled, model.screen)
-		}
-	})
-
 	t.Run("review back", func(t *testing.T) {
 		model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{Restricted: []string{"provider"}})
 		model.currentSection = "provider"
@@ -209,7 +182,7 @@ func TestConfigureTUIScreenAdaptersHandleScreenUpdates(t *testing.T) {
 
 func TestConfigureTUISectionSmokeRendersWithoutPanic(t *testing.T) {
 	cfg := config.Default()
-	sections := []string{"provider", "storage", "runtime", "context", "workspace", "tools", "docindex", "skills", "security", "hardening", "session", "automation", "service"}
+	sections := []string{"provider", "storage", "runtime", "context", "workspace", "skills", "security", "hardening", "session", "automation", "service"}
 	for _, section := range sections {
 		t.Run(section, func(t *testing.T) {
 			model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{Restricted: []string{section}})
@@ -236,74 +209,6 @@ func TestConfigureTUISectionSmokeRendersWithoutPanic(t *testing.T) {
 	}
 }
 
-func TestConfigureTUIMCPFieldsApply(t *testing.T) {
-	cfg := config.Default()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio"}}
-	if changed, err := applyChoiceSelection(&cfg, "mcp", "files", "mcp_transport", "streamable-http"); err != nil || !changed {
-		t.Fatalf("apply mcp transport: changed=%v err=%v", changed, err)
-	}
-	if changed, err := applyFieldValue(&cfg, "mcp", "files", "mcp_url", "http://127.0.0.1:3000/mcp"); err != nil || !changed {
-		t.Fatalf("apply mcp url: changed=%v err=%v", changed, err)
-	}
-	if changed, err := applyFieldValue(&cfg, "mcp", "files", "mcp_headers", "Authorization=Bearer token"); err != nil || !changed {
-		t.Fatalf("apply mcp headers: changed=%v err=%v", changed, err)
-	}
-	if changed := setToggleFieldValue(&cfg, "mcp", "files", "mcp_enabled", false); !changed {
-		t.Fatal("expected mcp enabled toggle to apply")
-	}
-	server := cfg.Tools.MCPServers["files"]
-	if server.Transport != "streamable-http" || server.URL != "http://127.0.0.1:3000/mcp" || server.Enabled || server.Headers["Authorization"] != "Bearer token" {
-		t.Fatalf("unexpected mcp server config: %+v", server)
-	}
-}
-
-func TestConfigureTUIMCPTestConnectionFlow(t *testing.T) {
-	cfg := config.Default()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{"files": {Enabled: true, Transport: "stdio", Command: "mcp-files"}}
-	previousFactory := configureMCPTestManagerFactory
-	configureMCPTestManagerFactory = func(map[string]config.MCPServerConfig) serviceMCPTestManager {
-		return &fakeServiceMCPTestManager{status: map[string]mcp.ServerStatus{
-			"files": {Connected: true, ToolCount: 2, Tools: []string{"mcp_files_read", "mcp_files_write"}},
-		}}
-	}
-	t.Cleanup(func() { configureMCPTestManagerFactory = previousFactory })
-
-	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", cfg, false, "", configureTUIOptions{
-		Restricted: []string{"mcp"},
-	})
-	model.mcpList.Select(1)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
-	model = updated.(configureTUIModel)
-
-	if !strings.Contains(model.mcpTestMessage, "test ok: 2 tools") {
-		t.Fatalf("expected test success message, got %q", model.mcpTestMessage)
-	}
-	if !strings.Contains(model.View(), "test ok: 2 tools") {
-		t.Fatalf("expected test result in view, got %q", model.View())
-	}
-}
-
-func TestConfigureTUIMCPAddFlow(t *testing.T) {
-	model := newConfigureTUIModel("/tmp/config.json", "/workspace/project", config.Default(), false, "", configureTUIOptions{
-		Restricted: []string{"mcp"},
-	})
-	if model.screen != configureScreenMCPServerList {
-		t.Fatalf("expected restricted mcp flow to start on server list, got %v", model.screen)
-	}
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	model = updated.(configureTUIModel)
-	model.textInput.SetValue("files")
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(configureTUIModel)
-	if model.screen != configureScreenMCPForm {
-		t.Fatalf("expected add flow to open mcp form, got %v", model.screen)
-	}
-	server, ok := model.cfg.Tools.MCPServers["files"]
-	if !ok || !server.Enabled || server.Transport != "stdio" {
-		t.Fatalf("expected default stdio server after add, got ok=%v server=%+v", ok, server)
-	}
-}
-
 func TestBuildSectionFields_ServiceIncludesLocalPairingToggle(t *testing.T) {
 	fields := buildSectionFields(config.Default(), "service", "/workspace/project")
 	for _, field := range fields {
@@ -320,36 +225,16 @@ func TestBuildSectionFields_ServiceIncludesLocalPairingToggle(t *testing.T) {
 	t.Fatal("expected service section to include local pairing toggle")
 }
 
-func TestBuildSectionFields_ToolsExposeExecToggle(t *testing.T) {
-	fields := buildSectionFields(config.Default(), "tools", "/workspace/project")
+func TestBuildSectionFields_SkillsSectionExcludesLegacyExecInRunnerOnly(t *testing.T) {
+	// Runner-only mode drops the legacy built-in skills exec toggle.
+	// Skills are now managed by the runner host instead of the built-in
+	// or3-intern skill-exec broker.
+	fields := buildSectionFields(config.Default(), "skills", "/workspace/project")
 	for _, field := range fields {
-		if field.Key == "tools_enable_exec" {
-			if field.Kind != configureFieldToggle {
-				t.Fatalf("expected exec field to be a toggle, got %v", field.Kind)
-			}
-			if !strings.Contains(field.Description, "built-in exec tool") {
-				t.Fatalf("expected plain-language explanation for exec field, got %q", field.Description)
-			}
-			return
+		if field.Key == "skills_enable_exec" {
+			t.Fatalf("expected skills section to exclude legacy exec toggle in runner-only mode")
 		}
 	}
-	t.Fatal("expected tools section to include exec toggle")
-}
-
-func TestBuildSectionFields_ServiceIncludesMaxCapabilityChoice(t *testing.T) {
-	fields := buildSectionFields(config.Default(), "service", "/workspace/project")
-	for _, field := range fields {
-		if field.Key == "service_max_capability" {
-			if field.Kind != configureFieldChoice {
-				t.Fatalf("expected service max capability to be a choice, got %v", field.Kind)
-			}
-			if strings.Join(field.Choices, ",") != "safe,guarded,privileged" {
-				t.Fatalf("unexpected capability choices: %v", field.Choices)
-			}
-			return
-		}
-	}
-	t.Fatal("expected service section to include max capability choice")
 }
 
 func TestSetToggleFieldValue_AppliesServiceLocalPairingToggle(t *testing.T) {
@@ -362,28 +247,6 @@ func TestSetToggleFieldValue_AppliesServiceLocalPairingToggle(t *testing.T) {
 	}
 	if !cfg.Service.AllowUnauthenticatedPairing {
 		t.Fatal("expected local pairing bootstrap to be enabled")
-	}
-}
-
-func TestConfigureTUIToolsExecAndServiceCapabilityApply(t *testing.T) {
-	cfg := config.Default()
-	if changed := setToggleFieldValue(&cfg, "tools", "", "tools_enable_exec", true); !changed {
-		t.Fatal("expected tools exec toggle to apply")
-	}
-	if !cfg.Tools.EnableExec {
-		t.Fatal("expected exec tool to be enabled")
-	}
-	if changed, err := applyChoiceSelection(&cfg, "service", "", "service_max_capability", "guarded"); err != nil || !changed {
-		t.Fatalf("apply service max capability choice: changed=%v err=%v", changed, err)
-	}
-	if cfg.Service.MaxCapability != "guarded" {
-		t.Fatalf("expected service max capability guarded, got %q", cfg.Service.MaxCapability)
-	}
-	if changed, err := applyFieldValue(&cfg, "tools", "", "tools_enable_exec", "off"); err != nil || !changed {
-		t.Fatalf("apply tools exec field: changed=%v err=%v", changed, err)
-	}
-	if cfg.Tools.EnableExec {
-		t.Fatal("expected exec tool to be disabled")
 	}
 }
 

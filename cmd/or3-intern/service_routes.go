@@ -15,14 +15,9 @@ type serviceRouteSpec struct {
 
 func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 	return []serviceRouteSpec{
-		{Path: "/internal/v1/turns", Handler: server.handleTurns},
-		{Path: "/internal/v1/subagents", Subtree: true, Handler: server.handleSubagents},
 		{Path: "/internal/v1/jobs", Subtree: true, Handler: server.handleJobs},
 		{Path: "/internal/v1/artifacts", Subtree: true, Handler: server.handleArtifacts},
-		{Path: "/internal/v1/pairing/requests", Subtree: true, Handler: server.handlePairing},
-		{Path: "/internal/v1/pairing/exchange", Handler: server.handlePairing},
 		{Path: "/internal/v1/secure-connections", Subtree: true, Handler: server.handleSecureConnections},
-		{Path: "/internal/v1/devices", Subtree: true, Handler: server.handleDevices},
 		{Path: "/internal/v1/approvals", Subtree: true, Handler: server.handleApprovals},
 		{Path: "/internal/v1/auth/capabilities", Handler: server.handleAuth},
 		{Path: "/internal/v1/auth/session", Subtree: true, Handler: server.handleAuth},
@@ -42,15 +37,15 @@ func serviceRouteSpecs(server *serviceServer) []serviceRouteSpec {
 		{Path: "/internal/v1/scope", Subtree: true, Handler: server.handleScope},
 		{Path: "/internal/v1/configure", Subtree: true, Handler: server.handleConfigure},
 		{Path: "/internal/v1/doctor", Subtree: true, Handler: server.handleDoctor},
-		{Path: "/internal/v1/mcp/servers", Subtree: true, Handler: server.handleMCPServers},
 		{Path: "/internal/v1/skills", Subtree: true, Handler: server.handleSkills},
 		{Path: "/internal/v1/files", Subtree: true, Handler: server.handleFiles},
 		{Path: "/internal/v1/terminal/sessions", Subtree: true, Handler: server.handleTerminal},
-		{Path: "/internal/v1/agent-runners", Handler: server.handleAgentRunners},
-		{Path: "/internal/v1/agent-runs", Subtree: true, Handler: server.handleAgentRuns},
+		{Path: "/internal/v1/runner-runners", Handler: server.handleRunnerRunners},
+		{Path: "/internal/v1/runner-runs", Subtree: true, Handler: server.handleRunnerRuns},
 		{Path: "/internal/v1/chat-runners", Handler: server.handleChatRunners},
 		{Path: "/internal/v1/chat-sessions", Subtree: true, Handler: server.handleChatSessions},
 		{Path: "/internal/v1/runner-chat/sessions", Subtree: true, Handler: server.handleRunnerChatSessions},
+		{Path: "/internal/v1/runner-memory", Subtree: true, Handler: server.handleRunnerMemory},
 	}
 }
 

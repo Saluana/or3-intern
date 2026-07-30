@@ -22,7 +22,6 @@ func Evaluate(cfg config.Config, opts Options) Report {
 	findings = append(findings, approvalFindings(cfg, opts)...)
 	findings = append(findings, webhookFindings(cfg, opts)...)
 	findings = append(findings, serviceFindings(cfg, opts)...)
-	findings = append(findings, mcpFindings(cfg, opts)...)
 	findings = append(findings, networkFindings(cfg, opts)...)
 	findings = append(findings, profileFindings(cfg, opts)...)
 	findings = append(findings, execFindings(cfg, opts)...)

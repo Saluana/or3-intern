@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -252,75 +251,18 @@ func TestResolveInstallRoot_PrefersManagedDirOverWorkspace(t *testing.T) {
 	}
 }
 
-func TestAvailableToolNames_IncludesCuratedMemoryReadTools(t *testing.T) {
-	got := availableToolNames(false, false)
-	for _, name := range []string{"list_dir", "search_file", "read_artifact", "web_fetch_markdown", "memory_recent", "memory_get_pinned"} {
-		if _, ok := got[name]; !ok {
-			t.Fatalf("expected tool name %q to be available", name)
-		}
+func TestAvailableToolNames_ReturnsEmptyInRunnerFirst(t *testing.T) {
+	got := availableToolNames(false)
+	if len(got) != 0 {
+		t.Fatalf("expected no built-in model-callable tools, got %#v", got)
 	}
 }
 
-func TestFilterAdvertisedToolNames_DisabledExecHidesExecTool(t *testing.T) {
+func TestFilterAdvertisedToolNames_ReturnsEmptyWithoutBuiltInTools(t *testing.T) {
 	cfg := config.Default()
-	cfg.Tools.EnableExec = false
-	cfg.Hardening.GuardedTools = true
-	cfg.Hardening.PrivilegedTools = true
-
-	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; ok {
-		t.Fatalf("expected exec to be hidden when exec tool is disabled, got %#v", got)
-	}
-}
-
-func TestFilterAdvertisedToolNames_HostedNoExecHidesExecTools(t *testing.T) {
-	cfg := config.Default()
-	cfg.RuntimeProfile = config.ProfileHostedNoExec
-	cfg.Tools.EnableExec = true
-	cfg.Hardening.GuardedTools = true
-	cfg.Hardening.PrivilegedTools = true
-	cfg.Skills.EnableExec = true
-
-	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; ok {
-		t.Fatalf("expected exec to be hidden in hosted-no-exec, got %#v", got)
-	}
-	if _, ok := got["run_skill"]; ok {
-		t.Fatalf("expected run_skill to be hidden in hosted-no-exec, got %#v", got)
-	}
-	if _, ok := got["run_skill_script"]; ok {
-		t.Fatalf("expected run_skill_script to be hidden in hosted-no-exec, got %#v", got)
-	}
-}
-
-func TestFilterAdvertisedToolNames_RemoteSandboxRequiresSandboxForExecTools(t *testing.T) {
-	cfg := config.Default()
-	cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
-	cfg.Tools.EnableExec = true
-	cfg.Hardening.GuardedTools = true
-	cfg.Skills.EnableExec = true
-
-	got := filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; ok {
-		t.Fatalf("expected exec to be hidden without sandbox, got %#v", got)
-	}
-	if _, ok := got["run_skill"]; ok {
-		t.Fatalf("expected run_skill to be hidden without sandbox, got %#v", got)
-	}
-	if _, ok := got["run_skill_script"]; ok {
-		t.Fatalf("expected run_skill_script to be hidden without sandbox, got %#v", got)
-	}
-
-	cfg.Hardening.Sandbox.Enabled = true
-	got = filterAdvertisedToolNames(cfg, availableToolNames(false, false))
-	if _, ok := got["exec"]; !ok {
-		t.Fatalf("expected exec to return when sandbox is enabled, got %#v", got)
-	}
-	if _, ok := got["run_skill"]; !ok {
-		t.Fatalf("expected run_skill to return when sandbox is enabled, got %#v", got)
-	}
-	if _, ok := got["run_skill_script"]; !ok {
-		t.Fatalf("expected run_skill_script to return when sandbox is enabled, got %#v", got)
+	got := filterAdvertisedToolNames(cfg, availableToolNames(false))
+	if len(got) != 0 {
+		t.Fatalf("expected no advertised built-in tools, got %#v", got)
 	}
 }
 
@@ -348,48 +290,6 @@ func TestBuildSkillsInventory_HostedProfilesForceQuarantineByDefault(t *testing.
 	}
 	if skill.PermissionState != "quarantined" {
 		t.Fatalf("expected hosted profile to quarantine runnable skill by default, got %#v", skill)
-	}
-}
-
-func TestBuildSkillsInventory_AppendsConfiguredPathForBinaryChecks(t *testing.T) {
-	cfg := config.Default()
-	cfg.WorkspaceDir = t.TempDir()
-	binDir := t.TempDir()
-	cfg.Tools.PathAppend = binDir
-	t.Setenv("PATH", "/usr/bin:/bin")
-
-	skillDir := filepath.Join(cfg.WorkspaceDir, "skills", "needs-bin")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
-name: needs-bin
-metadata:
-  openclaw:
-    requires:
-      bins: ["skill-bin"]
----
-# Needs Bin
-`), 0o644); err != nil {
-		t.Fatalf("WriteFile skill: %v", err)
-	}
-	binName := "skill-bin"
-	script := "#!/bin/sh\nexit 0\n"
-	if runtime.GOOS == "windows" {
-		binName += ".cmd"
-		script = "@echo off\r\nexit /b 0\r\n"
-	}
-	if err := os.WriteFile(filepath.Join(binDir, binName), []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile bin: %v", err)
-	}
-
-	inv := buildSkillsInventory(cfg, "", map[string]struct{}{})
-	skill, ok := inv.Get("needs-bin")
-	if !ok {
-		t.Fatal("expected needs-bin skill in inventory")
-	}
-	if !skill.Eligible {
-		t.Fatalf("expected appended PATH to satisfy binary requirement, missing=%v", skill.Missing)
 	}
 }
 

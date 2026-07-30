@@ -33,17 +33,13 @@ const (
 )
 
 const (
-	// PayloadAgentTurn wakes the normal OR3 agent runtime.
-	PayloadAgentTurn = "agent_turn"
-	// PayloadSystemEvent is retained for compatibility with existing system-originated cron jobs.
-	PayloadSystemEvent = "system_event"
-	// PayloadAgentCLIRun enqueues an external agent CLI run.
-	PayloadAgentCLIRun = "agent_cli_run"
+	// PayloadRunnerRun enqueues a runner run started by a cron schedule.
+	PayloadRunnerRun = "runner_run"
 )
 
 const (
-	DefaultAgentCLICronMode      = "review"
-	DefaultAgentCLICronIsolation = "host_readonly"
+	DefaultRunnerRunCronMode      = "review"
+	DefaultRunnerRunCronIsolation = "host_readonly"
 )
 
 // CronSchedule describes when a cron job should run.
@@ -57,7 +53,7 @@ type CronSchedule struct {
 
 // CronPayload is the user-visible work queued when a job fires.
 type CronPayload struct {
-	Kind       string               `json:"kind"` // "agent_turn"|"system_event"|"agent_cli_run"
+	Kind       string               `json:"kind"` // "runner_run"
 	Message    string               `json:"message"`
 	Deliver    bool                 `json:"deliver"`
 	Channel    string               `json:"channel,omitempty"`
@@ -66,7 +62,7 @@ type CronPayload struct {
 	AgentRun   *CronAgentRunPayload `json:"agent_run,omitempty"`
 }
 
-// CronAgentRunPayload describes an external agent CLI run started by cron.
+// CronAgentRunPayload describes an external runner run started by cron.
 type CronAgentRunPayload struct {
 	RunnerID       string         `json:"runner_id"`
 	Task           string         `json:"task"`
@@ -723,7 +719,7 @@ func (s *Service) armJobLocked(job CronJob) {
 func NormalizePayload(payload CronPayload) CronPayload {
 	payload.Kind = strings.TrimSpace(payload.Kind)
 	if payload.Kind == "" {
-		payload.Kind = PayloadAgentTurn
+		payload.Kind = PayloadRunnerRun
 	}
 	payload.SessionKey = strings.TrimSpace(payload.SessionKey)
 	payload.Channel = strings.TrimSpace(payload.Channel)
@@ -736,12 +732,12 @@ func NormalizePayload(payload CronPayload) CronPayload {
 		run.Model = strings.TrimSpace(run.Model)
 		run.Mode = strings.TrimSpace(run.Mode)
 		run.Isolation = strings.TrimSpace(run.Isolation)
-		if payload.Kind == PayloadAgentCLIRun {
+		if payload.Kind == PayloadRunnerRun {
 			if run.Mode == "" {
-				run.Mode = DefaultAgentCLICronMode
+				run.Mode = DefaultRunnerRunCronMode
 			}
 			if run.Isolation == "" {
-				run.Isolation = DefaultAgentCLICronIsolation
+				run.Isolation = DefaultRunnerRunCronIsolation
 			}
 		}
 
@@ -754,11 +750,9 @@ func NormalizePayload(payload CronPayload) CronPayload {
 func ValidatePayload(payload CronPayload) error {
 	payload = NormalizePayload(payload)
 	switch payload.Kind {
-	case PayloadAgentTurn, PayloadSystemEvent:
-		return nil
-	case PayloadAgentCLIRun:
+	case PayloadRunnerRun:
 		if payload.AgentRun == nil {
-			return fmt.Errorf("agent_run is required for agent_cli_run payloads")
+			return fmt.Errorf("agent_run is required for runner_run payloads")
 		}
 		if strings.TrimSpace(payload.AgentRun.RunnerID) == "" {
 			return fmt.Errorf("agent_run.runner_id is required")

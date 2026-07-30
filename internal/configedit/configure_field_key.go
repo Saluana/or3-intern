@@ -9,25 +9,18 @@ import (
 // configureFieldKeysByPath maps JSON config paths to configure API field keys
 // when the default section_key rule does not match configedit.ApplyFieldValue.
 var configureFieldKeysByPath = map[string]string{
-	"provider.model":                 "provider_model",
-	"provider.apiBase":               "provider_api_base",
-	"provider.apiKey":                "provider_api_key",
-	"providers.profiles.openai.apiKey": "provider_openai_api_key",
+	"provider.apiBase":                     "provider_api_base",
+	"provider.apiKey":                      "provider_api_key",
+	"providers.profiles.openai.apiKey":     "provider_openai_api_key",
 	"providers.profiles.openrouter.apiKey": "provider_openrouter_api_key",
-	"providers.profiles.custom.apiKey":   "provider_custom_api_key",
-	"skills.load.globalDir":          "skills_global_dir",
-	"skills.load.disableGlobalDir":   "skills_global_disabled",
-	"tools.enableExec":               "tools_enable_exec",
-	"tools.execAllowedPrograms":      "hardening_exec_allowed_programs",
-	"tools.restrictToWorkspace":      "workspace_restrict",
-	"hardening.guardedTools":         "hardening_guarded_tools",
-	"service.enabled":                "service_enabled",
-	"service.listen":                 "service_listen",
-	"service.secret":                 "service_secret",
-	"agentCLI.enabled":               "agentCLI_enabled",
-	"agentCLI.disabledRunners":       "agentCLI_disabled_runners",
-	"context.taskCard.enforcePlan":   "context_task_card_enforce_plan",
-	"context.taskCard.enabled":       "context_task_card_enabled",
+	"providers.profiles.custom.apiKey":     "provider_custom_api_key",
+	"skills.load.globalDir":                "skills_global_dir",
+	"skills.load.disableGlobalDir":         "skills_global_disabled",
+	"service.enabled":                      "service_enabled",
+	"service.listen":                       "service_listen",
+	"service.secret":                       "service_secret",
+	"runner.defaultRunner":                 "runner_default_runner",
+	"context.taskCard.enabled":             "context_task_card_enabled",
 }
 
 // ConfigureFieldKeyForMetadata returns the configure API field key used by

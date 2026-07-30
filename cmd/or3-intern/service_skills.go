@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -10,34 +14,34 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/skills"
-	"or3-intern/internal/tools"
 )
 
+type serviceInstallBundledRequest struct {
+	Target string `json:"target"`
+}
+
 type serviceSkillItem struct {
-	Name                string   `json:"name"`
-	Key                 string   `json:"key"`
-	Description         string   `json:"description,omitempty"`
-	Summary             string   `json:"summary,omitempty"`
-	Homepage            string   `json:"homepage,omitempty"`
-	Source              string   `json:"source"`
-	Location            string   `json:"location"`
-	Eligible            bool     `json:"eligible"`
-	Disabled            bool     `json:"disabled"`
-	Hidden              bool     `json:"hidden"`
-	Status              string   `json:"status"`
-	PermissionState     string   `json:"permission_state"`
-	PermissionNotes     []string `json:"permission_notes,omitempty"`
-	Missing             []string `json:"missing,omitempty"`
-	Unsupported         []string `json:"unsupported,omitempty"`
-	ParseError          string   `json:"parse_error,omitempty"`
-	UserInvocable       bool     `json:"user_invocable"`
-	PrimaryEnv          string   `json:"primary_env,omitempty"`
-	RequiredEnv         []string `json:"required_env,omitempty"`
-	ConfigFields        []string `json:"config_fields,omitempty"`
-	APIKeyConfigured    bool     `json:"api_key_configured"`
-	DiagnosticAvailable bool     `json:"diagnostic_available"`
-	DiagnosticStatus    string   `json:"diagnostic_status,omitempty"`
-	DiagnosticManifest  string   `json:"diagnostic_manifest,omitempty"`
+	Name             string   `json:"name"`
+	Key              string   `json:"key"`
+	Description      string   `json:"description,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	Homepage         string   `json:"homepage,omitempty"`
+	Source           string   `json:"source"`
+	Location         string   `json:"location"`
+	Eligible         bool     `json:"eligible"`
+	Disabled         bool     `json:"disabled"`
+	Hidden           bool     `json:"hidden"`
+	Status           string   `json:"status"`
+	PermissionState  string   `json:"permission_state"`
+	PermissionNotes  []string `json:"permission_notes,omitempty"`
+	Missing          []string `json:"missing,omitempty"`
+	Unsupported      []string `json:"unsupported,omitempty"`
+	ParseError       string   `json:"parse_error,omitempty"`
+	UserInvocable    bool     `json:"user_invocable"`
+	PrimaryEnv       string   `json:"primary_env,omitempty"`
+	RequiredEnv      []string `json:"required_env,omitempty"`
+	ConfigFields     []string `json:"config_fields,omitempty"`
+	APIKeyConfigured bool     `json:"api_key_configured"`
 }
 
 type serviceSkillRoot struct {
@@ -74,6 +78,14 @@ func (s *serviceServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(path, "/")
+	if len(parts) == 1 && parts[0] == "install-bundled" {
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleSkillInstallBundled(w, r)
+		return
+	}
 	if len(parts) != 2 || parts[1] != "settings" {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "skills route not found"})
 		return
@@ -142,18 +154,49 @@ func (s *serviceServer) handleSkillSettingsUpdate(w http.ResponseWriter, r *http
 	})
 }
 
+func (s *serviceServer) handleSkillInstallBundled(w http.ResponseWriter, r *http.Request) {
+	var body serviceInstallBundledRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body", "detail": err.Error()})
+			return
+		}
+		body.Target = "global"
+	}
+	target := strings.TrimSpace(body.Target)
+	var targetDir string
+	switch target {
+	case "global":
+		targetDir = strings.TrimSpace(s.config.Skills.Load.GlobalDir)
+	case "workspace":
+		targetDir = filepath.Join(strings.TrimSpace(s.config.WorkspaceDir), "skills")
+	default:
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown install target: %q", target)})
+		return
+	}
+	if targetDir == "" {
+		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "install target directory not configured"})
+		return
+	}
+	installed, err := installBundledSkills(targetDir)
+	if err != nil {
+		writeServiceError(w, r, http.StatusBadGateway, "install bundled skills failed", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"target":    target,
+		"targetDir": targetDir,
+		"skills":    installed,
+	})
+}
+
 func (s *serviceServer) serviceSkillsInventory(ctx context.Context, cfg config.Config) skills.Inventory {
 	return buildSkillsInventory(cfg, s.serviceBundledSkillsDir(), s.serviceAvailableToolNames(ctx, cfg))
 }
 
 func (s *serviceServer) serviceAvailableToolNames(ctx context.Context, cfg config.Config) map[string]struct{} {
-	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
-	if s.runtime != nil && s.runtime.Tools != nil {
-		for _, name := range s.runtime.Tools.Names() {
-			toolNames[name] = struct{}{}
-		}
-	}
-	return toolNames
+	return filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled))
 }
 
 func (s *serviceServer) serviceBundledSkillsDir() string {
@@ -161,27 +204,18 @@ func (s *serviceServer) serviceBundledSkillsDir() string {
 	if cfgPath == "" {
 		cfgPath = cfgPathOrDefault("")
 	}
-	return filepath.Join(filepath.Dir(cfgPath), "builtin_skills")
+	cfg := s.config
+	if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err == nil {
+		s.config = cfg
+	}
+	dir, err := resolveBundledSkillsDir(cfgPath)
+	if err != nil {
+		return filepath.Join(filepath.Dir(cfgPath), "builtin_skills")
+	}
+	return dir
 }
 
-func (s *serviceServer) applyServiceSkillsInventory(inv skills.Inventory) {
-	if s.runtime == nil || s.runtime.Builder == nil {
-		return
-	}
-	s.runtime.Builder.Skills = inv
-	if s.runtime.Tools == nil {
-		return
-	}
-	if tool, ok := s.runtime.Tools.Get("read_skill").(*tools.ReadSkill); ok {
-		tool.Inventory = &s.runtime.Builder.Skills
-	}
-	if tool, ok := s.runtime.Tools.Get("run_skill").(*tools.RunSkill); ok {
-		tool.Inventory = &s.runtime.Builder.Skills
-	}
-	if tool, ok := s.runtime.Tools.Get("run_skill_script").(*tools.RunSkillScript); ok {
-		tool.Inventory = &s.runtime.Builder.Skills
-	}
-}
+func (s *serviceServer) applyServiceSkillsInventory(_ skills.Inventory) {}
 
 func serviceSkillRoots(cfg config.Config) []serviceSkillRoot {
 	roots := buildSkillRoots(cfg, "")
@@ -211,41 +245,27 @@ func serviceSkillItemFromMeta(skill skills.SkillMeta, cfg config.SkillsConfig) s
 		permissionState = "approved"
 	}
 	return serviceSkillItem{
-		Name:                skill.Name,
-		Key:                 serviceSkillEntryKey(skill),
-		Description:         skill.Description,
-		Summary:             skill.Summary,
-		Homepage:            skill.Homepage,
-		Source:              string(skill.Source),
-		Location:            skill.Dir,
-		Eligible:            skill.Eligible,
-		Disabled:            skill.Disabled,
-		Hidden:              skill.Hidden,
-		Status:              serviceSkillStatus(skill),
-		PermissionState:     permissionState,
-		PermissionNotes:     append([]string{}, skill.PermissionNotes...),
-		Missing:             append([]string{}, skill.Missing...),
-		Unsupported:         append([]string{}, skill.Unsupported...),
-		ParseError:          skill.ParseError,
-		UserInvocable:       skill.UserInvocable,
-		PrimaryEnv:          skill.Metadata.PrimaryEnv,
-		RequiredEnv:         append([]string{}, skill.Metadata.Requires.Env...),
-		ConfigFields:        append([]string{}, skill.Metadata.Requires.Config...),
-		APIKeyConfigured:    strings.TrimSpace(entry.APIKey) != "",
-		DiagnosticAvailable: skill.DiagnosticAvailable,
-		DiagnosticStatus:    serviceSkillDiagnosticStatus(skill),
-		DiagnosticManifest:  skill.DiagnosticManifestPath,
-	}
-}
-
-func serviceSkillDiagnosticStatus(skill skills.SkillMeta) string {
-	switch {
-	case strings.TrimSpace(skill.DiagnosticError) != "":
-		return "invalid"
-	case skill.DiagnosticAvailable:
-		return "available"
-	default:
-		return "unavailable"
+		Name:             skill.Name,
+		Key:              serviceSkillEntryKey(skill),
+		Description:      skill.Description,
+		Summary:          skill.Summary,
+		Homepage:         skill.Homepage,
+		Source:           string(skill.Source),
+		Location:         skill.Dir,
+		Eligible:         skill.Eligible,
+		Disabled:         skill.Disabled,
+		Hidden:           skill.Hidden,
+		Status:           serviceSkillStatus(skill),
+		PermissionState:  permissionState,
+		PermissionNotes:  append([]string{}, skill.PermissionNotes...),
+		Missing:          append([]string{}, skill.Missing...),
+		Unsupported:      append([]string{}, skill.Unsupported...),
+		ParseError:       skill.ParseError,
+		UserInvocable:    skill.UserInvocable,
+		PrimaryEnv:       skill.Metadata.PrimaryEnv,
+		RequiredEnv:      append([]string{}, skill.Metadata.Requires.Env...),
+		ConfigFields:     append([]string{}, skill.Metadata.Requires.Config...),
+		APIKeyConfigured: strings.TrimSpace(entry.APIKey) != "",
 	}
 }
 

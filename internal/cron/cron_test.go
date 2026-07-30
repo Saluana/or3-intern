@@ -23,8 +23,21 @@ func mustStartService(t *testing.T, svc *Service) {
 
 func mustAddJob(t *testing.T, svc *Service, job CronJob) {
 	t.Helper()
+	if strings.TrimSpace(job.Payload.Kind) == "" {
+		job.Payload = testRunnerRunPayload("test task")
+	}
 	if err := svc.Add(job); err != nil {
 		t.Fatalf("Add: %v", err)
+	}
+}
+
+func testRunnerRunPayload(task string) CronPayload {
+	return CronPayload{
+		Kind: PayloadRunnerRun,
+		AgentRun: &CronAgentRunPayload{
+			RunnerID: "opencode",
+			Task:     task,
+		},
 	}
 }
 
@@ -88,7 +101,7 @@ func TestAdd_And_List(t *testing.T) {
 		Name:     "test job",
 		Enabled:  true,
 		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
-		Payload:  CronPayload{Kind: "agent_turn", Message: "hello"},
+		Payload:  testRunnerRunPayload("hello"),
 	}
 	if err := svc.Add(job); err != nil {
 		t.Fatalf("Add: %v", err)
@@ -657,11 +670,12 @@ func TestStart_WithExistingJobs(t *testing.T) {
 
 func TestCronPayloadSessionKey(t *testing.T) {
 	payload := CronPayload{
-		Kind:       "agent_turn",
+		Kind:       PayloadRunnerRun,
 		Message:    "hello from cron",
 		SessionKey: "custom-session-123",
 		Channel:    "telegram",
 		To:         "user456",
+		AgentRun:   &CronAgentRunPayload{RunnerID: "opencode", Task: "hello from cron"},
 	}
 
 	// Serialize
@@ -679,8 +693,8 @@ func TestCronPayloadSessionKey(t *testing.T) {
 	if decoded.SessionKey != "custom-session-123" {
 		t.Errorf("expected SessionKey %q, got %q", "custom-session-123", decoded.SessionKey)
 	}
-	if decoded.Kind != "agent_turn" {
-		t.Errorf("expected Kind %q, got %q", "agent_turn", decoded.Kind)
+	if decoded.Kind != PayloadRunnerRun {
+		t.Errorf("expected Kind %q, got %q", PayloadRunnerRun, decoded.Kind)
 	}
 	if decoded.Message != "hello from cron" {
 		t.Errorf("expected Message %q, got %q", "hello from cron", decoded.Message)
@@ -690,8 +704,9 @@ func TestCronPayloadSessionKey(t *testing.T) {
 func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
 	// SessionKey should be omitted when empty (json:"session_key,omitempty")
 	payload := CronPayload{
-		Kind:    "agent_turn",
-		Message: "no session key",
+		Kind:     PayloadRunnerRun,
+		Message:  "no session key",
+		AgentRun: &CronAgentRunPayload{RunnerID: "opencode", Task: "no session key"},
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -702,9 +717,9 @@ func TestCronPayloadSessionKey_OmitEmpty(t *testing.T) {
 	}
 }
 
-func TestCronPayloadAgentCLIRun_JSONRoundTrip(t *testing.T) {
+func TestCronPayloadRunnerRun_JSONRoundTrip(t *testing.T) {
 	payload := CronPayload{
-		Kind:       PayloadAgentCLIRun,
+		Kind:       PayloadRunnerRun,
 		SessionKey: "cron:agents",
 		AgentRun: &CronAgentRunPayload{
 			RunnerID:       "codex",
@@ -727,8 +742,8 @@ func TestCronPayloadAgentCLIRun_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if decoded.Kind != PayloadAgentCLIRun {
-		t.Fatalf("expected kind %q, got %q", PayloadAgentCLIRun, decoded.Kind)
+	if decoded.Kind != PayloadRunnerRun {
+		t.Fatalf("expected kind %q, got %q", PayloadRunnerRun, decoded.Kind)
 	}
 	if decoded.AgentRun == nil {
 		t.Fatal("expected agent_run to round-trip")
@@ -738,9 +753,9 @@ func TestCronPayloadAgentCLIRun_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestValidatePayload_AgentCLIRunDefaultsModeAndIsolation(t *testing.T) {
+func TestValidatePayload_RunnerRunDefaultsModeAndIsolation(t *testing.T) {
 	payload := NormalizePayload(CronPayload{
-		Kind: PayloadAgentCLIRun,
+		Kind: PayloadRunnerRun,
 		AgentRun: &CronAgentRunPayload{
 			RunnerID: "codex",
 			Task:     "review",
@@ -749,19 +764,19 @@ func TestValidatePayload_AgentCLIRunDefaultsModeAndIsolation(t *testing.T) {
 	if err := ValidatePayload(payload); err != nil {
 		t.Fatalf("ValidatePayload: %v", err)
 	}
-	if payload.AgentRun.Mode != DefaultAgentCLICronMode {
-		t.Fatalf("expected default mode %q, got %q", DefaultAgentCLICronMode, payload.AgentRun.Mode)
+	if payload.AgentRun.Mode != DefaultRunnerRunCronMode {
+		t.Fatalf("expected default mode %q, got %q", DefaultRunnerRunCronMode, payload.AgentRun.Mode)
 	}
-	if payload.AgentRun.Isolation != DefaultAgentCLICronIsolation {
-		t.Fatalf("expected default isolation %q, got %q", DefaultAgentCLICronIsolation, payload.AgentRun.Isolation)
+	if payload.AgentRun.Isolation != DefaultRunnerRunCronIsolation {
+		t.Fatalf("expected default isolation %q, got %q", DefaultRunnerRunCronIsolation, payload.AgentRun.Isolation)
 	}
 }
 
-func TestValidatePayload_AgentCLIRunRequiresRunnerAndTask(t *testing.T) {
+func TestValidatePayload_RunnerRunRequiresRunnerAndTask(t *testing.T) {
 	cases := []CronPayload{
-		{Kind: PayloadAgentCLIRun},
-		{Kind: PayloadAgentCLIRun, AgentRun: &CronAgentRunPayload{Task: "review"}},
-		{Kind: PayloadAgentCLIRun, AgentRun: &CronAgentRunPayload{RunnerID: "codex"}},
+		{Kind: PayloadRunnerRun},
+		{Kind: PayloadRunnerRun, AgentRun: &CronAgentRunPayload{Task: "review"}},
+		{Kind: PayloadRunnerRun, AgentRun: &CronAgentRunPayload{RunnerID: "codex"}},
 	}
 	for _, tc := range cases {
 		if err := ValidatePayload(tc); err == nil {
@@ -774,7 +789,7 @@ func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
 	svc := New(path, func(ctx context.Context, job CronJob) (RunResult, error) {
-		return RunResult{EnqueuedJobID: "job-agentcli-123", EnqueuedRunID: "acr_123"}, nil
+		return RunResult{EnqueuedJobID: "job-runner-123", EnqueuedRunID: "rr_123"}, nil
 	})
 	mustStartService(t, svc)
 	defer svc.Stop()
@@ -784,7 +799,7 @@ func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
 		Enabled:  true,
 		Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
 		Payload: CronPayload{
-			Kind: PayloadAgentCLIRun,
+			Kind: PayloadRunnerRun,
 			AgentRun: &CronAgentRunPayload{
 				RunnerID: "codex",
 				Task:     "review",
@@ -794,10 +809,10 @@ func TestRunNow_StoresEnqueuedRunIDs(t *testing.T) {
 	_ = mustRunNow(t, svc, "agent-run", false)
 
 	jobs, _ := svc.List()
-	if jobs[0].State.LastEnqueuedJobID != "job-agentcli-123" {
+	if jobs[0].State.LastEnqueuedJobID != "job-runner-123" {
 		t.Fatalf("expected enqueued job id, got %#v", jobs[0].State)
 	}
-	if jobs[0].State.LastEnqueuedRunID != "acr_123" {
+	if jobs[0].State.LastEnqueuedRunID != "rr_123" {
 		t.Fatalf("expected enqueued run id, got %#v", jobs[0].State)
 	}
 }
@@ -870,7 +885,7 @@ func TestService_ConcurrentMutationAndLifecycle(t *testing.T) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			if err := svc.Add(CronJob{ID: id, Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}}); err != nil {
+			if err := svc.Add(CronJob{ID: id, Enabled: true, Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000}, Payload: testRunnerRunPayload(id)}); err != nil {
 				errCh <- fmt.Errorf("Add %s: %w", id, err)
 			}
 		}(id)

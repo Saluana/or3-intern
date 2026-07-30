@@ -1,9 +1,6 @@
 package config
 
-import (
-	"path/filepath"
-	"strings"
-)
+import "strings"
 
 const (
 	AccessLevelReader   = "reader"
@@ -14,75 +11,23 @@ const (
 )
 
 // BuiltinAccessProfiles returns the simple product-level access profiles used
-// by channel and device setup. Paths intentionally use a workspace placeholder
-// so configs stay portable when a workspace moves.
+// by channel and device setup.
 func BuiltinAccessProfiles() map[string]AccessProfileConfig {
 	return map[string]AccessProfileConfig{
 		AccessLevelReader: {
 			MaxCapability: "safe",
-			AllowedTools: []string{
-				"read_file",
-				"search_file",
-				"list_dir",
-				"read_artifact",
-				"memory_search",
-				"memory_recent",
-				"memory_get_pinned",
-			},
-			AllowedHosts:   []string{},
-			WritablePaths:  []string{},
-			AllowSubagents: false,
+			AllowedHosts:  []string{},
+			WritablePaths: []string{},
 		},
 		AccessLevelOperator: {
 			MaxCapability: "guarded",
-			AllowedTools: []string{
-				"read_file",
-				"search_file",
-				"list_dir",
-				"read_artifact",
-				"write_file",
-				"edit_file",
-				"delete_file",
-				"memory_search",
-				"memory_recent",
-				"memory_get_pinned",
-				"web_search",
-				"web_fetch",
-				"web_fetch_markdown",
-				"exec",
-			},
-			AllowedHosts:   []string{},
-			WritablePaths:  []string{AccessProfileWorkspaceDir},
-			AllowSubagents: false,
+			AllowedHosts:  []string{},
+			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},
 		AccessLevelAdmin: {
 			MaxCapability: "privileged",
-			AllowedTools: []string{
-				"read_file",
-				"search_file",
-				"list_dir",
-				"read_artifact",
-				"write_file",
-				"edit_file",
-				"delete_file",
-				"memory_set_pinned",
-				"memory_add_note",
-				"memory_search",
-				"memory_recent",
-				"memory_get_pinned",
-				"web_search",
-				"web_fetch",
-				"web_fetch_markdown",
-				"exec",
-				"run_skill",
-				"run_skill_script",
-				"spawn_subagent",
-				"send_message",
-				"cron",
-			},
-			AllowedHosts:   []string{},
-			WritablePaths:  []string{AccessProfileWorkspaceDir},
-			AllowSubagents: true,
+			AllowedHosts:  []string{},
+			WritablePaths: []string{AccessProfileWorkspaceDir},
 		},
 	}
 }
@@ -95,19 +40,6 @@ func NormalizeAccessLevel(level string) string {
 		return AccessLevelOperator
 	case AccessLevelAdmin, "owner", "administrator":
 		return AccessLevelAdmin
-	default:
-		return ""
-	}
-}
-
-func AccessLevelToDeviceRole(level string) string {
-	switch NormalizeAccessLevel(level) {
-	case AccessLevelReader:
-		return "viewer"
-	case AccessLevelAdmin:
-		return "admin"
-	case AccessLevelOperator:
-		return "operator"
 	default:
 		return ""
 	}
@@ -177,29 +109,4 @@ func MigrateLegacyServiceAccessChannel(cfg *Config) {
 		level = AccessLevelReader
 	}
 	SetChannelAccessLevel(&cfg.Security.Profiles, "service", level)
-}
-
-func ExpandAccessProfile(profile AccessProfileConfig, workspaceDir string) AccessProfileConfig {
-	workspaceDir = strings.TrimSpace(workspaceDir)
-	expanded := profile
-	expanded.AllowedTools = append([]string{}, profile.AllowedTools...)
-	expanded.AllowedHosts = append([]string{}, profile.AllowedHosts...)
-	expanded.WritablePaths = make([]string, 0, len(profile.WritablePaths))
-	for _, raw := range profile.WritablePaths {
-		value := strings.TrimSpace(raw)
-		if value == "" {
-			continue
-		}
-		if workspaceDir != "" {
-			value = strings.ReplaceAll(value, AccessProfileWorkspaceDir, workspaceDir)
-		}
-		if strings.Contains(value, AccessProfileWorkspaceDir) {
-			continue
-		}
-		if abs, err := filepath.Abs(value); err == nil {
-			value = abs
-		}
-		expanded.WritablePaths = append(expanded.WritablePaths, value)
-	}
-	return expanded
 }

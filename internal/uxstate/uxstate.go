@@ -107,7 +107,6 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 	return SettingsHomeView{Sections: []SettingsSectionView{
 		settingsSection("provider", providerSummary(cfg), "or3-intern settings --section provider", false),
 		settingsSection("workspace", workspaceSummary(cfg), "or3-intern settings --section workspace", false),
-		settingsSection("devices", deviceSummary(cfg, 0, 0), "or3-intern connect-device", false),
 		{Key: "safety", Title: "Safety", Summary: uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode), Action: "or3-intern settings --section safety"},
 		settingsSection("channels", channelsSummary(cfg), "or3-intern settings --section channels", false),
 		settingsSection("tools", toolsSummary(cfg), "or3-intern settings --section tools", false),
@@ -125,11 +124,11 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 
 func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, deviceCount, pendingApprovals int) AccessDashboardView {
 	fileRisk := "green"
-	if !cfg.Tools.RestrictToWorkspace {
+	if strings.TrimSpace(cfg.WorkspaceDir) == "" {
 		fileRisk = "red"
 	}
 	commandRisk := "green"
-	execAvailable := cfg.Tools.EnableExec && len(cfg.Hardening.ExecAllowedPrograms) > 0 && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools
+	execAvailable := len(cfg.Hardening.ExecAllowedPrograms) > 0 && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools
 	if execAvailable && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny {
 		commandRisk = "green"
 	} else if execAvailable {
@@ -161,7 +160,7 @@ func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, device
 		{Name: "Commands", Status: commandSummary(cfg), Risk: commandRisk, Detail: "Shows whether local command execution is blocked, asks first, or follows tool defaults.", Action: "or3-intern settings --section safety"},
 		{Name: "Internet", Status: internetSummary(cfg), Risk: internetRisk, Detail: "Covers web/proxy/network-policy posture for outbound access.", Action: "or3-intern settings --section tools"},
 		{Name: "Connected Apps", Status: channelsSummary(cfg), Risk: channelsRisk(cfg), Detail: "External channel adapters stay optional and hidden until enabled.", Action: "or3-intern settings --section channels"},
-		{Name: "Connected Devices", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether phones, apps, or service clients can connect.", Action: "or3-intern connect-device list"},
+		{Name: "Secure Connections", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether service clients can connect through the secure protocol.", Action: "or3-intern settings --section channels"},
 		{Name: "Memory", Status: memorySummary(cfg), Risk: "yellow", Detail: "Summarizes standing memory, document indexing, and prompt context packing.", Action: "or3-intern settings --section memory"},
 		{Name: "Activity Log", Status: activitySummary(cfg), Risk: logRisk, Detail: "Shows whether important actions are recorded for review.", Action: "or3-intern status --advanced"},
 	}}
@@ -234,12 +233,6 @@ func BuildApprovalPrompt(item db.ApprovalRequestRecord) ApprovalPromptView {
 		view.RiskLabel = "Medium"
 		view.RiskExplanation = "This action can change OR3 behavior or share information."
 	}
-	if meta := moderatorRiskView(item); meta != "" {
-		view.RiskLabel = meta
-		if strings.TrimSpace(item.ModeratorReason) != "" {
-			view.RiskExplanation = item.ModeratorReason
-		}
-	}
 	return view
 }
 
@@ -252,8 +245,8 @@ func BuildDeviceViews(records []db.PairedDeviceRecord) []DeviceView {
 			RoleLabel:        uxcopy.DeviceRoleLabel(record.Role),
 			Status:           humanStatus(record.Status),
 			LastUsed:         lastUsed(record.LastSeenAt),
-			ChangeAccessHint: "Change access: or3-intern connect-device role " + record.DeviceID,
-			DisconnectHint:   "Disconnect: or3-intern connect-device disconnect " + record.DeviceID,
+			ChangeAccessHint: "Manage access in OR3 App settings for " + record.DeviceID,
+			DisconnectHint:   "Revoke trust in OR3 App settings for " + record.DeviceID,
 		})
 	}
 	return out
@@ -303,38 +296,21 @@ func channelsRisk(cfg config.Config) string {
 
 func toolsSummary(cfg config.Config) string {
 	parts := []string{}
-	if cfg.Tools.EnableExec {
+	if len(cfg.Hardening.ExecAllowedPrograms) > 0 {
 		parts = append(parts, "commands enabled")
 	} else {
 		parts = append(parts, "commands off")
-	}
-	if len(cfg.Tools.MCPServers) > 0 {
-		parts = append(parts, fmt.Sprintf("%d MCP server(s)", len(cfg.Tools.MCPServers)))
-	}
-	if strings.TrimSpace(cfg.Tools.BraveAPIKey) != "" {
-		parts = append(parts, "web search configured")
 	}
 	return strings.Join(parts, ", ")
 }
 
 func memorySummary(cfg config.Config) string {
-	if cfg.DocIndex.Enabled {
-		return fmt.Sprintf("Standing memory on; document indexing on for %d root(s)", len(cfg.DocIndex.Roots))
-	}
-	return "Standing memory on; document indexing off"
+	return "Standing memory on"
 }
 
 func contextSummary(cfg config.Config) string {
-	dynamic := "dynamic tools off"
-	if cfg.Context.Tools.DynamicExpose {
-		dynamic = "dynamic tools on"
-	}
-	manager := "manager off"
-	if cfg.ContextManager.Enabled {
-		manager = "manager on"
-	}
 	mode := firstNonEmpty(strings.TrimSpace(cfg.Context.Mode), "quality")
-	return fmt.Sprintf("%s mode; %d max input tokens; %s; %s", mode, cfg.Context.MaxInputTokens, dynamic, manager)
+	return fmt.Sprintf("%s mode; %d max input tokens", mode, cfg.Context.MaxInputTokens)
 }
 
 func headline(report intdoctor.Report) string {
@@ -348,19 +324,10 @@ func headline(report intdoctor.Report) string {
 }
 
 func workspaceSummary(cfg config.Config) string {
-	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) != "" {
-		if cfg.Tools.AllowFullFileRead {
-			return "Reads computer; writes only: " + cfg.WorkspaceDir
-		}
+	if strings.TrimSpace(cfg.WorkspaceDir) != "" {
 		return "Only this folder: " + cfg.WorkspaceDir
 	}
-	if cfg.Tools.RestrictToWorkspace {
-		if cfg.Tools.AllowFullFileRead {
-			return "Reads computer; writes restricted to workspace"
-		}
-		return "Restricted to your workspace folder"
-	}
-	return "Not restricted to one folder"
+	return "No workspace folder set"
 }
 
 func commandSummary(cfg config.Config) string {
@@ -377,9 +344,6 @@ func commandSummary(cfg config.Config) string {
 func internetSummary(cfg config.Config) string {
 	if cfg.Security.Network.Enabled && cfg.Security.Network.DefaultDeny {
 		return "Internet access is restricted"
-	}
-	if strings.TrimSpace(cfg.Tools.WebProxy) != "" {
-		return "Internet access uses a proxy"
 	}
 	return "Internet access follows the default tool settings"
 }
@@ -452,21 +416,6 @@ func subjectSummary(subjectJSON, fallback string) string {
 		}
 	}
 	return fallback
-}
-
-func moderatorRiskView(item db.ApprovalRequestRecord) string {
-	switch strings.ToLower(strings.TrimSpace(item.ModeratorRisk)) {
-	case "low":
-		return "Low"
-	case "medium":
-		return "Medium"
-	case "high":
-		return "High"
-	case "extreme":
-		return "Extreme"
-	default:
-		return ""
-	}
 }
 
 func firstNonEmpty(values ...string) string {

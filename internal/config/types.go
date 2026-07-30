@@ -2,9 +2,7 @@
 // rules for or3-intern.
 package config
 
-import (
-	"strings"
-)
+import "strings"
 
 // RuntimeProfile names the intended execution posture for this instance.
 type RuntimeProfile string
@@ -90,41 +88,41 @@ func ProfileSpec(p RuntimeProfile) RuntimeProfileSpec {
 
 // Config is the top-level persisted runtime configuration.
 type Config struct {
-	DBPath                     string              `json:"dbPath"`
-	ArtifactsDir               string              `json:"artifactsDir"`
-	WorkspaceDir               string              `json:"workspaceDir"`
-	AllowedDir                 string              `json:"allowedDir"`
-	DefaultSessionKey          string              `json:"defaultSessionKey"`
-	SoulFile                   string              `json:"soulFile"`
-	AgentsFile                 string              `json:"agentsFile"`
-	ToolsFile                  string              `json:"toolsFile"`
-	BootstrapMaxChars          int                 `json:"bootstrapMaxChars"`
-	BootstrapTotalMaxChars     int                 `json:"bootstrapTotalMaxChars"`
-	SessionCache               int                 `json:"sessionCacheLimit"`
-	HistoryMax                 int                 `json:"historyMaxMessages"`
-	MaxToolBytes               int                 `json:"maxToolBytes"`
-	MaxMediaBytes              int                 `json:"maxMediaBytes"`
-	MaxToolLoops               int                 `json:"maxToolLoops"`
-	MaxToolLoopsExceededAction QuotaExceededAction `json:"maxToolLoopsExceededAction"`
-	MemoryRetrieve             int                 `json:"memoryRetrieveLimit"`
-	VectorK                    int                 `json:"vectorSearchK"`
-	FTSK                       int                 `json:"ftsSearchK"`
-	VectorScanLimit            int                 `json:"vectorScanLimit"`
-	WorkerCount                int                 `json:"workerCount"`
+	DBPath                 string `json:"dbPath"`
+	ArtifactsDir           string `json:"artifactsDir"`
+	WorkspaceDir           string `json:"workspaceDir"`
+	AllowedDir             string `json:"allowedDir"`
+	DefaultSessionKey      string `json:"defaultSessionKey"`
+	SoulFile               string `json:"soulFile"`
+	AgentsFile             string `json:"agentsFile"`
+	ToolsFile              string `json:"toolsFile"`
+	BootstrapMaxChars      int    `json:"bootstrapMaxChars"`
+	BootstrapTotalMaxChars int    `json:"bootstrapTotalMaxChars"`
+	// Deprecated: retained for config compatibility; runner-first runtime does not enforce it.
+	SessionCache int `json:"sessionCacheLimit"`
+	HistoryMax   int `json:"historyMaxMessages"`
+	// Deprecated: retained for config compatibility; runner-first runtime does not enforce it.
+	MaxToolBytes    int `json:"maxToolBytes"`
+	MaxMediaBytes   int `json:"maxMediaBytes"`
+	MemoryRetrieve  int `json:"memoryRetrieveLimit"`
+	VectorK         int `json:"vectorSearchK"`
+	FTSK            int `json:"ftsSearchK"`
+	VectorScanLimit int `json:"vectorScanLimit"`
+	WorkerCount     int `json:"workerCount"`
 
-	ConsolidationEnabled             bool            `json:"consolidationEnabled"`
-	ConsolidationModel               string          `json:"consolidationModel"`
-	ConsolidationWindowSize          int             `json:"consolidationWindowSize"`
-	ConsolidationMaxMessages         int             `json:"consolidationMaxMessages"`
-	ConsolidationMaxInputChars       int             `json:"consolidationMaxInputChars"`
-	ConsolidationAsyncTimeoutSeconds int             `json:"consolidationAsyncTimeoutSeconds"`
-	Subagents                        SubagentsConfig `json:"subagents"`
-	AgentCLI                         AgentCLIConfig  `json:"agentCLI"`
-	RuntimeProfile                   RuntimeProfile  `json:"runtimeProfile"`
+	ConsolidationEnabled             bool           `json:"consolidationEnabled"`
+	ConsolidationModel               string         `json:"consolidationModel"`
+	ConsolidationWindowSize          int            `json:"consolidationWindowSize"`
+	ConsolidationMaxMessages         int            `json:"consolidationMaxMessages"`
+	ConsolidationMaxInputChars       int            `json:"consolidationMaxInputChars"`
+	ConsolidationAsyncTimeoutSeconds int            `json:"consolidationAsyncTimeoutSeconds"`
+	Runners                          RunnersConfig  `json:"runners"`
+	RuntimeProfile                   RuntimeProfile `json:"runtimeProfile"`
+	// CompatEnvWarnings collects non-fatal migration hints from env overrides (not persisted).
+	CompatEnvWarnings []string `json:"-"`
 
 	IdentityFile string         `json:"identityFile"`
 	MemoryFile   string         `json:"memoryFile"`
-	DocIndex     DocIndexConfig `json:"docIndex"`
 	Skills       SkillsConfig   `json:"skills"`
 	Triggers     TriggerConfig  `json:"triggers"`
 	Session      SessionConfig  `json:"session"`
@@ -135,14 +133,13 @@ type Config struct {
 	Providers           ProviderProfiles        `json:"providers,omitempty"`
 	ModelRouting        ModelRoutingConfig      `json:"modelRouting,omitempty"`
 	FavoriteModels      FavoriteModelsConfig    `json:"favoriteModels,omitempty"`
-	Tools               ToolsConfig             `json:"tools"`
 	Hardening           HardeningConfig         `json:"hardening"`
 	Cron                CronConfig              `json:"cron"`
 	Service             ServiceConfig           `json:"service"`
+	FilesystemBrowsing  bool                    `json:"filesystemBrowsing"`
 	Heartbeat           HeartbeatConfig         `json:"heartbeat"`
 	Channels            ChannelsConfig          `json:"channels"`
 	Context             ContextConfig           `json:"context"`
-	ContextManager      ContextManagerConfig    `json:"contextManager"`
 	ContextConfigured   bool                    `json:"-"`
 	IntegrationWarnings []IntegrationQuarantine `json:"-"`
 
@@ -153,29 +150,33 @@ type Config struct {
 }
 
 type ContextConfig struct {
-	Mode                string                 `json:"mode"`
-	MaxInputTokens      int                    `json:"maxInputTokens"`
-	OutputReserveTokens int                    `json:"outputReserveTokens"`
-	SafetyMarginTokens  int                    `json:"safetyMarginTokens"`
-	Sections            ContextSectionBudgets  `json:"sections"`
-	Retrieval           ContextRetrievalConfig `json:"retrieval"`
-	Pressure            ContextPressureConfig  `json:"pressure"`
-	Tools               ContextToolConfig      `json:"tools"`
-	Artifacts           ContextArtifactConfig  `json:"artifacts"`
-	TaskCard            ContextTaskCardConfig  `json:"taskCard"`
+	Mode           string `json:"mode"`
+	MaxInputTokens int    `json:"maxInputTokens"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	OutputReserveTokens int `json:"outputReserveTokens"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	SafetyMarginTokens int `json:"safetyMarginTokens"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce these budgets.
+	Sections ContextSectionBudgets `json:"sections"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	Retrieval ContextRetrievalConfig `json:"retrieval"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	Pressure ContextPressureConfig `json:"pressure"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	Artifacts ContextArtifactConfig `json:"artifacts"`
+	// Deprecated: retained for config compatibility; runner-first context assembly does not enforce it.
+	TaskCard ContextTaskCardConfig `json:"taskCard"`
 }
 
 type ContextSectionBudgets struct {
 	SystemCore       int `json:"systemCore"`
 	SoulIdentity     int `json:"soulIdentity"`
-	ToolPolicy       int `json:"toolPolicy"`
 	ActiveTaskCard   int `json:"activeTaskCard"`
 	PinnedMemory     int `json:"pinnedMemory"`
 	MemoryDigest     int `json:"memoryDigest"`
 	RecentHistory    int `json:"recentHistory"`
 	RetrievedMemory  int `json:"retrievedMemory"`
 	WorkspaceContext int `json:"workspaceContext"`
-	ToolSchemas      int `json:"toolSchemas"`
 }
 
 type ContextRetrievalConfig struct {
@@ -189,44 +190,27 @@ type ContextPressureConfig struct {
 	EmergencyPercent int `json:"emergencyPercent"`
 }
 
-type ContextToolConfig struct {
-	DynamicExpose bool `json:"dynamicExpose"`
-}
-
 type ContextArtifactConfig struct {
 	SummaryMaxChars int `json:"summaryMaxChars"`
 }
 
 type ContextTaskCardConfig struct {
 	Enabled      bool `json:"enabled"`
-	EnforcePlan  bool `json:"enforcePlan"`
 	MaxRefs      int  `json:"maxRefs"`
 	MaxPlanItems int  `json:"maxPlanItems"`
 }
 
-type ContextManagerConfig struct {
-	Enabled           bool   `json:"enabled"`
-	Provider          string `json:"provider"`
-	Model             string `json:"model"`
-	TimeoutSeconds    int    `json:"timeoutSeconds"`
-	IdlePruneSeconds  int    `json:"idlePruneSeconds"`
-	MaxInputTokens    int    `json:"maxInputTokens"`
-	MaxOutputTokens   int    `json:"maxOutputTokens"`
-	AllowTaskUpdates  bool   `json:"allowTaskUpdates"`
-	AllowStalePropose bool   `json:"allowStalePropose"`
-}
-
 // HardeningConfig controls sandboxing, privilege gates, and per-tool quotas.
 type HardeningConfig struct {
-	GuardedTools        bool                  `json:"guardedTools"`
-	PrivilegedTools     bool                  `json:"privilegedTools"`
-	EnableExecShell     bool                  `json:"enableExecShell"`
-	ExecAllowedPrograms []string              `json:"execAllowedPrograms"`
-	ChildEnvAllowlist   []string              `json:"childEnvAllowlist"`
-	IsolateChannelPeers bool                  `json:"isolateChannelPeers"`
-	MetadataScanner     MetadataScannerConfig `json:"metadataScanner"`
-	Sandbox             SandboxConfig         `json:"sandbox"`
-	Quotas              HardeningQuotaConfig  `json:"quotas"`
+	GuardedTools        bool     `json:"guardedTools"`
+	PrivilegedTools     bool     `json:"privilegedTools"`
+	EnableExecShell     bool     `json:"enableExecShell"`
+	ExecAllowedPrograms []string `json:"execAllowedPrograms"`
+	ChildEnvAllowlist   []string `json:"childEnvAllowlist"`
+	IsolateChannelPeers bool     `json:"isolateChannelPeers"`
+	// Deprecated: retained for config compatibility; runner-first runtime does not consume it.
+	MetadataScanner MetadataScannerConfig `json:"metadataScanner"`
+	Sandbox         SandboxConfig         `json:"sandbox"`
 }
 
 type MetadataScannerConfig struct {
@@ -240,27 +224,6 @@ type SandboxConfig struct {
 	BubblewrapPath string   `json:"bubblewrapPath"`
 	AllowNetwork   bool     `json:"allowNetwork"`
 	WritablePaths  []string `json:"writablePaths"`
-}
-
-type QuotaExceededAction string
-
-const (
-	QuotaExceededActionAsk  QuotaExceededAction = "ask"
-	QuotaExceededActionFail QuotaExceededAction = "fail"
-)
-
-// HardeningQuotaConfig limits how many sensitive tool calls a message and session may issue.
-type HardeningQuotaConfig struct {
-	Enabled                 bool                `json:"enabled"`
-	ExceededAction          QuotaExceededAction `json:"exceededAction"`
-	MaxToolCalls            int                 `json:"maxToolCalls"`
-	MaxExecCalls            int                 `json:"maxExecCalls"`
-	MaxWebCalls             int                 `json:"maxWebCalls"`
-	MaxSubagentCalls        int                 `json:"maxSubagentCalls"`
-	MaxSessionToolCalls     int                 `json:"maxSessionToolCalls"`
-	MaxSessionExecCalls     int                 `json:"maxSessionExecCalls"`
-	MaxSessionWebCalls      int                 `json:"maxSessionWebCalls"`
-	MaxSessionSubagentCalls int                 `json:"maxSessionSubagentCalls"`
 }
 
 // ProviderConfig selects the LLM and embedding provider endpoints and limits.
@@ -289,13 +252,10 @@ type ProviderProfileConfig struct {
 }
 
 type ModelRoutingConfig struct {
-	Chat           ModelRoleConfig `json:"chat,omitempty"`
-	Agents         ModelRoleConfig `json:"agents,omitempty"`
-	Subagents      ModelRoleConfig `json:"subagents,omitempty"`
-	Summarization  ModelRoleConfig `json:"summarization,omitempty"`
-	ContextManager ModelRoleConfig `json:"contextManager,omitempty"`
-	Embeddings     ModelRoleConfig `json:"embeddings,omitempty"`
-	Fallback       ModelRoleConfig `json:"fallback,omitempty"`
+	Chat          ModelRoleConfig `json:"chat,omitempty"`
+	Summarization ModelRoleConfig `json:"summarization,omitempty"`
+	Embeddings    ModelRoleConfig `json:"embeddings,omitempty"`
+	Fallback      ModelRoleConfig `json:"fallback,omitempty"`
 }
 
 type ModelRoleConfig struct {
@@ -318,25 +278,16 @@ type FavoriteModelConfig struct {
 }
 
 const (
-	ModelRoleChat           = "chat"
-	ModelRoleAgents         = "agents"
-	ModelRoleSubagents      = "subagents"
-	ModelRoleSummarization  = "summarization"
-	ModelRoleContextManager = "contextManager"
-	ModelRoleEmbeddings     = "embeddings"
-	ModelRoleFallback       = "fallback"
+	ModelRoleChat          = "chat"
+	ModelRoleSummarization = "summarization"
+	ModelRoleEmbeddings    = "embeddings"
+	ModelRoleFallback      = "fallback"
 )
 
 func (cfg Config) ModelRole(role string) ModelRoleConfig {
 	switch strings.TrimSpace(role) {
-	case ModelRoleAgents:
-		return cfg.ModelRouting.Agents
-	case ModelRoleSubagents:
-		return cfg.ModelRouting.Subagents
 	case ModelRoleSummarization:
 		return cfg.ModelRouting.Summarization
-	case ModelRoleContextManager:
-		return cfg.ModelRouting.ContextManager
 	case ModelRoleEmbeddings:
 		return cfg.ModelRouting.Embeddings
 	case ModelRoleFallback:
@@ -351,18 +302,6 @@ func (cfg Config) ProviderProfile(provider string) (ProviderProfileConfig, bool)
 	return profile, ok
 }
 
-// ToolsConfig configures built-in tools and external MCP server integrations.
-type ToolsConfig struct {
-	BraveAPIKey         string                     `json:"braveApiKey" secret:"true"`
-	WebProxy            string                     `json:"webProxy"`
-	EnableExec          bool                       `json:"enableExec"`
-	ExecTimeoutSeconds  int                        `json:"execTimeoutSeconds"`
-	RestrictToWorkspace bool                       `json:"restrictToWorkspace"`
-	AllowFullFileRead   bool                       `json:"allowFullFileRead"`
-	PathAppend          string                     `json:"pathAppend"`
-	MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
-}
-
 // CronConfig enables persistence for scheduled background jobs.
 type CronConfig struct {
 	Enabled   bool   `json:"enabled"`
@@ -371,30 +310,6 @@ type CronConfig struct {
 
 // DefaultHeartbeatSessionKey is the fallback session key used by heartbeat turns.
 const DefaultHeartbeatSessionKey = "heartbeat:default"
-
-const (
-	// DefaultMCPTransport is the default transport for MCP servers.
-	DefaultMCPTransport = "stdio"
-	// DefaultMCPConnectTimeoutSeconds is the default MCP dial timeout.
-	DefaultMCPConnectTimeoutSeconds = 10
-	// DefaultMCPToolTimeoutSeconds is the default timeout for a single MCP tool call.
-	DefaultMCPToolTimeoutSeconds = 30
-)
-
-// MCPServerConfig describes one configured MCP server entry.
-type MCPServerConfig struct {
-	Enabled               bool              `json:"enabled"`
-	Transport             string            `json:"transport"`
-	Command               string            `json:"command"`
-	Args                  []string          `json:"args"`
-	Env                   map[string]string `json:"env" secret:"true"`
-	ChildEnvAllowlist     []string          `json:"childEnvAllowlist"`
-	URL                   string            `json:"url"`
-	Headers               map[string]string `json:"headers" secret:"true"`
-	ToolTimeoutSeconds    int               `json:"toolTimeoutSeconds"`
-	ConnectTimeoutSeconds int               `json:"connectTimeoutSeconds"`
-	AllowInsecureHTTP     bool              `json:"allowInsecureHttp"`
-}
 
 // HeartbeatConfig controls recurring heartbeat turns sourced from a tasks file.
 type HeartbeatConfig struct {
@@ -421,21 +336,15 @@ type ServiceConfig struct {
 	MutationRateLimitPerMinute        int      `json:"mutationRateLimitPerMinute"`
 }
 
-// SubagentsConfig limits the internal subagent queue and worker pool.
-type SubagentsConfig struct {
-	Enabled            bool `json:"enabled"`
-	MaxConcurrent      int  `json:"maxConcurrent"`
-	MaxQueued          int  `json:"maxQueued"`
-	TaskTimeoutSeconds int  `json:"taskTimeoutSeconds"`
-}
-
-// AgentCLIConfig controls the external agent CLI delegation subsystem.
-type AgentCLIConfig struct {
-	Enabled                    bool              `json:"enabled"`
-	DisabledRunners            []string          `json:"disabledRunners"`
+// RunnersConfig controls the external runner delegation subsystem.
+type RunnersConfig struct {
+	Default                    string            `json:"default,omitempty"`
+	Disabled                   []string          `json:"disabledRunners"`
 	RuntimeMode                map[string]string `json:"runtimeMode,omitempty"`
 	DefaultModels              map[string]string `json:"defaultModels,omitempty"`
 	NativeServerURLs           map[string]string `json:"nativeServerUrls,omitempty"`
+	CodexHomePath              string            `json:"codexHomePath,omitempty"`
+	CodexShadowHomePath        string            `json:"codexShadowHomePath,omitempty"`
 	NativeServerStartupSeconds int               `json:"nativeServerStartupSeconds"`
 	NativeServerIdleSeconds    int               `json:"nativeServerIdleSeconds"`
 	MaxConcurrent              int               `json:"maxConcurrent"`
@@ -546,18 +455,6 @@ type ChannelsConfig struct {
 	Email    EmailChannelConfig    `json:"email"`
 }
 
-// DocIndexConfig controls workspace document indexing for retrieval.
-type DocIndexConfig struct {
-	Enabled        bool     `json:"enabled"`
-	Roots          []string `json:"roots"`
-	MaxFiles       int      `json:"maxFiles"`
-	MaxFileBytes   int      `json:"maxFileBytes"`
-	MaxChunks      int      `json:"maxChunks"`
-	EmbedMaxBytes  int      `json:"embedMaxBytes"`
-	RefreshSeconds int      `json:"refreshSeconds"`
-	RetrieveLimit  int      `json:"retrieveLimit"`
-}
-
 // SkillsConfig controls managed skill loading, policy, and runtime behavior.
 type SkillsConfig struct {
 	EnableExec    bool                        `json:"enableExec"`
@@ -639,13 +536,11 @@ type SessionIdentityLink struct {
 type AuthEnforcementMode string
 
 const (
-	AuthEnforcementOff              AuthEnforcementMode = "off"
-	AuthEnforcementWarn             AuthEnforcementMode = "warn"
-	AuthEnforcementSensitive        AuthEnforcementMode = "enforce-sensitive"
-	AuthEnforcementSession          AuthEnforcementMode = "enforce-session"
-	AuthFallbackPairedTokenOnly     string              = "paired-token-only"
-	AuthFallbackPairedTokenPlusWarn string              = "paired-token-plus-warning"
-	AuthFallbackAdminRecoveryOnly   string              = "admin-recovery-only"
+	AuthEnforcementOff            AuthEnforcementMode = "off"
+	AuthEnforcementWarn           AuthEnforcementMode = "warn"
+	AuthEnforcementSensitive      AuthEnforcementMode = "enforce-sensitive"
+	AuthEnforcementSession        AuthEnforcementMode = "enforce-session"
+	AuthFallbackAdminRecoveryOnly string              = "admin-recovery-only"
 )
 
 // AuthConfig configures passkey, session, and recent-auth behavior for the service API.
@@ -660,7 +555,6 @@ type AuthConfig struct {
 	StepUpTTLSeconds           int                 `json:"stepUpTtlSeconds"`
 	FallbackPolicy             string              `json:"fallbackPolicy"`
 	EnforcementMode            AuthEnforcementMode `json:"enforcementMode"`
-	AllowPairedTokenFallback   bool                `json:"allowPairedTokenFallback"`
 	RequirePasskeyForSensitive bool                `json:"requirePasskeyForSensitive"`
 }
 
@@ -677,61 +571,18 @@ type ApprovalDomainConfig struct {
 	Mode ApprovalMode `json:"mode"`
 }
 
-// ApprovalModeratorPreset names a built-in risk-to-action mapping.
-type ApprovalModeratorPreset string
-
-const (
-	ApprovalModeratorPresetBalanced  ApprovalModeratorPreset = "balanced"
-	ApprovalModeratorPresetCautious  ApprovalModeratorPreset = "cautious"
-	ApprovalModeratorPresetHandsOff  ApprovalModeratorPreset = "hands_off"
-	ApprovalModeratorPresetManual    ApprovalModeratorPreset = "manual"
-)
-
-// ApprovalModeratorAction is the moderator decision for a risk level.
-type ApprovalModeratorAction string
-
-const (
-	ApprovalModeratorActionApprove  ApprovalModeratorAction = "approve"
-	ApprovalModeratorActionEscalate ApprovalModeratorAction = "escalate"
-	ApprovalModeratorActionDeny     ApprovalModeratorAction = "deny"
-)
-
-// ApprovalModeratorActionMap maps risk levels to moderator actions.
-type ApprovalModeratorActionMap struct {
-	Low     ApprovalModeratorAction `json:"low"`
-	Medium  ApprovalModeratorAction `json:"medium"`
-	High    ApprovalModeratorAction `json:"high"`
-	Extreme ApprovalModeratorAction `json:"extreme"`
-}
-
-// ApprovalModeratorConfig configures AI-assisted approval review.
-type ApprovalModeratorConfig struct {
-	Enabled             bool                         `json:"enabled"`
-	Preset              ApprovalModeratorPreset      `json:"preset"`
-	Provider            string                       `json:"provider"`
-	Model               string                       `json:"model"`
-	TimeoutSeconds      int                          `json:"timeoutSeconds"`
-	MaxPromptChars      int                          `json:"maxPromptChars"`
-	MaxSubjectChars     int                          `json:"maxSubjectChars"`
-	FailureAction       ApprovalModeratorAction      `json:"failureAction"`
-	UserPolicy          string                       `json:"userPolicy"`
-	Actions             ApprovalModeratorActionMap   `json:"actions"`
-	RequireUserAuthHigh bool                         `json:"requireUserAuthHigh"`
-}
-
 type ApprovalConfig struct {
-	Enabled                 bool                     `json:"enabled"`
-	HostID                  string                   `json:"hostId"`
-	KeyFile                 string                   `json:"keyFile"`
-	PairingCodeTTLSeconds   int                      `json:"pairingCodeTtlSeconds"`
-	PendingTTLSeconds       int                      `json:"pendingTtlSeconds"`
-	ApprovalTokenTTLSeconds int                      `json:"approvalTokenTtlSeconds"`
-	Moderator               ApprovalModeratorConfig  `json:"moderator"`
-	Pairing                 ApprovalDomainConfig     `json:"pairing"`
-	Exec                    ApprovalDomainConfig     `json:"exec"`
-	SkillExecution          ApprovalDomainConfig     `json:"skillExecution"`
-	SecretAccess            ApprovalDomainConfig     `json:"secretAccess"`
-	MessageSend             ApprovalDomainConfig     `json:"messageSend"`
+	Enabled                 bool                 `json:"enabled"`
+	HostID                  string               `json:"hostId"`
+	KeyFile                 string               `json:"keyFile"`
+	PairingCodeTTLSeconds   int                  `json:"pairingCodeTtlSeconds"`
+	PendingTTLSeconds       int                  `json:"pendingTtlSeconds"`
+	ApprovalTokenTTLSeconds int                  `json:"approvalTokenTtlSeconds"`
+	Pairing                 ApprovalDomainConfig `json:"pairing"`
+	Exec                    ApprovalDomainConfig `json:"exec"`
+	SkillExecution          ApprovalDomainConfig `json:"skillExecution"`
+	SecretAccess            ApprovalDomainConfig `json:"secretAccess"`
+	MessageSend             ApprovalDomainConfig `json:"messageSend"`
 }
 
 // SecurityConfig groups secret storage, auditing, profiles, and network policy.
@@ -767,13 +618,15 @@ type AccessProfilesConfig struct {
 	Profiles map[string]AccessProfileConfig `json:"profiles"`
 }
 
-// AccessProfileConfig limits tools, hosts, and write paths for a profile.
+// AccessProfileConfig declares the documented capability, host, and write-path
+// surface area for a profile. None of these fields are enforced by
+// or3-intern itself: the runner enforces its own tool and execution policy,
+// and these fields are surfaced as metadata for visibility into the profile
+// the operator has declared.
 type AccessProfileConfig struct {
-	MaxCapability  string   `json:"maxCapability"`
-	AllowedTools   []string `json:"allowedTools"`
-	AllowedHosts   []string `json:"allowedHosts"`
-	WritablePaths  []string `json:"writablePaths"`
-	AllowSubagents bool     `json:"allowSubagents"`
+	MaxCapability string   `json:"maxCapability"`
+	AllowedHosts  []string `json:"allowedHosts"`
+	WritablePaths []string `json:"writablePaths"`
 }
 
 // NetworkPolicyConfig defines outbound network restrictions.

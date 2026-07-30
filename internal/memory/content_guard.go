@@ -14,7 +14,7 @@ const (
 )
 
 var (
-	pinKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	pinKeyPattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	secretPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\b(api[_-]?key|apikey)\b\s*[:=]\s*\S+`),
 		regexp.MustCompile(`(?i)\b(bearer|authorization)\b\s*[:=]\s*\S+`),

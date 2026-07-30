@@ -1,0 +1,40 @@
+{
+  "name": "or3",
+  "version": "0.1.0",
+  "description": "One-command OR3 Connect bootstrap",
+  "license": "GPL-3.0",
+  "type": "module",
+  "bin": {
+    "or3": "bin/or3.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "prepublishOnly": "npm test",
+    "test": "node --test"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "or3",
+    "agents",
+    "remote",
+    "cloudflare-tunnel"
+  ],
+  "homepage": "https://github.com/Saluana/or3-intern#readme",
+  "bugs": {
+    "url": "https://github.com/Saluana/or3-intern/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Saluana/or3-intern.git",
+    "directory": "packages/or3"
+  }
+}

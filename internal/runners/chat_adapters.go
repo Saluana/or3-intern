@@ -1,0 +1,1262 @@
+package runners
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+const (
+	runtimeEventContentDelta         = "content.delta"
+	runtimeEventItemStarted          = "item.started"
+	runtimeEventItemUpdated          = "item.updated"
+	runtimeEventItemCompleted        = "item.completed"
+	runtimeEventRequestOpened        = "request.opened"
+	runtimeEventRequestResolved      = "request.resolved"
+	runtimeEventTurnPlanUpdated      = "turn.plan.updated"
+	runtimeEventTurnProposedDelta    = "turn.proposed.delta"
+	runtimeEventTurnDiffUpdated      = "turn.diff.updated"
+	runtimeEventTurnCompleted        = "turn.completed"
+	runtimeEventRuntimeWarning       = "runtime.warning"
+	runtimeEventRuntimeError         = "runtime.error"
+	runtimeEventTokenUsage           = "token.usage"
+	runtimeEventConfigWarning        = "config.warning"
+	runtimeEventModelReroute         = "model.reroute"
+	runtimeEventSkillInvoked         = "skill.invoked"
+	runtimeStreamAssistantText       = "assistant_text"
+	runtimeStreamReasoningText       = "reasoning_text"
+	runtimeStreamReasoningSummary    = "reasoning_summary_text"
+	runtimeStreamPlanText            = "plan_text"
+	runtimeStreamCommandOutput       = "command_output"
+	runtimeStreamFileChangeOutput    = "file_change_output"
+	runtimeStreamUnknown             = "unknown"
+	runtimeItemAssistantMessage      = "assistant_message"
+	runtimeItemReasoning             = "reasoning"
+	runtimeItemPlan                  = "plan"
+	runtimeItemCommandExecution      = "command_execution"
+	runtimeItemFileChange            = "file_change"
+	runtimeItemMCPToolCall           = "mcp_tool_call"
+	runtimeItemWebSearch             = "web_search"
+	runtimeItemCollabAgentToolCall   = "collab_agent_tool_call"
+	runtimeItemDynamicToolCall       = "dynamic_tool_call"
+	runtimeItemUnknown               = "unknown"
+	runtimeRequestCommandApproval    = "command_execution_approval"
+	runtimeRequestFileReadApproval   = "file_read_approval"
+	runtimeRequestFileChangeApproval = "file_change_approval"
+	runtimeRequestUnknown            = "unknown"
+	runtimeConfigWarningMissing      = "missing"
+	runtimeConfigWarningDeprecated   = "deprecated"
+	runtimeConfigWarningExperimental = "experimental"
+)
+
+func (a *OpenCodeAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
+	args := []string{"run", "--format", "json"}
+	if req.ContinuationMode == ContinuationNative {
+		if ref := strings.TrimSpace(req.NativeSessionRef); ref != "" {
+			args = append(args, "--session", ref)
+		}
+	}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	mode := RunnerMode(req.Mode)
+	if mode == RunnerModeSandboxAuto {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args, ChatExecutionInput(req, strings.TrimSpace(req.ReplayPrompt)))
+	return CommandSpec{
+		RunnerID:    a.ID(),
+		Binary:      a.spec.Binary,
+		Args:        args,
+		Cwd:         req.Cwd,
+		OutputMode:  OutputJSON,
+		ArgvPreview: append([]string{}, args...),
+	}, nil
+}
+
+func (a *CodexAdapter) BuildChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
+	if req.ContinuationMode != ContinuationNative || strings.TrimSpace(req.NativeSessionRef) == "" {
+		return a.BuildCommand(chatCommandRunRequest(a.ID(), req))
+	}
+	return a.buildNativeResumeChatCommand(req)
+}
+
+func (a *CodexAdapter) buildNativeResumeChatCommand(req RunnerChatCommandRequest) (CommandSpec, error) {
+	base := chatCommandRunRequest(a.ID(), req)
+	mode := RunnerMode(req.Mode)
+	args := make([]string, 0, 18)
+	if mode != RunnerModeSandboxAuto {
+		args = append(args, "--ask-for-approval", "never")
+	}
+	args = append(args, "-c", codexDisableMCPConfigOverride)
+	if req.Cwd != "" {
+		args = append(args, "--cd", req.Cwd)
+	}
+	if permission, ok := runnerPermissionFromMeta(req.Meta); ok && permission.Access == runnerPermissionAccessWrite {
+		args = append(args, "--add-dir", permission.TargetPath)
+	}
+	switch mode {
+	case RunnerModeReview:
+		args = append(args, "--sandbox", "read-only")
+	case RunnerModeSafeEdit, "":
+		args = append(args, "--sandbox", "workspace-write")
+	case RunnerModeSandboxAuto:
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	default:
+		return CommandSpec{}, fmt.Errorf("unsupported codex mode %q", req.Mode)
+	}
+	args = append(args, "exec", "resume", "--json", "--skip-git-repo-check")
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	args = append(args, strings.TrimSpace(req.NativeSessionRef), base.Task)
+	return CommandSpec{RunnerID: a.ID(), Binary: a.spec.Binary, Args: args, Cwd: req.Cwd, OutputMode: OutputJSONL, ArgvPreview: append([]string{}, args...)}, nil
+}
+
+func (a *OpenCodeAdapter) NormalizeChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
+	if raw.Type == "structured" {
+		if events := normalizeOpenCodeStructuredChatEvent(raw); len(events) > 0 {
+			return events
+		}
+		if isSuppressedOpenCodeStructuredEvent(raw.Payload) {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: "runner_output", Seq: raw.Seq, Stream: raw.Stream, Payload: rawEventPayload(raw)}}
+	}
+	if raw.Type == "output" && raw.Stream == "stdout" {
+		trimmed := strings.TrimSpace(raw.Chunk)
+		payloads, _ := decodeStructuredPayloads(trimmed)
+		if trimmed == "" || strings.HasPrefix(trimmed, "{") || len(payloads) > 0 {
+			return []RunnerChatEvent{{
+				Type:    "runner_output",
+				Seq:     raw.Seq,
+				Stream:  raw.Stream,
+				Payload: rawEventPayload(raw),
+			}}
+		}
+	}
+	return normalizeGenericChatEvent(raw)
+}
+
+func (a *CodexAdapter) NormalizeChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
+	if raw.Type == "structured" {
+		if events := normalizeCodexStructuredChatEvent(raw); len(events) > 0 {
+			return events
+		}
+		if isSuppressedCodexStructuredEvent(raw.Payload) {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: "runner_output", Seq: raw.Seq, Stream: raw.Stream, Payload: rawEventPayload(raw)}}
+	}
+	if raw.Type == "output" && raw.Stream == "stdout" {
+		trimmed := strings.TrimSpace(raw.Chunk)
+		payloads, _ := decodeStructuredPayloads(trimmed)
+		if trimmed == "" || strings.HasPrefix(trimmed, "{") || len(payloads) > 0 {
+			return []RunnerChatEvent{{
+				Type:    "runner_output",
+				Seq:     raw.Seq,
+				Stream:  raw.Stream,
+				Payload: rawEventPayload(raw),
+			}}
+		}
+	}
+	return normalizeGenericChatEvent(raw)
+}
+
+func (a *OpenCodeAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string, bool) {
+	payload := strings.TrimSpace(extractOpenCodeSessionRefPayload(event))
+	if payload == "" {
+		return "", false
+	}
+	return payload, true
+}
+
+func (a *CodexAdapter) ExtractNativeSessionRef(event RunnerRunEvent) (string, bool) {
+	ref := extractProviderSessionRef(event, []string{"thread_id", "threadId"}, func(obj map[string]any) bool {
+		return stringField(obj, "type") == "thread.started" || stringField(obj, "method") == "thread/started"
+	})
+	return ref, ref != ""
+}
+
+func chatCommandRunRequest(id RunnerID, req RunnerChatCommandRequest) RunnerRunRequest {
+	task := ChatExecutionInput(req, strings.TrimSpace(req.ReplayPrompt))
+	return RunnerRunRequest{
+		ParentSessionKey: req.SessionID,
+		RunnerID:         string(id),
+		Task:             task,
+		TimeoutSeconds:   req.TimeoutSeconds,
+		Cwd:              req.Cwd,
+		Model:            req.Model,
+		Mode:             req.Mode,
+		Isolation:        req.Isolation,
+		MaxTurns:         req.MaxTurns,
+		Meta:             req.Meta,
+	}
+}
+
+func normalizeGenericChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
+	if raw.Type == "" {
+		return nil
+	}
+	payload := rawEventPayload(raw)
+	eventType := raw.Type
+	text := raw.Chunk
+	if raw.Type == "output" {
+		eventType = "runner_output"
+		if raw.Stream == "stdout" {
+			eventType = "text_delta"
+		}
+	}
+	if raw.Type == "completion" && raw.Status != "" {
+		eventType = "completion"
+	}
+	return []RunnerChatEvent{{
+		Type:    eventType,
+		Seq:     raw.Seq,
+		Stream:  raw.Stream,
+		Text:    text,
+		Payload: payload,
+	}}
+}
+
+func normalizeOpenCodeStructuredChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
+	if len(raw.Payload) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw.Payload, &obj); err != nil {
+		return nil
+	}
+	switch stringField(obj, "type") {
+	case "text":
+		text, ok := openCodeStreamTextPart(obj["part"])
+		if !ok || text == "" {
+			return nil
+		}
+		if openCodePartIsReasoning(mapField(obj, "part")) {
+			return []RunnerChatEvent{{
+				Type:    "reasoning_delta",
+				Seq:     raw.Seq,
+				Text:    text,
+				Payload: runtimeContentDeltaPayload(runtimeStreamReasoningText, text, raw.Payload),
+			}}
+		}
+		return []RunnerChatEvent{{
+			Type:    "text_delta",
+			Seq:     raw.Seq,
+			Text:    text,
+			Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload),
+		}}
+	case "assistant", "assistant_message":
+		text := extractOpenCodeAssistantText(obj)
+		if text == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{
+			Type:    "text_delta",
+			Seq:     raw.Seq,
+			Text:    text,
+			Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload),
+		}}
+	case "message.part.delta":
+		text := extractStringPreserveWhitespace(firstNonNilPreserveString(obj["delta"], obj["text"], obj["content"]))
+		if text == "" {
+			text = extractStringPreserveWhitespace(obj["part"])
+		}
+		if text == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload)}}
+	case "message.part.updated":
+		return normalizeOpenCodePartUpdated(raw, obj)
+	case "tool_use":
+		return normalizeOpenCodeToolUse(raw, obj)
+	case "permission.asked", "permission.replied", "question.asked", "question.replied", "session.error", "session.status":
+		return normalizeOpenCodeRuntimeEvent(raw, obj)
+	case "config.warning", "config_warning", "warning":
+		return configWarningEvent(raw, obj)
+	case "model.reroute", "model_reroute", "model.routed":
+		return modelRerouteEvent(raw, obj)
+	case "token.usage", "token_usage":
+		return tokenUsageEvent(raw, obj)
+	case "skill.invoked", "skill_invoked":
+		return skillInvokedEvent(raw, obj)
+	default:
+		return nil
+	}
+}
+
+func isSuppressedOpenCodeStructuredEvent(raw json.RawMessage) bool {
+	obj, ok := rawObject(raw)
+	if !ok {
+		return false
+	}
+	switch stringField(obj, "type") {
+	case "step_start", "step_finish", "step.completed", "step.started", "session.updated":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeCodexStructuredChatEvent(raw RunnerRunEvent) []RunnerChatEvent {
+	if len(raw.Payload) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw.Payload, &obj); err != nil {
+		return nil
+	}
+	providerType := stringField(obj, "type")
+	method := firstNonEmptyStr(providerType, stringField(obj, "method"))
+	switch providerType {
+	case "item.completed":
+		text := extractCodexAgentMessageText(obj)
+		item := mapField(obj, "item")
+		itemType := codexItemType(item)
+		if itemType == runtimeItemPlan {
+			plan := extractString(firstNonNil(item["text"], item["content"]))
+			if plan == "" {
+				return nil
+			}
+			return []RunnerChatEvent{{Type: runtimeEventTurnProposedDelta, Seq: raw.Seq, Text: plan, Payload: runtimePayload(runtimeEventTurnProposedDelta, map[string]any{"delta": plan}, raw.Payload)}}
+		}
+		if text != "" {
+			return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload)}}
+		}
+		return normalizeCodexLifecycleEvent(raw, obj, runtimeEventItemCompleted)
+	case "item.started":
+		return normalizeCodexLifecycleEvent(raw, obj, runtimeEventItemStarted)
+	case "item.updated":
+		return normalizeCodexLifecycleEvent(raw, obj, runtimeEventItemUpdated)
+	case "turn.completed":
+		return []RunnerChatEvent{{Type: runtimeEventTurnCompleted, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTurnCompleted, map[string]any{"state": codexTurnState(obj)}, raw.Payload)}}
+	case "turn.plan.updated":
+		return []RunnerChatEvent{{Type: runtimeEventTurnPlanUpdated, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTurnPlanUpdated, map[string]any{"plan": firstNonNil(obj["plan"], obj["steps"]), "explanation": extractString(obj["explanation"])}, raw.Payload)}}
+	case "turn.diff.updated":
+		diff := extractString(firstNonNil(obj["diff"], obj["unified_diff"], obj["unifiedDiff"]))
+		return []RunnerChatEvent{{Type: runtimeEventTurnDiffUpdated, Seq: raw.Seq, Text: diff, Payload: runtimePayload(runtimeEventTurnDiffUpdated, map[string]any{"unified_diff": diff}, raw.Payload)}}
+	case "error":
+		msg := extractString(firstNonNil(obj["message"], obj["error"]))
+		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: msg, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": msg}, raw.Payload)}}
+	case "token.usage", "token_usage", "item/tokenCount/updated":
+		return tokenUsageEvent(raw, obj)
+	case "config.warning", "config_warning", "warning":
+		return configWarningEvent(raw, obj)
+	case "model.reroute", "model_reroute", "model.routed":
+		return modelRerouteEvent(raw, obj)
+	case "skill.invoked", "skill_invoked":
+		return skillInvokedEvent(raw, obj)
+	default:
+		if event := normalizeCodexMethodEvent(raw, obj, method); len(event) > 0 {
+			return event
+		}
+		return nil
+	}
+}
+
+func isSuppressedCodexStructuredEvent(raw json.RawMessage) bool {
+	obj, ok := rawObject(raw)
+	if !ok {
+		return false
+	}
+	switch stringField(obj, "type") {
+	case "thread.started", "turn.started":
+		return true
+	default:
+		return false
+	}
+}
+
+func openCodeTextPart(value any) (string, bool) {
+	part, ok := value.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if partType := stringField(part, "type"); partType != "" && partType != "text" {
+		return "", false
+	}
+	text, ok := part["text"].(string)
+	return text, ok
+}
+
+func openCodeStreamTextPart(value any) (string, bool) {
+	part, ok := value.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if !openCodeStreamTextPartType(stringField(part, "type")) {
+		return "", false
+	}
+	text, ok := part["text"].(string)
+	return text, ok
+}
+
+func openCodePartIsReasoning(part map[string]any) bool {
+	if strings.EqualFold(strings.TrimSpace(stringField(part, "type")), "reasoning") {
+		return true
+	}
+	for _, value := range []string{
+		stringField(part, "kind"),
+		stringField(part, "name"),
+		stringField(part, "title"),
+		stringField(part, "stream"),
+		stringField(part, "stream_kind"),
+		stringField(part, "streamKind"),
+		stringField(mapField(part, "metadata"), "kind"),
+		stringField(mapField(part, "metadata"), "type"),
+		stringField(mapField(part, "state"), "kind"),
+		stringField(mapField(part, "state"), "type"),
+	} {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if strings.Contains(normalized, "reasoning") || strings.Contains(normalized, "thinking") || strings.Contains(normalized, "thought") {
+			return true
+		}
+	}
+	return false
+}
+
+func extractOpenCodeAssistantText(obj map[string]any) string {
+	for _, key := range []string{"message", "content", "text"} {
+		if text, ok := obj[key].(string); ok && text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func extractCodexAgentMessageText(obj map[string]any) string {
+	item, ok := obj["item"].(map[string]any)
+	if !ok || stringField(item, "type") != "agent_message" {
+		return ""
+	}
+	if text := extractString(item["text"]); text != "" {
+		return text
+	}
+	return extractString(item["content"])
+}
+
+func rawEventPayload(raw RunnerRunEvent) json.RawMessage {
+	payload := raw.Payload
+	if len(payload) == 0 {
+		payload, _ = json.Marshal(map[string]any{
+			"type":        raw.Type,
+			"stream":      raw.Stream,
+			"chunk":       raw.Chunk,
+			"status":      raw.Status,
+			"message":     raw.Message,
+			"duration_ms": raw.DurationMS,
+		})
+	}
+	return sanitizedRawPayload(payload)
+}
+
+func extractOpenCodeSessionRefPayload(event RunnerRunEvent) string {
+	if len(event.Payload) > 0 {
+		if ref := extractOpenCodeSessionRefJSON(event.Payload); ref != "" {
+			return ref
+		}
+	}
+	chunk := strings.TrimSpace(event.Chunk)
+	if strings.HasPrefix(chunk, "{") {
+		if ref := extractOpenCodeSessionRefJSON([]byte(chunk)); ref != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
+func extractOpenCodeSessionRefJSON(raw []byte) string {
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(findSessionRef(payload))
+}
+
+func extractProviderSessionRef(event RunnerRunEvent, keys []string, match func(map[string]any) bool) string {
+	for _, raw := range eventJSONPayloads(event) {
+		obj, ok := rawObject(raw)
+		if !ok || !match(obj) {
+			continue
+		}
+		for _, key := range keys {
+			if value := strings.TrimSpace(stringField(obj, key)); value != "" {
+				return value
+			}
+		}
+		for _, nestedKey := range []string{"thread", "session", "data", "payload"} {
+			nested := mapField(obj, nestedKey)
+			for _, key := range keys {
+				if value := strings.TrimSpace(stringField(nested, key)); value != "" {
+					return value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func eventJSONPayloads(event RunnerRunEvent) []json.RawMessage {
+	out := make([]json.RawMessage, 0, 2)
+	if len(event.Payload) > 0 {
+		out = append(out, event.Payload)
+	}
+	chunk := strings.TrimSpace(event.Chunk)
+	if strings.HasPrefix(chunk, "{") {
+		out = append(out, json.RawMessage(chunk))
+	}
+	return out
+}
+
+func rawObject(raw json.RawMessage) (map[string]any, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	return sanitizeRawValue(obj).(map[string]any), true
+}
+
+func mapField(obj map[string]any, key string) map[string]any {
+	if obj == nil {
+		return nil
+	}
+	value, _ := obj[key].(map[string]any)
+	return value
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		switch v := value.(type) {
+		case nil:
+			continue
+		case string:
+			if strings.TrimSpace(v) == "" {
+				continue
+			}
+		}
+		return value
+	}
+	return nil
+}
+
+func firstNonNilPreserveString(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func runtimePayload(eventType string, fields map[string]any, raw json.RawMessage) json.RawMessage {
+	payload := map[string]any{"type": eventType}
+	for key, value := range fields {
+		if value == nil {
+			continue
+		}
+		value = sanitizeRawValue(value)
+		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" && !preserveWhitespacePayloadField(key) {
+			continue
+		}
+		payload[key] = value
+	}
+	if len(raw) > 0 {
+		payload["raw"] = sanitizedRawObject(raw)
+	}
+	encoded, _ := json.Marshal(payload)
+	return encoded
+}
+
+func preserveWhitespacePayloadField(key string) bool {
+	switch key {
+	case "delta", "text", "content":
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeContentDeltaPayload(streamKind, delta string, raw json.RawMessage) json.RawMessage {
+	return runtimePayload(runtimeEventContentDelta, map[string]any{"stream_kind": streamKind, "delta": truncateDiagnostic(delta)}, raw)
+}
+
+func toolLifecyclePayload(itemType, status, title, detail string, data any) map[string]any {
+	return map[string]any{
+		"item_type": itemType,
+		"status":    status,
+		"title":     title,
+		"detail":    detail,
+		"data":      data,
+	}
+}
+
+func normalizeOpenCodeToolData(part map[string]any) map[string]any {
+	data := make(map[string]any, len(part)+8)
+	for key, value := range part {
+		data[key] = value
+	}
+	state := mapField(part, "state")
+	input := firstMeaningfulValue(
+		part["input"],
+		part["arguments"],
+		part["args"],
+		part["params"],
+		state["input"],
+		state["arguments"],
+		state["args"],
+		state["params"],
+	)
+	output := firstMeaningfulValue(
+		part["output"],
+		part["result"],
+		state["output"],
+		state["result"],
+	)
+	errorValue := firstMeaningfulValue(part["error"], state["error"])
+	if input != nil {
+		data["input"] = input
+	}
+	if output != nil {
+		data["output"] = output
+		data["result"] = output
+	}
+	if errorValue != nil {
+		data["error"] = errorValue
+	}
+	if id := firstNonEmptyStr(stringField(part, "callID"), stringField(part, "callId"), stringField(part, "id")); id != "" {
+		data["callID"] = id
+		data["id"] = id
+	}
+	if tool := firstNonEmptyStr(stringField(part, "tool"), stringField(part, "name")); tool != "" {
+		data["tool"] = tool
+		data["name"] = tool
+	}
+	if input == nil {
+		fallback := fallbackOpenCodeToolInput(part, state)
+		if fallback != nil {
+			data["input"] = fallback
+		}
+	}
+	return data
+}
+
+func fallbackOpenCodeToolInput(part, state map[string]any) any {
+	out := map[string]any{}
+	for _, key := range []string{"path", "file", "filePath", "filepath", "filename", "url", "command", "cmd", "pattern", "query"} {
+		if value := firstMeaningfulValue(part[key], state[key]); value != nil {
+			out[key] = value
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if title := strings.TrimSpace(extractString(firstNonNil(state["title"], part["title"], part["detail"]))); title != "" {
+		return map[string]any{"summary": title}
+	}
+	return nil
+}
+
+func firstMeaningfulValue(values ...any) any {
+	for _, value := range values {
+		switch v := value.(type) {
+		case nil:
+			continue
+		case string:
+			if strings.TrimSpace(v) == "" {
+				continue
+			}
+			return v
+		case map[string]any:
+			if len(v) == 0 {
+				continue
+			}
+			return v
+		case []any:
+			if len(v) == 0 {
+				continue
+			}
+			return v
+		default:
+			return v
+		}
+	}
+	return nil
+}
+
+func openCodeToolDetail(part map[string]any) string {
+	state := mapField(part, "state")
+	for _, value := range []any{
+		state["title"],
+		part["detail"],
+		part["summary"],
+		state["output"],
+		part["output"],
+		state["error"],
+		part["error"],
+		state["input"],
+		part["input"],
+		fallbackOpenCodeToolInput(part, state),
+	} {
+		if detail := extractString(value); strings.TrimSpace(detail) != "" {
+			return detail
+		}
+	}
+	return ""
+}
+
+func normalizeOpenCodePartUpdated(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	part := mapField(obj, "part")
+	if len(part) == 0 {
+		return nil
+	}
+	partType := strings.ToLower(stringField(part, "type"))
+	if partType == "text" || partType == "reasoning" {
+		text := extractStringPreserveWhitespace(part["text"])
+		if text == "" {
+			return nil
+		}
+		if openCodePartIsReasoning(part) {
+			return []RunnerChatEvent{{Type: "reasoning_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamReasoningText, text, raw.Payload)}}
+		}
+		return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: text, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, text, raw.Payload)}}
+	}
+	if partType != "tool" {
+		return nil
+	}
+	toolName := firstNonEmptyStr(stringField(part, "tool"), stringField(part, "name"))
+	state := mapField(part, "state")
+	status := runtimeItemStatusFromProvider(firstNonEmptyStr(stringField(state, "status"), stringField(part, "status")))
+	lifecycle := lifecycleFromStatus(status)
+	data := normalizeOpenCodeToolData(part)
+	detail := openCodeToolDetail(data)
+	payload := toolLifecyclePayload(classifyToolName(toolName), status, firstNonEmptyStr(extractString(state["title"]), toolName, "Tool"), detail, data)
+	return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Payload: runtimePayload(lifecycle, payload, raw.Payload)}}
+}
+
+func normalizeOpenCodeToolUse(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	part := mapField(obj, "part")
+	if len(part) == 0 {
+		return nil
+	}
+	toolName := firstNonEmptyStr(stringField(part, "tool"), stringField(part, "name"), "Tool")
+	state := mapField(part, "state")
+	status := runtimeItemStatusFromProvider(stringField(state, "status"))
+	lifecycle := lifecycleFromStatus(status)
+	data := normalizeOpenCodeToolData(part)
+	detail := openCodeToolDetail(data)
+	payload := toolLifecyclePayload(classifyToolName(toolName), status, toolName, detail, data)
+	return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Payload: runtimePayload(lifecycle, payload, raw.Payload)}}
+}
+
+func normalizeOpenCodeRuntimeEvent(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	switch stringField(obj, "type") {
+	case "permission.asked":
+		return []RunnerChatEvent{{Type: runtimeEventRequestOpened, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestOpened, map[string]any{"request_type": openCodePermissionRequestType(obj), "detail": extractString(firstNonNil(obj["permission"], obj["question"], obj["message"])), "args": obj}, raw.Payload)}}
+	case "permission.replied":
+		return []RunnerChatEvent{{Type: runtimeEventRequestResolved, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestResolved, map[string]any{"request_type": runtimeRequestUnknown, "decision": extractString(firstNonNil(obj["decision"], obj["answer"])), "resolution": obj}, raw.Payload)}}
+	case "question.asked":
+		return []RunnerChatEvent{{Type: "user-input.requested", Seq: raw.Seq, Payload: runtimePayload("user-input.requested", map[string]any{"questions": firstNonNil(obj["questions"], obj["question"]), "detail": extractString(obj["question"])}, raw.Payload)}}
+	case "question.replied":
+		return []RunnerChatEvent{{Type: "user-input.resolved", Seq: raw.Seq, Payload: runtimePayload("user-input.resolved", map[string]any{"answers": firstNonNil(obj["answers"], obj["answer"])}, raw.Payload)}}
+	case "session.error":
+		message := extractString(firstNonNil(obj["message"], obj["error"]))
+		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: message, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": message}, raw.Payload)}}
+	case "session.status":
+		if strings.EqualFold(extractString(firstNonNil(obj["status"], obj["state"])), "idle") {
+			return []RunnerChatEvent{{Type: runtimeEventTurnCompleted, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTurnCompleted, map[string]any{"state": "completed"}, raw.Payload)}}
+		}
+	}
+	return nil
+}
+
+func openCodePermissionRequestType(obj map[string]any) string {
+	permission := strings.ToLower(firstNonEmptyStr(
+		stringField(obj, "permission"),
+		stringField(obj, "tool"),
+		stringField(obj, "name"),
+		stringField(mapField(obj, "permission"), "permission"),
+		stringField(mapField(obj, "permission"), "type"),
+		stringField(mapField(obj, "permission"), "tool"),
+		stringField(mapField(obj, "permission"), "name"),
+		stringField(mapField(obj, "request"), "permission"),
+		stringField(mapField(obj, "request"), "type"),
+		stringField(mapField(obj, "request"), "tool"),
+		stringField(mapField(obj, "request"), "name"),
+	))
+	switch {
+	case strings.Contains(permission, "bash"), strings.Contains(permission, "shell"), strings.Contains(permission, "command"), strings.Contains(permission, "exec"):
+		return runtimeRequestCommandApproval
+	case strings.Contains(permission, "read"):
+		return runtimeRequestFileReadApproval
+	case strings.Contains(permission, "edit"), strings.Contains(permission, "write"), strings.Contains(permission, "patch"), strings.Contains(permission, "external_directory"):
+		return runtimeRequestFileChangeApproval
+	default:
+		return runtimeRequestUnknown
+	}
+}
+
+func normalizeCodexLifecycleEvent(raw RunnerRunEvent, obj map[string]any, lifecycle string) []RunnerChatEvent {
+	item := mapField(obj, "item")
+	if len(item) == 0 {
+		item = mapField(mapField(obj, "payload"), "item")
+	}
+	if len(item) == 0 {
+		return nil
+	}
+	itemType := codexItemType(item)
+	if itemType == runtimeItemUnknown && lifecycle != runtimeEventItemUpdated {
+		return nil
+	}
+	status := "inProgress"
+	if lifecycle == runtimeEventItemCompleted {
+		status = "completed"
+	}
+	title := firstNonEmptyStr(extractString(item["title"]), itemTitle(itemType))
+	detail := extractString(firstNonNil(item["text"], item["content"], item["command"], item["path"], item["name"]))
+	payload := toolLifecyclePayload(itemType, status, title, detail, item)
+	return []RunnerChatEvent{{Type: lifecycle, Seq: raw.Seq, Text: detail, Payload: runtimePayload(lifecycle, payload, raw.Payload)}}
+}
+
+func normalizeCodexMethodEvent(raw RunnerRunEvent, obj map[string]any, method string) []RunnerChatEvent {
+	method = strings.TrimSpace(method)
+	params := mapField(obj, "params")
+	delta := extractDeltaString(firstNonNil(obj["delta"], obj["text_delta"], obj["textDelta"], params["delta"], params["text"]))
+	switch method {
+	case "item/agentMessage/delta":
+		if delta == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: "text_delta", Seq: raw.Seq, Text: delta, Payload: runtimeContentDeltaPayload(runtimeStreamAssistantText, delta, raw.Payload)}}
+	case "item/reasoning/textDelta":
+		if delta == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: "reasoning_delta", Seq: raw.Seq, Text: delta, Payload: runtimeContentDeltaPayload(runtimeStreamReasoningText, delta, raw.Payload)}}
+	case "item/reasoning/summaryTextDelta":
+		if delta == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: "reasoning_delta", Seq: raw.Seq, Text: delta, Payload: runtimeContentDeltaPayload(runtimeStreamReasoningSummary, delta, raw.Payload)}}
+	case "item/plan/delta":
+		if delta == "" {
+			return nil
+		}
+		return []RunnerChatEvent{{Type: runtimeEventTurnProposedDelta, Seq: raw.Seq, Text: delta, Payload: runtimePayload(runtimeEventTurnProposedDelta, map[string]any{"delta": delta}, raw.Payload)}}
+	case "item/commandExecution/outputDelta", "command/exec/outputDelta", "process/outputDelta":
+		if delta == "" {
+			return nil
+		}
+		delta = truncateDiagnostic(delta)
+		return []RunnerChatEvent{{Type: runtimeEventContentDelta, Seq: raw.Seq, Text: delta, Payload: runtimeContentDeltaPayload(runtimeStreamCommandOutput, delta, raw.Payload)}}
+	case "item/fileChange/outputDelta":
+		if delta == "" {
+			return nil
+		}
+		delta = truncateDiagnostic(delta)
+		return []RunnerChatEvent{{Type: runtimeEventContentDelta, Seq: raw.Seq, Text: delta, Payload: runtimeContentDeltaPayload(runtimeStreamFileChangeOutput, delta, raw.Payload)}}
+	case "item/commandExecution/requestApproval", "execCommandApproval":
+		return []RunnerChatEvent{{Type: runtimeEventRequestOpened, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestOpened, map[string]any{"request_type": runtimeRequestCommandApproval, "detail": extractString(firstNonNil(params["command"], params["reason"], obj["message"])), "args": firstNonNil(params, obj)}, raw.Payload)}}
+	case "item/fileChange/requestApproval", "applyPatchApproval":
+		return []RunnerChatEvent{{Type: runtimeEventRequestOpened, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestOpened, map[string]any{"request_type": runtimeRequestFileChangeApproval, "detail": extractString(firstNonNil(params["reason"], params["path"], obj["message"])), "args": firstNonNil(params, obj)}, raw.Payload)}}
+	case "serverRequest/resolved", "item/requestApproval/decision":
+		return []RunnerChatEvent{{Type: runtimeEventRequestResolved, Seq: raw.Seq, Payload: runtimePayload(runtimeEventRequestResolved, map[string]any{"request_type": runtimeRequestUnknown, "decision": extractString(firstNonNil(params["decision"], obj["decision"])), "resolution": firstNonNil(params, obj)}, raw.Payload)}}
+	case "turn/diff/updated":
+		diff := extractString(firstNonNil(params["diff"], obj["diff"]))
+		return []RunnerChatEvent{{Type: runtimeEventTurnDiffUpdated, Seq: raw.Seq, Text: diff, Payload: runtimePayload(runtimeEventTurnDiffUpdated, map[string]any{"unified_diff": diff}, raw.Payload)}}
+	case "turn/plan/updated":
+		return []RunnerChatEvent{{Type: runtimeEventTurnPlanUpdated, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTurnPlanUpdated, map[string]any{"plan": firstNonNil(params["plan"], obj["plan"]), "explanation": extractString(firstNonNil(params["explanation"], obj["explanation"]))}, raw.Payload)}}
+	case "error", "session/error":
+		msg := extractString(firstNonNil(params["message"], params["error"], obj["message"], obj["error"]))
+		return []RunnerChatEvent{{Type: runtimeEventRuntimeError, Seq: raw.Seq, Text: msg, Payload: runtimePayload(runtimeEventRuntimeError, map[string]any{"message": msg}, raw.Payload)}}
+	case "config.warning", "config_warning", "warning":
+		return configWarningEvent(raw, obj)
+	case "model.reroute", "model_reroute", "model.routed":
+		return modelRerouteEvent(raw, obj)
+	case "token.usage", "token_usage", "item/tokenCount/updated":
+		return tokenUsageEvent(raw, obj)
+	case "skill.invoked", "skill_invoked":
+		return skillInvokedEvent(raw, obj)
+	}
+	return nil
+}
+
+func extractDeltaString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := extractDeltaString(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	case map[string]any:
+		for _, key := range []string{"delta", "text", "content"} {
+			if text := extractDeltaString(v[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func codexItemType(item map[string]any) string {
+	switch strings.ToLower(strings.ReplaceAll(firstNonEmptyStr(stringField(item, "type"), stringField(item, "kind")), "_", "")) {
+	case "agentmessage", "assistantmessage", "message":
+		return runtimeItemAssistantMessage
+	case "reasoning":
+		return runtimeItemReasoning
+	case "plan":
+		return runtimeItemPlan
+	case "commandexecution", "command", "exec", "shell":
+		return runtimeItemCommandExecution
+	case "filechange", "patch", "edit", "write":
+		return runtimeItemFileChange
+	case "mcptoolcall", "mcp":
+		return runtimeItemMCPToolCall
+	case "websearch", "search":
+		return runtimeItemWebSearch
+	case "task", "agent":
+		return runtimeItemCollabAgentToolCall
+	case "tool", "dynamictoolcall":
+		return runtimeItemDynamicToolCall
+	default:
+		return runtimeItemUnknown
+	}
+}
+
+func codexTurnState(obj map[string]any) string {
+	status := strings.ToLower(extractString(firstNonNil(obj["status"], mapField(obj, "turn")["status"])))
+	switch status {
+	case "failed", "error":
+		return "failed"
+	case "cancelled", "canceled":
+		return "cancelled"
+	case "interrupted", "aborted":
+		return "interrupted"
+	default:
+		return "completed"
+	}
+}
+
+// extractTokenUsage reads a {input, output, cached, total, ...} object
+// from any of the common shapes the runtimes emit.
+func extractTokenUsage(obj map[string]any) map[string]any {
+	usage := mapAnyValue(obj, "usage")
+	if usage == nil {
+		usage = mapAnyValue(obj, "token_usage")
+	}
+	if usage == nil {
+		usage = mapAnyValue(obj, "tokenUsage")
+	}
+	if usage == nil {
+		usage = mapAnyValue(obj, "tokens")
+	}
+	if usage == nil {
+		return nil
+	}
+	fields := map[string]any{}
+	for _, key := range []string{"input_tokens", "inputTokens", "input"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["input_tokens"] = int64(v)
+			break
+		}
+	}
+	for _, key := range []string{"output_tokens", "outputTokens", "output"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["output_tokens"] = int64(v)
+			break
+		}
+	}
+	for _, key := range []string{"cached_input_tokens", "cachedInputTokens", "cached_input", "cache_read_input_tokens"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["cached_input_tokens"] = int64(v)
+			break
+		}
+	}
+	for _, key := range []string{"total_tokens", "totalTokens", "total"} {
+		if v, ok := usage[key].(float64); ok {
+			fields["total_tokens"] = int64(v)
+			break
+		}
+	}
+	if model, ok := usage["model"].(string); ok && strings.TrimSpace(model) != "" {
+		fields["model"] = strings.TrimSpace(model)
+	} else if model, ok := obj["model"].(string); ok && strings.TrimSpace(model) != "" {
+		fields["model"] = strings.TrimSpace(model)
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// tokenUsageEvent emits a runtimeEventTokenUsage event when the payload
+// contains any of the well-known token-usage shapes.
+func tokenUsageEvent(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	usage := extractTokenUsage(obj)
+	if usage == nil {
+		return nil
+	}
+	return []RunnerChatEvent{{Type: runtimeEventTokenUsage, Seq: raw.Seq, Payload: runtimePayload(runtimeEventTokenUsage, map[string]any{"usage": usage}, raw.Payload)}}
+}
+
+// configWarningEvent emits a runtimeEventConfigWarning event when the
+// payload advertises a non-fatal configuration issue.
+func configWarningEvent(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	eventType := strings.ToLower(strings.TrimSpace(stringField(obj, "type")))
+	kind := strings.ToLower(firstNonEmptyStr(stringField(obj, "kind"), stringField(obj, "warning")))
+	code := firstNonEmptyStr(stringField(obj, "code"), kind)
+	message := firstNonEmptyStr(extractString(obj["message"]), extractString(obj["detail"]), extractString(obj["warning"]))
+	if eventType != "config.warning" && eventType != "config_warning" && eventType != "warning" && code == "" && message == "" {
+		return nil
+	}
+	if code == "" && message == "" {
+		return nil
+	}
+	if code == "" {
+		code = runtimeConfigWarningMissing
+	}
+	return []RunnerChatEvent{{
+		Type:    runtimeEventConfigWarning,
+		Seq:     raw.Seq,
+		Text:    message,
+		Payload: runtimePayload(runtimeEventConfigWarning, map[string]any{"code": code, "kind": kind, "message": message, "context": firstNonNil(obj["context"], obj["details"])}, raw.Payload),
+	}}
+}
+
+// modelRerouteEvent emits a runtimeEventModelReroute event when the
+// runtime swaps to a fallback model.
+func modelRerouteEvent(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	from := firstNonEmptyStr(extractString(firstNonNil(obj["from_model"], obj["previous_model"], obj["from"])))
+	to := firstNonEmptyStr(extractString(firstNonNil(obj["to_model"], obj["next_model"], obj["to"], obj["model"])))
+	if to == "" {
+		return nil
+	}
+	reason := firstNonEmptyStr(extractString(obj["reason"]), extractString(obj["cause"]))
+	return []RunnerChatEvent{{
+		Type:    runtimeEventModelReroute,
+		Seq:     raw.Seq,
+		Text:    to,
+		Payload: runtimePayload(runtimeEventModelReroute, map[string]any{"from": from, "to": to, "reason": reason}, raw.Payload),
+	}}
+}
+
+// skillInvokedEvent emits a runtimeEventSkillInvoked event when the
+// runtime announces a skill launch.
+func skillInvokedEvent(raw RunnerRunEvent, obj map[string]any) []RunnerChatEvent {
+	id := firstNonEmptyStr(extractString(firstNonNil(obj["skill_id"], obj["id"], obj["name"])))
+	if id == "" {
+		return nil
+	}
+	return []RunnerChatEvent{{
+		Type:    runtimeEventSkillInvoked,
+		Seq:     raw.Seq,
+		Text:    id,
+		Payload: runtimePayload(runtimeEventSkillInvoked, map[string]any{"skill_id": id, "name": firstNonEmptyStr(extractString(obj["name"]), id), "version": extractString(obj["version"]), "trust_state": extractString(firstNonNil(obj["trust_state"], obj["trustState"]))}, raw.Payload),
+	}}
+}
+
+// asStringMapObject extracts a map[string]any from a possibly-nil payload
+// for use in normalized event payloads.
+func asStringMapObject(v any) map[string]any {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		return x
+	default:
+		return nil
+	}
+}
+
+const maxRawDiagnosticString = 4096
+
+func sanitizedRawObject(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return map[string]any{"truncated": len(raw) > maxRawDiagnosticString, "text": truncateDiagnostic(string(raw))}
+	}
+	return sanitizeRawValue(value)
+}
+
+func sanitizedRawPayload(raw json.RawMessage) json.RawMessage {
+	encoded, err := json.Marshal(sanitizedRawObject(raw))
+	if err != nil {
+		return json.RawMessage(`{"truncated":true}`)
+	}
+	return encoded
+}
+
+func sanitizeRawValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveRawKey(key) {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = sanitizeRawValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, child := range v {
+			out = append(out, sanitizeRawValue(child))
+		}
+		return out
+	case string:
+		return truncateDiagnostic(v)
+	default:
+		return value
+	}
+}
+
+func isSensitiveRawKey(key string) bool {
+	lower := strings.ToLower(key)
+	// Match credential-shaped keys (api_key, access_token, auth_token,
+	// bearer_token, refresh_token, session_token, etc.) but NOT counters
+	// such as input_tokens / output_tokens / total_tokens.
+	for _, needle := range []string{"authorization", "password", "secret", "api_key", "apikey"} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	// "token" is only sensitive when paired with a credential prefix or
+	// appears in a credential context.
+	if strings.Contains(lower, "token") {
+		for _, prefix := range []string{"auth", "access", "refresh", "session", "bearer", "csrf", "id_", "client"} {
+			if strings.Contains(lower, prefix) {
+				return true
+			}
+		}
+		// Bare "token" alone (no underscore) is usually a credential.
+		if lower == "token" {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateDiagnostic(value string) string {
+	if len(value) <= maxRawDiagnosticString {
+		return value
+	}
+	return value[:maxRawDiagnosticString] + "…[truncated]"
+}
+
+func classifyToolName(name string) string {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.Contains(lower, "bash"), strings.Contains(lower, "shell"), strings.Contains(lower, "command"), strings.Contains(lower, "exec"):
+		return runtimeItemCommandExecution
+	case strings.Contains(lower, "edit"), strings.Contains(lower, "write"), strings.Contains(lower, "file"), strings.Contains(lower, "patch"):
+		return runtimeItemFileChange
+	case strings.Contains(lower, "mcp"):
+		return runtimeItemMCPToolCall
+	case strings.Contains(lower, "search"), strings.Contains(lower, "web"):
+		return runtimeItemWebSearch
+	case strings.Contains(lower, "task"), strings.Contains(lower, "agent"):
+		return runtimeItemCollabAgentToolCall
+	case lower == "":
+		return runtimeItemUnknown
+	default:
+		return runtimeItemDynamicToolCall
+	}
+}
+
+func runtimeItemStatusFromProvider(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "done", "success", "succeeded":
+		return "completed"
+	case "failed", "error", "errored":
+		return "failed"
+	case "declined", "denied", "rejected":
+		return "declined"
+	default:
+		return "inProgress"
+	}
+}
+
+func lifecycleFromStatus(status string) string {
+	switch status {
+	case "completed", "failed", "declined":
+		return runtimeEventItemCompleted
+	default:
+		return runtimeEventItemUpdated
+	}
+}
+
+func itemTitle(itemType string) string {
+	switch itemType {
+	case runtimeItemAssistantMessage:
+		return "Assistant message"
+	case runtimeItemReasoning:
+		return "Reasoning"
+	case runtimeItemPlan:
+		return "Plan"
+	case runtimeItemCommandExecution:
+		return "Command run"
+	case runtimeItemFileChange:
+		return "File change"
+	case runtimeItemMCPToolCall:
+		return "MCP tool call"
+	case runtimeItemWebSearch:
+		return "Web search"
+	case runtimeItemCollabAgentToolCall:
+		return "Delegated task"
+	case runtimeItemDynamicToolCall:
+		return "Tool call"
+	default:
+		return "Tool"
+	}
+}
+
+func findSessionRef(value any) string {
+	switch v := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"sessionID", "sessionId", "session_id", "id"} {
+			if text, ok := v[key].(string); ok && strings.TrimSpace(text) != "" {
+				if key != "id" || looksSessionID(text) {
+					return text
+				}
+			}
+		}
+		for _, key := range []string{"session", "info", "data"} {
+			if nested := findSessionRef(v[key]); nested != "" {
+				return nested
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if nested := findSessionRef(item); nested != "" {
+				return nested
+			}
+		}
+	}
+	return ""
+}
+
+func looksSessionID(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	return strings.HasPrefix(trimmed, "session_") || strings.HasPrefix(trimmed, "ses_") || strings.HasPrefix(trimmed, "sess_") || len(trimmed) >= 8
+}
+
+var _ RunnerChatAdapter = (*OpenCodeAdapter)(nil)
+var _ RunnerChatAdapter = (*CodexAdapter)(nil)
+var _ NativeRunnerChatAdapter = (*OpenCodeAdapter)(nil)
+var _ NativeRunnerChatAdapter = (*CodexAdapter)(nil)

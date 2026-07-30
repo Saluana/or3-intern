@@ -10,15 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 const serviceChatSessionsBodyLimit = 64 * 1024
 
 // handleChatRunners exposes runner-discovery filtered/decorated for the chat
-// transport selector. or3-intern is always present and reported available.
+// transport selector.
 //
 //	GET /internal/v1/chat-runners
 func (s *serviceServer) handleChatRunners(w http.ResponseWriter, r *http.Request) {
@@ -27,28 +27,31 @@ func (s *serviceServer) handleChatRunners(w http.ResponseWriter, r *http.Request
 		return
 	}
 	appSvc := s.app()
-	detected, err := appSvc.DetectAgentCLIRunners(r.Context())
+	detected, err := appSvc.DetectRunnerRunners(r.Context())
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "agent runner detection unavailable", err)
 		return
 	}
-	infoByID := make(map[string]agentcli.RunnerInfo, len(detected))
+	infoByID := make(map[string]runners.RunnerInfo, len(detected))
 	for _, info := range detected {
 		infoByID[info.ID] = info
 	}
-	specs := agentcli.AllRunners()
+	specs := runners.SelectableRunners()
+	if s.runnerManager == nil {
+		specs = nil
+	}
+	defaultRunner := string(runners.ResolveDefaultRunner(s.config))
+	defaultModel := strings.TrimSpace(s.config.Runners.DefaultModels[defaultRunner])
+	defaultMode := strings.TrimSpace(s.config.Runners.DefaultMode)
+	defaultIsolation := strings.TrimSpace(s.config.Runners.DefaultIsolation)
 	out := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
-		if !spec.Supports.Chat.ChatSelectable {
-			continue
-		}
-		if s.agentCLIManager == nil && spec.ID != agentcli.RunnerOR3 {
-			continue
-		}
 		info := infoByID[string(spec.ID)]
-		out = append(out, controlplane.BuildChatRunner(spec, info, "", "", "", ""))
+		out = append(out, controlplane.BuildChatRunner(spec, info, defaultModel, defaultMode, defaultIsolation, ""))
 	}
-	writeServiceValue(w, http.StatusOK, map[string]any{"runners": out})
+	payload := controlplane.BuildChatRunnerListResponse(out)
+	payload["default_runner"] = defaultRunner
+	writeServiceValue(w, http.StatusOK, payload)
 }
 
 // chatSessionsCreateRequest is the body for POST /chat-sessions.

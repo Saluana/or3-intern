@@ -13,7 +13,7 @@ Phase 1 establishes the baseline runtime posture:
 - child processes receive a scrubbed environment allowlist
 - `exec` prefers `program` plus `args`
 - legacy shell execution is disabled unless `hardening.enableExecShell=true`
-- tool calls are checked against capability tiers and bounded per-message plus per-session quotas
+- service actions are checked against capability tiers and approval policy
 - channel peers can be isolated by sender with `hardening.isolateChannelPeers=true`
 
 ## Phase 2 additions
@@ -23,7 +23,7 @@ Phase 2 adds tighter controls around autonomous execution and skill/script execu
 - skills declare permission metadata and tool allowlists
 - script-capable skills default to quarantine until approved
 - heartbeat, webhook, and file-watch turns carry a bounded `structured_event`
-- privileged shell execution plus `run_skill` and `run_skill_script` can route through Bubblewrap
+- privileged shell execution can route through Bubblewrap
 - `or3-intern doctor` is the main readiness and repair command and supports `--strict`, `--json`, and `--fix`
 
 ## Phase 3 additions
@@ -52,7 +52,7 @@ Hosted profiles (`hosted-*`) run strict validation at startup — `or3-intern se
 Hosted profiles also bias the runtime toward explicit opt-in:
 
 - executable skills stay quarantined by default even if `skills.policy.quarantineByDefault` is unset
-- `hosted-no-exec` does not advertise local `exec`, `run_skill`, or `run_skill_script` capability to the skill inventory
+- `hosted-no-exec` does not advertise local exec-capable behavior to the skill inventory
 - `hosted-remote-sandbox-only` only advertises local exec-capable tools when Bubblewrap sandboxing is enabled
 
 `or3-intern doctor` warns when `runtimeProfile` is not set, flags constraint violations for the active profile, and groups blockers, warnings, and fixable findings into a single readiness report.
@@ -72,7 +72,7 @@ Named execution posture; selects startup validation rules. One of: `local-dev`, 
 - `childEnvAllowlist`
 - `isolateChannelPeers`
 - `sandbox`
-- `quotas`
+- `quotas` (legacy persisted config; runner-first runtime does not enforce host tool quotas)
 
 ### `security.secretStore`
 
@@ -82,19 +82,9 @@ Named execution posture; selects startup validation rules. One of: `local-dev`, 
 
 ### `hardening.quotas`
 
-Quota controls bound runaway tool use at two levels:
+Quota fields are retained for config compatibility with pre-runner-first installs. The runner-first runtime does not enforce host-local model tool quotas because tool execution is delegated to external runners and service/runner permission checks.
 
-- per-message limits stop one request from making too many tool calls
-- per-session limits stop a long-running conversation from accumulating unbounded tool use
-
-When a limit is reached, `exceededAction` controls the behavior:
-
-| Action | Effect                                                                                                                          |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `ask`  | Create or reuse a pending `tool_quota` approval request and return a message with the approval request ID. This is the default. |
-| `fail` | Stop immediately with a hard quota error.                                                                                       |
-
-Default per-message limits are `maxToolCalls=16`, `maxExecCalls=2`, `maxWebCalls=4`, and `maxSubagentCalls=2`. Default per-session limits are intentionally higher: `maxSessionToolCalls=256`, `maxSessionExecCalls=32`, `maxSessionWebCalls=64`, and `maxSessionSubagentCalls=16`.
+Use runner-specific limits, service capability ceilings, access profiles, and approvals for current runtime control.
 
 ### `security.audit`
 
@@ -114,10 +104,8 @@ Default per-message limits are `maxToolCalls=16`, `maxExecCalls=2`, `maxWebCalls
 Each named profile can control:
 
 - `maxCapability`
-- `allowedTools`
 - `allowedHosts`
 - `writablePaths`
-- `allowSubagents`
 
 ### `security.network`
 
@@ -141,9 +129,7 @@ The README's rollout guidance recommends:
 Phase 4 adds an explicit approval and pairing layer for runtime execution and device access:
 
 - a single internal approval broker owns all approval state, allowlist rules, and audit events
-- `exec`, `run_skill`, and `run_skill_script` enforce approval in the host-local execution path, not only in planning
-- `run_skill` freezes a persistent SkillRunPlan before approval, then binds the approval token to that plan instead of to a regenerated post-approval tool call
-- preflight failures after approval are explicit drift checks, not silent retries: skill metadata, script contents, sandbox setup, and environment bindings must still match the frozen plan
+- `exec` and runner permission requests enforce approval in the host-local execution path, not only in planning
 - remote operator and service clients pair with the host using a six-digit one-time code exchanged through the existing service listener
 - short-lived HMAC-signed approval tokens bind to the canonical subject hash and host ID
 - paired device tokens are stored hashed and immediately invalidated on revocation or rotation
@@ -203,13 +189,10 @@ Token rotation (`or3-intern devices rotate <device-id>`) replaces the current to
 
 #### Offline CLI operation
 
-All approval and device management commands operate directly against the local SQLite database. The HTTP service listener does not need to be running. This means:
+Approval commands operate directly against the local SQLite database. The HTTP service listener does not need to be running. This means:
 
 - `or3-intern approvals list/approve/deny` works without `or3-intern service`
-- `or3-intern devices list/revoke/rotate` works without `or3-intern service`
-- pairing requests created via the HTTP API can still be resolved offline via CLI
-
-When the HTTP service is not running, the exchange step (`/internal/v1/pairing/exchange`) is unavailable to remote clients. Remote clients must wait until the service restarts.
+- secure device enrollment requires the HTTP service to be running
 
 ### Startup validation
 
@@ -273,9 +256,9 @@ The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude
 
 ### Safe defaults
 
-- The subsystem is **disabled by default** (`agentCLI.enabled: false`).
+- The subsystem is **always active**. Runner orchestration is the only supported execution path — there is no `runners.enabled` config switch.
 - The default mode is `safe_edit` — non-interactive edits with each CLI's built-in safety flags. No full-autonomy/yolo behaviour.
-- `sandbox_auto` mode is rejected unless `agentCLI.allowSandboxAuto: true` **and** the isolation is `sandbox_dangerous` (a true sandbox runtime, not the host filesystem).
+- `sandbox_auto` mode is rejected unless `runners.allowSandboxAuto: true` **and** the isolation is `sandbox_dangerous` (a true sandbox runtime, not the host filesystem).
 - Host-machine runs are strictly limited to `review` (read-only) and `safe_edit` (workspace write only).
 
 ### Environment sanitization
@@ -306,7 +289,7 @@ The external agent CLI subsystem spawns child processes (OpenCode, Codex, Claude
 
 - Event chunks are capped at 16 KiB before publication or storage.
 - Stdout and stderr previews retain at most 64 KiB each (ring buffer).
-- Persisted full output is bounded by `agentCLI.maxPersistedOutputBytes` (default 10 MiB).
+- Persisted full output is bounded by `runners.maxPersistedOutputBytes` (default 10 MiB).
 - Truncation is explicit: `output_truncated` events record dropped byte counts.
 
 ## Doctor command

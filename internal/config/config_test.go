@@ -44,10 +44,6 @@ func clearConfigEnv(t *testing.T) {
 		"OR3_EMAIL_SMTP_USERNAME",
 		"OR3_EMAIL_SMTP_PASSWORD",
 		"OR3_EMAIL_FROM_ADDRESS",
-		"OR3_SUBAGENTS_ENABLED",
-		"OR3_SUBAGENTS_MAX_CONCURRENT",
-		"OR3_SUBAGENTS_MAX_QUEUED",
-		"OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS",
 		"OR3_SERVICE_ENABLED",
 		"OR3_SERVICE_LISTEN",
 		"OR3_SERVICE_SECRET",
@@ -78,12 +74,6 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if cfg.MaxMediaBytes != 20*1024*1024 {
 		t.Errorf("expected MaxMediaBytes=%d, got %d", 20*1024*1024, cfg.MaxMediaBytes)
-	}
-	if cfg.MaxToolLoops != 6 {
-		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
-	}
-	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionAsk {
-		t.Errorf("expected MaxToolLoopsExceededAction=ask, got %q", cfg.MaxToolLoopsExceededAction)
 	}
 	if cfg.VectorK != 8 {
 		t.Errorf("expected VectorK=8, got %d", cfg.VectorK)
@@ -124,12 +114,6 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.BootstrapTotalMaxChars != 150000 {
 		t.Errorf("expected BootstrapTotalMaxChars=150000, got %d", cfg.BootstrapTotalMaxChars)
 	}
-	if !cfg.Tools.RestrictToWorkspace {
-		t.Error("expected RestrictToWorkspace=true by default")
-	}
-	if cfg.Tools.AllowFullFileRead {
-		t.Error("expected AllowFullFileRead=false by default")
-	}
 	if cfg.ConsolidationMaxMessages != 50 {
 		t.Errorf("expected ConsolidationMaxMessages=50, got %d", cfg.ConsolidationMaxMessages)
 	}
@@ -139,56 +123,44 @@ func TestDefault_Values(t *testing.T) {
 	if cfg.ConsolidationAsyncTimeoutSeconds != 30 {
 		t.Errorf("expected ConsolidationAsyncTimeoutSeconds=30, got %d", cfg.ConsolidationAsyncTimeoutSeconds)
 	}
-	if cfg.Subagents.Enabled {
-		t.Error("expected Subagents.Enabled=false by default")
+	if cfg.Runners.Default != "opencode" {
+		t.Errorf("expected Runners.Default=opencode, got %q", cfg.Runners.Default)
 	}
-	if cfg.Subagents.MaxConcurrent != 1 {
-		t.Errorf("expected Subagents.MaxConcurrent=1, got %d", cfg.Subagents.MaxConcurrent)
+	if cfg.Runners.MaxConcurrent != 1 {
+		t.Errorf("expected Runners.MaxConcurrent=1, got %d", cfg.Runners.MaxConcurrent)
 	}
-	if cfg.Subagents.MaxQueued != 32 {
-		t.Errorf("expected Subagents.MaxQueued=32, got %d", cfg.Subagents.MaxQueued)
+	if cfg.Runners.MaxQueued != 16 {
+		t.Errorf("expected Runners.MaxQueued=16, got %d", cfg.Runners.MaxQueued)
 	}
-	if cfg.Subagents.TaskTimeoutSeconds != 300 {
-		t.Errorf("expected Subagents.TaskTimeoutSeconds=300, got %d", cfg.Subagents.TaskTimeoutSeconds)
+	if cfg.Runners.DefaultTimeoutSeconds != 900 {
+		t.Errorf("expected Runners.DefaultTimeoutSeconds=900, got %d", cfg.Runners.DefaultTimeoutSeconds)
 	}
-	if cfg.AgentCLI.Enabled {
-		t.Error("expected AgentCLI.Enabled=false by default")
+	if cfg.Runners.MaxTimeoutSeconds != 7200 {
+		t.Errorf("expected Runners.MaxTimeoutSeconds=7200, got %d", cfg.Runners.MaxTimeoutSeconds)
 	}
-	if cfg.AgentCLI.MaxConcurrent != 1 {
-		t.Errorf("expected AgentCLI.MaxConcurrent=1, got %d", cfg.AgentCLI.MaxConcurrent)
+	if cfg.Runners.AllowSandboxAuto {
+		t.Error("expected Runners.AllowSandboxAuto=false by default")
 	}
-	if cfg.AgentCLI.MaxQueued != 16 {
-		t.Errorf("expected AgentCLI.MaxQueued=16, got %d", cfg.AgentCLI.MaxQueued)
+	if cfg.Runners.DefaultMode != "safe_edit" {
+		t.Errorf("expected Runners.DefaultMode=safe_edit, got %q", cfg.Runners.DefaultMode)
 	}
-	if cfg.AgentCLI.DefaultTimeoutSeconds != 900 {
-		t.Errorf("expected AgentCLI.DefaultTimeoutSeconds=900, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
+	if cfg.Runners.DefaultIsolation != "host_workspace_write" {
+		t.Errorf("expected Runners.DefaultIsolation=host_workspace_write, got %q", cfg.Runners.DefaultIsolation)
 	}
-	if cfg.AgentCLI.MaxTimeoutSeconds != 7200 {
-		t.Errorf("expected AgentCLI.MaxTimeoutSeconds=7200, got %d", cfg.AgentCLI.MaxTimeoutSeconds)
+	if cfg.Runners.EventChunkMaxBytes != 16384 {
+		t.Errorf("expected Runners.EventChunkMaxBytes=16384, got %d", cfg.Runners.EventChunkMaxBytes)
 	}
-	if cfg.AgentCLI.AllowSandboxAuto {
-		t.Error("expected AgentCLI.AllowSandboxAuto=false by default")
+	if cfg.Runners.PreviewMaxBytes != 65536 {
+		t.Errorf("expected Runners.PreviewMaxBytes=65536, got %d", cfg.Runners.PreviewMaxBytes)
 	}
-	if cfg.AgentCLI.DefaultMode != "safe_edit" {
-		t.Errorf("expected AgentCLI.DefaultMode=safe_edit, got %q", cfg.AgentCLI.DefaultMode)
+	if cfg.Runners.MaxPersistedOutputBytes != 10485760 {
+		t.Errorf("expected Runners.MaxPersistedOutputBytes=10485760, got %d", cfg.Runners.MaxPersistedOutputBytes)
 	}
-	if cfg.AgentCLI.DefaultIsolation != "host_workspace_write" {
-		t.Errorf("expected AgentCLI.DefaultIsolation=host_workspace_write, got %q", cfg.AgentCLI.DefaultIsolation)
+	if cfg.Runners.RuntimeMode["opencode"] != "auto" || cfg.Runners.RuntimeMode["codex"] != "auto" {
+		t.Fatalf("expected native runner runtime modes to default to auto, got %#v", cfg.Runners.RuntimeMode)
 	}
-	if cfg.AgentCLI.EventChunkMaxBytes != 16384 {
-		t.Errorf("expected AgentCLI.EventChunkMaxBytes=16384, got %d", cfg.AgentCLI.EventChunkMaxBytes)
-	}
-	if cfg.AgentCLI.PreviewMaxBytes != 65536 {
-		t.Errorf("expected AgentCLI.PreviewMaxBytes=65536, got %d", cfg.AgentCLI.PreviewMaxBytes)
-	}
-	if cfg.AgentCLI.MaxPersistedOutputBytes != 10485760 {
-		t.Errorf("expected AgentCLI.MaxPersistedOutputBytes=10485760, got %d", cfg.AgentCLI.MaxPersistedOutputBytes)
-	}
-	if cfg.AgentCLI.RuntimeMode["opencode"] != "auto" || cfg.AgentCLI.RuntimeMode["codex"] != "auto" {
-		t.Fatalf("expected native runner runtime modes to default to auto, got %#v", cfg.AgentCLI.RuntimeMode)
-	}
-	if len(cfg.AgentCLI.NativeServerURLs) != 0 {
-		t.Fatalf("expected native server URLs to default empty, got %#v", cfg.AgentCLI.NativeServerURLs)
+	if len(cfg.Runners.NativeServerURLs) != 0 {
+		t.Fatalf("expected native server URLs to default empty, got %#v", cfg.Runners.NativeServerURLs)
 	}
 	if cfg.Service.Enabled {
 		t.Error("expected Service.Enabled=false by default")
@@ -243,9 +215,6 @@ func TestDefault_Values(t *testing.T) {
 	}
 	if !cfg.Hardening.IsolateChannelPeers {
 		t.Error("expected channel peer isolation to be enabled by default")
-	}
-	if !cfg.Hardening.Quotas.Enabled {
-		t.Error("expected quotas to be enabled by default")
 	}
 	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
 		t.Fatal("expected default exec allowlist")
@@ -316,124 +285,6 @@ func TestLoad_RejectsUnknownApprovalMode(t *testing.T) {
 	}
 }
 
-func TestDefault_ApprovalModeratorBalancedActions(t *testing.T) {
-	cfg := Default()
-	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
-	if actions.Low != ApprovalModeratorActionApprove || actions.Medium != ApprovalModeratorActionApprove {
-		t.Fatalf("expected low/medium approve, got %#v", actions)
-	}
-	if actions.High != ApprovalModeratorActionEscalate || actions.Extreme != ApprovalModeratorActionDeny {
-		t.Fatalf("expected high escalate and extreme deny, got %#v", actions)
-	}
-}
-
-func TestLoad_ApprovalModeratorDefaultsWhenMissing(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator = ApprovalModeratorConfig{}
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if loaded.Security.Approvals.Moderator.Preset != ApprovalModeratorPresetBalanced {
-		t.Fatalf("expected balanced preset, got %q", loaded.Security.Approvals.Moderator.Preset)
-	}
-	if loaded.Security.Approvals.Moderator.TimeoutSeconds != defaultApprovalModeratorTimeoutSeconds {
-		t.Fatalf("expected default timeout, got %d", loaded.Security.Approvals.Moderator.TimeoutSeconds)
-	}
-}
-
-func TestLoad_RejectsInvalidApprovalModeratorConfiguredAction(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Enabled = true
-	cfg.Security.Approvals.Moderator.Actions.High = ApprovalModeratorAction("approvee")
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected invalid moderator action to fail")
-	}
-}
-
-func TestLoad_RejectsInvalidApprovalModeratorAction(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Enabled = true
-	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPreset("maybe")
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected invalid moderator preset to fail")
-	}
-}
-
-func TestLoad_RejectsApprovalModeratorFailureApprove(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Enabled = true
-	cfg.Security.Approvals.Moderator.FailureAction = ApprovalModeratorActionApprove
-
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected failureAction approve to fail")
-	}
-}
-
-func TestApprovalModeratorPartialOverrideUsesPresetFallback(t *testing.T) {
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPresetManual
-	cfg.Security.Approvals.Moderator.Actions = ApprovalModeratorActionMap{Low: ApprovalModeratorActionApprove}
-	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
-	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
-	if actions.Low != ApprovalModeratorActionApprove {
-		t.Fatalf("expected configured low action, got %q", actions.Low)
-	}
-	for _, level := range []ApprovalModeratorAction{actions.Medium, actions.High, actions.Extreme} {
-		if level != ApprovalModeratorActionEscalate {
-			t.Fatalf("expected manual preset fallback escalate, got %q", level)
-		}
-	}
-}
-
-func TestApprovalModeratorPresetManualEscalatesAll(t *testing.T) {
-	cfg := Default()
-	cfg.Security.Approvals.Moderator.Preset = ApprovalModeratorPresetManual
-	cfg.Security.Approvals.Moderator.Actions = ApprovalModeratorActionMap{}
-	normalizeApprovalModerator(&cfg.Security.Approvals.Moderator)
-	actions := cfg.Security.Approvals.Moderator.EffectiveActions()
-	for _, level := range []ApprovalModeratorAction{actions.Low, actions.Medium, actions.High, actions.Extreme} {
-		if level != ApprovalModeratorActionEscalate {
-			t.Fatalf("expected manual preset to escalate all, got %#v", actions)
-		}
-	}
-}
-
 func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
 	base := AuthConfig{
 		Enabled:                   true,
@@ -443,7 +294,7 @@ func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
 		SessionIdleTTLSeconds:     300,
 		SessionAbsoluteTTLSeconds: 3600,
 		StepUpTTLSeconds:          120,
-		FallbackPolicy:            AuthFallbackPairedTokenPlusWarn,
+		FallbackPolicy:            AuthFallbackAdminRecoveryOnly,
 		EnforcementMode:           AuthEnforcementWarn,
 	}
 	tests := []struct {
@@ -577,18 +428,6 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	cfg.Hardening.EnableExecShell = true
 	cfg.Hardening.ExecAllowedPrograms = []string{"go", "git"}
 	cfg.Hardening.ChildEnvAllowlist = []string{"PATH"}
-	cfg.Hardening.Quotas = HardeningQuotaConfig{
-		Enabled:                 true,
-		ExceededAction:          QuotaExceededActionFail,
-		MaxToolCalls:            3,
-		MaxExecCalls:            1,
-		MaxWebCalls:             2,
-		MaxSubagentCalls:        1,
-		MaxSessionToolCalls:     30,
-		MaxSessionExecCalls:     10,
-		MaxSessionWebCalls:      20,
-		MaxSessionSubagentCalls: 5,
-	}
 
 	b, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(path, b, 0o644); err != nil {
@@ -607,11 +446,6 @@ func TestLoad_HardeningDefaultsAndOverrides(t *testing.T) {
 	}
 	if got := loaded.Hardening.ChildEnvAllowlist; len(got) != 1 || got[0] != "PATH" {
 		t.Fatalf("unexpected child env allowlist: %#v", got)
-	}
-	if loaded.Hardening.Quotas.ExceededAction != QuotaExceededActionFail ||
-		loaded.Hardening.Quotas.MaxToolCalls != 3 || loaded.Hardening.Quotas.MaxExecCalls != 1 || loaded.Hardening.Quotas.MaxWebCalls != 2 || loaded.Hardening.Quotas.MaxSubagentCalls != 1 ||
-		loaded.Hardening.Quotas.MaxSessionToolCalls != 30 || loaded.Hardening.Quotas.MaxSessionExecCalls != 10 || loaded.Hardening.Quotas.MaxSessionWebCalls != 20 || loaded.Hardening.Quotas.MaxSessionSubagentCalls != 5 {
-		t.Fatalf("unexpected quota overrides: %+v", loaded.Hardening.Quotas)
 	}
 }
 
@@ -949,11 +783,9 @@ func TestLoad_ValidFile(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	input := Config{
-		DBPath:                     "/tmp/test.db",
-		DefaultSessionKey:          "test:session",
-		HistoryMax:                 20,
-		MaxToolLoops:               3,
-		MaxToolLoopsExceededAction: QuotaExceededActionFail,
+		DBPath:            "/tmp/test.db",
+		DefaultSessionKey: "test:session",
+		HistoryMax:        20,
 		Provider: ProviderConfig{
 			APIBase:        "https://custom.api",
 			TimeoutSeconds: 30,
@@ -975,38 +807,11 @@ func TestLoad_ValidFile(t *testing.T) {
 	if cfg.HistoryMax != 20 {
 		t.Errorf("expected HistoryMax=20, got %d", cfg.HistoryMax)
 	}
-	if cfg.MaxToolLoopsExceededAction != QuotaExceededActionFail {
-		t.Errorf("expected MaxToolLoopsExceededAction=fail, got %q", cfg.MaxToolLoopsExceededAction)
-	}
 	if cfg.MaxMediaBytes != Default().MaxMediaBytes {
 		t.Errorf("expected missing MaxMediaBytes to default to %d, got %d", Default().MaxMediaBytes, cfg.MaxMediaBytes)
 	}
 	if cfg.Provider.EnableVision {
 		t.Error("expected missing EnableVision to default to false")
-	}
-}
-
-func TestLoad_DocIndexEnabledWithoutRootsDefaultsToWorkspace(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	workspace := filepath.Join(dir, "workspace")
-
-	input := Config{
-		WorkspaceDir: workspace,
-		DocIndex: DocIndexConfig{
-			Enabled: true,
-		},
-	}
-	b, _ := json.MarshalIndent(input, "", "  ")
-	mustWriteTestFile(t, path, b)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(cfg.DocIndex.Roots) != 1 || cfg.DocIndex.Roots[0] != workspace {
-		t.Fatalf("expected doc index root to default to workspace %q, got %#v", workspace, cfg.DocIndex.Roots)
 	}
 }
 
@@ -1059,7 +864,6 @@ func TestLoad_EnvOverrides_RespectsPersistedModel(t *testing.T) {
 	cfg := Default()
 	cfg.Provider.Model = "deepseek/deepseek-v4-pro"
 	cfg.ModelRouting.Chat.Primary = ModelRef{Provider: "openrouter", Model: "deepseek/deepseek-v4-pro"}
-	cfg.ModelRouting.Agents.Primary = ModelRef{Provider: "openrouter", Model: "nvidia/nemotron-3-super-120b-a12b:free"}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
 	mustWriteTestFile(t, path, b)
 
@@ -1074,9 +878,6 @@ func TestLoad_EnvOverrides_RespectsPersistedModel(t *testing.T) {
 	}
 	if loaded.ModelRouting.Chat.Primary.Model != "deepseek/deepseek-v4-pro" {
 		t.Fatalf("expected persisted chat model to win over OR3_MODEL, got %q", loaded.ModelRouting.Chat.Primary.Model)
-	}
-	if loaded.ModelRouting.Agents.Primary.Model != "nvidia/nemotron-3-super-120b-a12b:free" {
-		t.Fatalf("expected persisted agents model to remain, got %q", loaded.ModelRouting.Agents.Primary.Model)
 	}
 }
 
@@ -1097,11 +898,6 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("OR3_EMBED_MODEL", "env-embed")
 	t.Setenv("OR3_EMBED_DIMENSIONS", "768")
 	t.Setenv("OR3_API_BASE", "https://env.api")
-	t.Setenv("OR3_SUBAGENTS_ENABLED", "true")
-	t.Setenv("OR3_SUBAGENTS_MAX_CONCURRENT", "3")
-	t.Setenv("OR3_SUBAGENTS_MAX_QUEUED", "12")
-	t.Setenv("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", "90")
-
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1126,18 +922,6 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.APIBase != "https://env.api" {
 		t.Errorf("expected APIBase='https://env.api', got %q", cfg.Provider.APIBase)
-	}
-	if !cfg.Subagents.Enabled {
-		t.Error("expected subagents enabled from env override")
-	}
-	if cfg.Subagents.MaxConcurrent != 3 {
-		t.Errorf("expected MaxConcurrent=3, got %d", cfg.Subagents.MaxConcurrent)
-	}
-	if cfg.Subagents.MaxQueued != 12 {
-		t.Errorf("expected MaxQueued=12, got %d", cfg.Subagents.MaxQueued)
-	}
-	if cfg.Subagents.TaskTimeoutSeconds != 90 {
-		t.Errorf("expected TaskTimeoutSeconds=90, got %d", cfg.Subagents.TaskTimeoutSeconds)
 	}
 }
 
@@ -1168,42 +952,6 @@ func TestEvaluateReadinessFixtures(t *testing.T) {
 				t.Fatal("expected non-ready fixture to include at least one issue")
 			}
 		})
-	}
-}
-
-func TestEvaluateReadiness_DisabledMCPServerIsNotAdvancedCustom(t *testing.T) {
-	cfg := Default()
-	cfg.Provider.APIKey = "key"
-	cfg.WorkspaceDir = t.TempDir()
-	cfg.Tools.MCPServers = map[string]MCPServerConfig{
-		"disabled": {
-			Enabled:   false,
-			Transport: "stdio",
-			Command:   "example",
-		},
-	}
-
-	report := EvaluateReadiness(cfg, ReadinessOptions{Command: "chat"})
-	if report.State != ReadinessReady {
-		t.Fatalf("expected disabled MCP server not to change readiness, got %s with issues %#v", report.State, report.Issues)
-	}
-}
-
-func TestEvaluateReadiness_EnabledMCPServerIsAdvancedCustom(t *testing.T) {
-	cfg := Default()
-	cfg.Provider.APIKey = "key"
-	cfg.WorkspaceDir = t.TempDir()
-	cfg.Tools.MCPServers = map[string]MCPServerConfig{
-		"enabled": {
-			Enabled:   true,
-			Transport: "stdio",
-			Command:   "example",
-		},
-	}
-
-	report := EvaluateReadiness(cfg, ReadinessOptions{Command: "chat"})
-	if report.State != ReadinessAdvancedCustom {
-		t.Fatalf("expected enabled MCP server to mark advanced custom, got %s with issues %#v", report.State, report.Issues)
 	}
 }
 
@@ -1251,14 +999,22 @@ func TestLoadRepairableReturnsNeedsRepairForValidationError(t *testing.T) {
 	}
 }
 
-func TestLoad_SubagentNormalization(t *testing.T) {
+func TestLoad_RunnersNormalization(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.Subagents.MaxConcurrent = 0
-	input.Subagents.MaxQueued = 0
-	input.Subagents.TaskTimeoutSeconds = 0
+	input.Runners.MaxConcurrent = 0
+	input.Runners.MaxQueued = 0
+	input.Runners.DefaultTimeoutSeconds = 0
+	input.Runners.MaxTimeoutSeconds = 0
+	input.Runners.EventChunkMaxBytes = 0
+	input.Runners.PreviewMaxBytes = 0
+	input.Runners.MaxPersistedOutputBytes = 0
+	input.Runners.DefaultMode = ""
+	input.Runners.DefaultIsolation = ""
+	input.Runners.Disabled = nil
+	input.Runners.ChildEnvAllowlist = nil
 	b, _ := json.MarshalIndent(input, "", "  ")
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1267,96 +1023,67 @@ func TestLoad_SubagentNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Subagents.MaxConcurrent != 1 || cfg.Subagents.MaxQueued != 32 || cfg.Subagents.TaskTimeoutSeconds != 300 {
-		t.Fatalf("expected normalized subagent defaults, got %+v", cfg.Subagents)
+	if cfg.Runners.MaxConcurrent != 1 || cfg.Runners.MaxQueued != 16 ||
+		cfg.Runners.DefaultTimeoutSeconds != 900 || cfg.Runners.MaxTimeoutSeconds != 7200 {
+		t.Fatalf("expected normalized runners defaults, got %+v", cfg.Runners)
 	}
-}
-
-func TestLoad_AgentCLINormalization(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	input := Default()
-	input.AgentCLI.MaxConcurrent = 0
-	input.AgentCLI.MaxQueued = 0
-	input.AgentCLI.DefaultTimeoutSeconds = 0
-	input.AgentCLI.MaxTimeoutSeconds = 0
-	input.AgentCLI.EventChunkMaxBytes = 0
-	input.AgentCLI.PreviewMaxBytes = 0
-	input.AgentCLI.MaxPersistedOutputBytes = 0
-	input.AgentCLI.DefaultMode = ""
-	input.AgentCLI.DefaultIsolation = ""
-	input.AgentCLI.DisabledRunners = nil
-	input.AgentCLI.ChildEnvAllowlist = nil
-	b, _ := json.MarshalIndent(input, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
+	if cfg.Runners.EventChunkMaxBytes != 16384 {
+		t.Errorf("expected EventChunkMaxBytes=16384, got %d", cfg.Runners.EventChunkMaxBytes)
 	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	if cfg.Runners.PreviewMaxBytes != 65536 {
+		t.Errorf("expected PreviewMaxBytes=65536, got %d", cfg.Runners.PreviewMaxBytes)
 	}
-	if cfg.AgentCLI.MaxConcurrent != 1 || cfg.AgentCLI.MaxQueued != 16 ||
-		cfg.AgentCLI.DefaultTimeoutSeconds != 900 || cfg.AgentCLI.MaxTimeoutSeconds != 7200 {
-		t.Fatalf("expected normalized agent CLI defaults, got %+v", cfg.AgentCLI)
+	if cfg.Runners.MaxPersistedOutputBytes != 10485760 {
+		t.Errorf("expected MaxPersistedOutputBytes=10485760, got %d", cfg.Runners.MaxPersistedOutputBytes)
 	}
-	if cfg.AgentCLI.EventChunkMaxBytes != 16384 {
-		t.Errorf("expected EventChunkMaxBytes=16384, got %d", cfg.AgentCLI.EventChunkMaxBytes)
+	if cfg.Runners.DefaultMode != "safe_edit" {
+		t.Errorf("expected DefaultMode=safe_edit, got %q", cfg.Runners.DefaultMode)
 	}
-	if cfg.AgentCLI.PreviewMaxBytes != 65536 {
-		t.Errorf("expected PreviewMaxBytes=65536, got %d", cfg.AgentCLI.PreviewMaxBytes)
+	if cfg.Runners.DefaultIsolation != "host_workspace_write" {
+		t.Errorf("expected DefaultIsolation=host_workspace_write, got %q", cfg.Runners.DefaultIsolation)
 	}
-	if cfg.AgentCLI.MaxPersistedOutputBytes != 10485760 {
-		t.Errorf("expected MaxPersistedOutputBytes=10485760, got %d", cfg.AgentCLI.MaxPersistedOutputBytes)
+	if cfg.Runners.Disabled == nil {
+		t.Error("expected Disabled to default to empty slice, got nil")
 	}
-	if cfg.AgentCLI.DefaultMode != "safe_edit" {
-		t.Errorf("expected DefaultMode=safe_edit, got %q", cfg.AgentCLI.DefaultMode)
-	}
-	if cfg.AgentCLI.DefaultIsolation != "host_workspace_write" {
-		t.Errorf("expected DefaultIsolation=host_workspace_write, got %q", cfg.AgentCLI.DefaultIsolation)
-	}
-	if cfg.AgentCLI.DisabledRunners == nil {
-		t.Error("expected DisabledRunners to default to empty slice, got nil")
-	}
-	if len(cfg.AgentCLI.ChildEnvAllowlist) == 0 {
+	if len(cfg.Runners.ChildEnvAllowlist) == 0 {
 		t.Error("expected ChildEnvAllowlist to have defaults")
 	}
 }
 
-func TestLoad_AgentCLIDefaultTimeoutClamped(t *testing.T) {
+func TestLoad_RunnersDefaultTimeoutClamped(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.AgentCLI.DefaultTimeoutSeconds = 5
+	input.Runners.DefaultTimeoutSeconds = 5
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AgentCLI.DefaultTimeoutSeconds != 30 {
-		t.Errorf("expected timeout clamped to 30, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
+	if cfg.Runners.DefaultTimeoutSeconds != 30 {
+		t.Errorf("expected timeout clamped to 30, got %d", cfg.Runners.DefaultTimeoutSeconds)
 	}
 }
 
-func TestLoad_AgentCLINativeServerURLsAreLoopbackOnly(t *testing.T) {
+func TestLoad_RunnersNativeServerURLsAreLoopbackOnly(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.AgentCLI.NativeServerURLs = map[string]string{"OpenCode": "http://127.0.0.1:4096/"}
+	input.Runners.NativeServerURLs = map[string]string{"OpenCode": "http://127.0.0.1:4096/"}
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := cfg.AgentCLI.NativeServerURLs["opencode"]; got != "http://127.0.0.1:4096" {
+	if got := cfg.Runners.NativeServerURLs["opencode"]; got != "http://127.0.0.1:4096" {
 		t.Fatalf("native server URL = %q, want normalized loopback URL", got)
 	}
 
-	input.AgentCLI.NativeServerURLs = map[string]string{"opencode": "https://example.com:4096"}
+	input.Runners.NativeServerURLs = map[string]string{"opencode": "https://example.com:4096"}
 	b, _ = json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must point at loopback") {
@@ -1364,82 +1091,155 @@ func TestLoad_AgentCLINativeServerURLsAreLoopbackOnly(t *testing.T) {
 	}
 }
 
-func TestLoad_AgentCLIDisabledRunnersEnvOverride(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	b, _ := json.MarshalIndent(Default(), "", "  ")
-	mustWriteTestFile(t, path, b)
-
-	t.Setenv("OR3_AGENT_CLI_DISABLED_RUNNERS", "opencode,codex, claude ")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	expected := []string{"opencode", "codex", "claude"}
-	if len(cfg.AgentCLI.DisabledRunners) != len(expected) {
-		t.Fatalf("expected %d disabled runners, got %d: %v", len(expected), len(cfg.AgentCLI.DisabledRunners), cfg.AgentCLI.DisabledRunners)
-	}
-	for _, want := range expected {
-		if !slices.Contains(cfg.AgentCLI.DisabledRunners, want) {
-			t.Errorf("expected %q in DisabledRunners, got %v", want, cfg.AgentCLI.DisabledRunners)
-		}
-	}
-}
-
-func TestLoad_AgentCLIEnvOverrides(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	b, _ := json.MarshalIndent(Default(), "", "  ")
-	mustWriteTestFile(t, path, b)
-
-	t.Setenv("OR3_AGENT_CLI_ENABLED", "true")
-	t.Setenv("OR3_AGENT_CLI_MAX_CONCURRENT", "3")
-	t.Setenv("OR3_AGENT_CLI_MAX_QUEUED", "8")
-	t.Setenv("OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS", "600")
-	t.Setenv("OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS", "3600")
-	t.Setenv("OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO", "true")
-	t.Setenv("OR3_AGENT_CLI_DEFAULT_MODE", "review")
-	t.Setenv("OR3_AGENT_CLI_DEFAULT_ISOLATION", "host_readonly")
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg.AgentCLI.Enabled {
-		t.Error("expected AgentCLI.Enabled=true")
-	}
-	if cfg.AgentCLI.MaxConcurrent != 3 {
-		t.Errorf("expected MaxConcurrent=3, got %d", cfg.AgentCLI.MaxConcurrent)
-	}
-	if cfg.AgentCLI.MaxQueued != 8 {
-		t.Errorf("expected MaxQueued=8, got %d", cfg.AgentCLI.MaxQueued)
-	}
-	if cfg.AgentCLI.DefaultTimeoutSeconds != 600 {
-		t.Errorf("expected DefaultTimeoutSeconds=600, got %d", cfg.AgentCLI.DefaultTimeoutSeconds)
-	}
-	if cfg.AgentCLI.MaxTimeoutSeconds != 3600 {
-		t.Errorf("expected MaxTimeoutSeconds=3600, got %d", cfg.AgentCLI.MaxTimeoutSeconds)
-	}
-	if !cfg.AgentCLI.AllowSandboxAuto {
-		t.Error("expected AllowSandboxAuto=true")
-	}
-	if cfg.AgentCLI.DefaultMode != "review" {
-		t.Errorf("expected DefaultMode=review, got %q", cfg.AgentCLI.DefaultMode)
-	}
-	if cfg.AgentCLI.DefaultIsolation != "host_readonly" {
-		t.Errorf("expected DefaultIsolation=host_readonly, got %q", cfg.AgentCLI.DefaultIsolation)
-	}
-}
-
-func TestLoad_AgentCLIRejectsInvalidMode(t *testing.T) {
+func TestLoad_RunnersCodexHomePathsTrimAndValidate(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.AgentCLI.DefaultMode = "invalid_mode"
+	input.Runners.CodexHomePath = "  ~/.codex-work  "
+	input.Runners.CodexShadowHomePath = "  ~/.or3/codex-work-shadow  "
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runners.CodexHomePath != "~/.codex-work" || cfg.Runners.CodexShadowHomePath != "~/.or3/codex-work-shadow" {
+		t.Fatalf("unexpected codex paths: home=%q shadow=%q", cfg.Runners.CodexHomePath, cfg.Runners.CodexShadowHomePath)
+	}
+
+	input.Runners.CodexHomePath = ""
+	input.Runners.CodexShadowHomePath = "~/.or3/codex-shadow"
+	b, _ = json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "codexShadowHomePath requires") {
+		t.Fatalf("expected shadow-home validation error, got %v", err)
+	}
+}
+
+func TestLoad_RunnersDisabledRunnersEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.Runners.Default = "gemini"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	t.Setenv("OR3_RUNNERS_DISABLED", "codex, claude ")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	expected := []string{"codex"}
+	if len(cfg.Runners.Disabled) != len(expected) {
+		t.Fatalf("expected %d disabled runners, got %d: %v", len(expected), len(cfg.Runners.Disabled), cfg.Runners.Disabled)
+	}
+	for _, want := range expected {
+		if !slices.Contains(cfg.Runners.Disabled, want) {
+			t.Errorf("expected %q in Runners.Disabled, got %v", want, cfg.Runners.Disabled)
+		}
+	}
+}
+
+func TestLoad_RunnersEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	b, _ := json.MarshalIndent(Default(), "", "  ")
+	mustWriteTestFile(t, path, b)
+
+	t.Setenv("OR3_RUNNERS_MAX_CONCURRENT", "3")
+	t.Setenv("OR3_RUNNERS_MAX_QUEUED", "8")
+	t.Setenv("OR3_RUNNERS_DEFAULT_TIMEOUT_SECONDS", "600")
+	t.Setenv("OR3_RUNNERS_MAX_TIMEOUT_SECONDS", "3600")
+	t.Setenv("OR3_RUNNERS_ALLOW_SANDBOX_AUTO", "true")
+	t.Setenv("OR3_RUNNERS_DEFAULT_MODE", "review")
+	t.Setenv("OR3_RUNNERS_DEFAULT_ISOLATION", "host_readonly")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runners.MaxConcurrent != 3 {
+		t.Errorf("expected MaxConcurrent=3, got %d", cfg.Runners.MaxConcurrent)
+	}
+	if cfg.Runners.MaxQueued != 8 {
+		t.Errorf("expected MaxQueued=8, got %d", cfg.Runners.MaxQueued)
+	}
+	if cfg.Runners.DefaultTimeoutSeconds != 600 {
+		t.Errorf("expected DefaultTimeoutSeconds=600, got %d", cfg.Runners.DefaultTimeoutSeconds)
+	}
+	if cfg.Runners.MaxTimeoutSeconds != 3600 {
+		t.Errorf("expected MaxTimeoutSeconds=3600, got %d", cfg.Runners.MaxTimeoutSeconds)
+	}
+	if !cfg.Runners.AllowSandboxAuto {
+		t.Error("expected AllowSandboxAuto=true")
+	}
+	if cfg.Runners.DefaultMode != "review" {
+		t.Errorf("expected DefaultMode=review, got %q", cfg.Runners.DefaultMode)
+	}
+	if cfg.Runners.DefaultIsolation != "host_readonly" {
+		t.Errorf("expected DefaultIsolation=host_readonly, got %q", cfg.Runners.DefaultIsolation)
+	}
+}
+
+func TestLoad_RunnersDefaultEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.Runners.Default = "codex"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	t.Setenv("OR3_RUNNERS_DEFAULT", "claude")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runners.Default != "opencode" {
+		t.Errorf("expected removed env override to migrate to opencode, got %q", cfg.Runners.Default)
+	}
+}
+
+func TestLoad_RunnersCodexHomeEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	t.Setenv("OR3_RUNNERS_CODEX_HOME", "~/.codex-personal")
+	t.Setenv("OR3_RUNNERS_CODEX_SHADOW_HOME", "~/.or3/codex-personal-shadow")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runners.CodexHomePath != "~/.codex-personal" || cfg.Runners.CodexShadowHomePath != "~/.or3/codex-personal-shadow" {
+		t.Fatalf("unexpected env codex paths: home=%q shadow=%q", cfg.Runners.CodexHomePath, cfg.Runners.CodexShadowHomePath)
+	}
+}
+
+func TestLoad_RunnersRejectsInvalidDefault(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.Runners.Default = "or3-intern"
+	b, _ := json.MarshalIndent(input, "", "  ")
+	mustWriteTestFile(t, path, b)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "runners.default") {
+		t.Fatalf("expected runners.default validation error, got %v", err)
+	}
+}
+
+func TestLoad_RunnersRejectsInvalidMode(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	input := Default()
+	input.Runners.DefaultMode = "invalid_mode"
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 
@@ -1447,17 +1247,17 @@ func TestLoad_AgentCLIRejectsInvalidMode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid mode")
 	}
-	if !strings.Contains(err.Error(), "agentCLI.defaultMode") {
+	if !strings.Contains(err.Error(), "runners.defaultMode") {
 		t.Errorf("expected mode error, got %v", err)
 	}
 }
 
-func TestLoad_AgentCLIRejectsInvalidIsolation(t *testing.T) {
+func TestLoad_RunnersRejectsInvalidIsolation(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.AgentCLI.DefaultIsolation = "invalid_isolation"
+	input.Runners.DefaultIsolation = "invalid_isolation"
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 
@@ -1465,18 +1265,18 @@ func TestLoad_AgentCLIRejectsInvalidIsolation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid isolation")
 	}
-	if !strings.Contains(err.Error(), "agentCLI.defaultIsolation") {
+	if !strings.Contains(err.Error(), "runners.defaultIsolation") {
 		t.Errorf("expected isolation error, got %v", err)
 	}
 }
 
-func TestLoad_AgentCLISandboxAutoRequiresDangerousIsolation(t *testing.T) {
+func TestLoad_RunnersSandboxAutoRequiresDangerousIsolation(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.AgentCLI.DefaultMode = "sandbox_auto"
-	input.AgentCLI.DefaultIsolation = "host_readonly"
+	input.Runners.DefaultMode = "sandbox_auto"
+	input.Runners.DefaultIsolation = "host_readonly"
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 
@@ -1489,13 +1289,13 @@ func TestLoad_AgentCLISandboxAutoRequiresDangerousIsolation(t *testing.T) {
 	}
 }
 
-func TestLoad_AgentCLITrimsModeAndIsolationWhitespace(t *testing.T) {
+func TestLoad_RunnersTrimsModeAndIsolationWhitespace(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	input := Default()
-	input.AgentCLI.DefaultMode = "  review  "
-	input.AgentCLI.DefaultIsolation = "  host_readonly  "
+	input.Runners.DefaultMode = "  review  "
+	input.Runners.DefaultIsolation = "  host_readonly  "
 	b, _ := json.MarshalIndent(input, "", "  ")
 	mustWriteTestFile(t, path, b)
 
@@ -1503,11 +1303,11 @@ func TestLoad_AgentCLITrimsModeAndIsolationWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AgentCLI.DefaultMode != "review" {
-		t.Errorf("expected trimmed mode=review, got %q", cfg.AgentCLI.DefaultMode)
+	if cfg.Runners.DefaultMode != "review" {
+		t.Errorf("expected trimmed mode=review, got %q", cfg.Runners.DefaultMode)
 	}
-	if cfg.AgentCLI.DefaultIsolation != "host_readonly" {
-		t.Errorf("expected trimmed isolation=host_readonly, got %q", cfg.AgentCLI.DefaultIsolation)
+	if cfg.Runners.DefaultIsolation != "host_readonly" {
+		t.Errorf("expected trimmed isolation=host_readonly, got %q", cfg.Runners.DefaultIsolation)
 	}
 }
 
@@ -1576,9 +1376,6 @@ func TestLoad_ZeroValues_GetDefaults(t *testing.T) {
 	}
 	if cfg.MaxToolBytes != DefaultMaxToolBytes {
 		t.Errorf("expected MaxToolBytes=%d, got %d", DefaultMaxToolBytes, cfg.MaxToolBytes)
-	}
-	if cfg.MaxToolLoops != 6 {
-		t.Errorf("expected MaxToolLoops=6, got %d", cfg.MaxToolLoops)
 	}
 	if cfg.VectorScanLimit != 2000 {
 		t.Errorf("expected VectorScanLimit=2000, got %d", cfg.VectorScanLimit)
@@ -1658,14 +1455,14 @@ func TestRuntimeProfileEnvOverride(t *testing.T) {
 		}
 	})
 
-	t.Run("empty env leaves profile empty", func(t *testing.T) {
+	t.Run("empty env defaults to single-user-hardened", func(t *testing.T) {
 		t.Setenv("OR3_RUNTIME_PROFILE", "")
 		cfg, err := Load("")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.RuntimeProfile != "" {
-			t.Errorf("expected empty profile, got %q", cfg.RuntimeProfile)
+		if cfg.RuntimeProfile != ProfileSingleUserHardened {
+			t.Errorf("expected ProfileSingleUserHardened, got %q", cfg.RuntimeProfile)
 		}
 	})
 
@@ -1803,60 +1600,6 @@ func TestValidateProfile(t *testing.T) {
 		}
 	})
 
-	t.Run("hosted-service requires deny-by-default for remote MCP http", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedService
-		cfg.Security.Network.DefaultDeny = false
-		cfg.Tools.MCPServers = map[string]MCPServerConfig{
-			"remote": {
-				Enabled:   true,
-				Transport: "sse",
-				URL:       "https://mcp.example.com/stream",
-			},
-		}
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted profiles require deny-by-default security.network for remote MCP HTTP" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("hosted-service rejects broad allowlist for remote MCP http", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedService
-		cfg.Security.Network.AllowedHosts = []string{"*.example.com"}
-		cfg.Tools.MCPServers = map[string]MCPServerConfig{
-			"remote": {
-				Enabled:   true,
-				Transport: "streamablehttp",
-				URL:       "https://mcp.example.com/stream",
-			},
-		}
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted profiles require a narrow security.network.allowedHosts for remote MCP HTTP" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("hosted-no-exec rejects enableExecShell", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedNoExec
-		cfg.Hardening.EnableExecShell = true
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted-no-exec profile does not allow enableExecShell" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("hosted-no-exec rejects privilegedTools", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedNoExec
-		cfg.Hardening.PrivilegedTools = true
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted-no-exec profile does not allow privilegedTools" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
 	t.Run("hosted-no-exec passes with safe config", func(t *testing.T) {
 		cfg := hostedConfig()
 		cfg.RuntimeProfile = ProfileHostedNoExec
@@ -1865,26 +1608,6 @@ func TestValidateProfile(t *testing.T) {
 		}
 	})
 
-	t.Run("hosted-remote-sandbox-only rejects exec without sandbox", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedRemoteSandbox
-		cfg.Hardening.EnableExecShell = true
-		cfg.Hardening.Sandbox.Enabled = false
-		err := ValidateProfile(cfg)
-		if err == nil || err.Error() != "hosted-remote-sandbox-only profile requires sandbox for exec" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("hosted-remote-sandbox-only allows exec with sandbox", func(t *testing.T) {
-		cfg := hostedConfig()
-		cfg.RuntimeProfile = ProfileHostedRemoteSandbox
-		cfg.Hardening.EnableExecShell = true
-		cfg.Hardening.Sandbox.Enabled = true
-		if err := ValidateProfile(cfg); err != nil {
-			t.Errorf("expected nil, got %v", err)
-		}
-	})
 }
 
 func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
@@ -1897,8 +1620,6 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	cfg.Context.Pressure.WarningPercent = 0
 	cfg.Context.Pressure.HighPercent = 10
 	cfg.Context.Pressure.EmergencyPercent = 20
-	cfg.ContextManager.TimeoutSeconds = 0
-	cfg.ContextManager.IdlePruneSeconds = 0
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -1928,53 +1649,42 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	if got.Context.Pressure.WarningPercent <= 0 || got.Context.Pressure.HighPercent <= got.Context.Pressure.WarningPercent || got.Context.Pressure.EmergencyPercent <= got.Context.Pressure.HighPercent {
 		t.Fatalf("unexpected pressure thresholds: %+v", got.Context.Pressure)
 	}
-	if got.ContextManager.TimeoutSeconds <= 0 {
-		t.Fatalf("expected context manager timeout default, got %+v", got.ContextManager)
-	}
-	if got.ContextManager.IdlePruneSeconds != 300 {
-		t.Fatalf("expected context manager idle prune default, got %+v", got.ContextManager)
-	}
 	if !got.ContextConfigured {
 		t.Fatalf("expected context block written by Save(Default()) to be treated as configured")
 	}
 }
 
-func TestLoad_LegacyConfigWithoutContextBlockPreservesLegacyMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	raw := `{
-	  "historyMaxMessages": 17,
-	  "memoryRetrieveLimit": 9,
-	  "vectorSearchK": 11,
-	  "ftsSearchK": 12,
-	  "bootstrapMaxChars": 1234,
-	  "bootstrapTotalMaxChars": 5678,
-	  "maxToolBytes": 4321,
-	  "provider": {"apiBase": "https://api.openai.com/v1", "model": "gpt-4.1-mini"},
-	  "tools": {},
-	  "hardening": {},
-	  "skills": {},
-	  "triggers": {},
-	  "heartbeat": {},
-	  "cron": {},
-	  "service": {},
-	  "channels": {},
-	  "security": {},
-	  "docIndex": {},
-	  "subagents": {},
-	  "session": {}
-	}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+func TestLoadPersistedDoesNotApplyEnvironmentSecrets(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.Provider.APIKey = ""
+	cfg.Channels.Slack.BotToken = ""
+	cfg.Service.Secret = ""
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
-	got, err := Load(path)
+	t.Setenv("OR3_API_KEY", "environment-provider-secret")
+	t.Setenv("OR3_SLACK_BOT_TOKEN", "environment-slack-secret")
+	t.Setenv("OR3_SERVICE_SECRET", "environment-service-secret")
+
+	runtimeConfig, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.ContextConfigured {
-		t.Fatalf("expected legacy config without context block to leave ContextConfigured=false")
+	if runtimeConfig.Provider.APIKey != "environment-provider-secret" ||
+		runtimeConfig.Channels.Slack.BotToken != "environment-slack-secret" ||
+		runtimeConfig.Service.Secret != "environment-service-secret" {
+		t.Fatal("runtime environment overrides were not applied")
 	}
-	if got.HistoryMax != 17 || got.MemoryRetrieve != 9 || got.VectorK != 11 || got.FTSK != 12 || got.BootstrapMaxChars != 1234 || got.BootstrapTotalMaxChars != 5678 || got.MaxToolBytes != 4321 {
-		t.Fatalf("expected legacy runtime knobs preserved, got %+v", got)
+
+	persistedConfig, err := LoadPersisted(path)
+	if err != nil {
+		t.Fatalf("LoadPersisted: %v", err)
+	}
+	if persistedConfig.Provider.APIKey != "" ||
+		persistedConfig.Channels.Slack.BotToken != "" ||
+		persistedConfig.Service.Secret != "" {
+		t.Fatalf("LoadPersisted copied environment-only secrets: %#v", persistedConfig)
 	}
 }

@@ -229,9 +229,6 @@ func decodeServiceCronJobRequest(body io.Reader, defaultEnabled bool) (cron.Cron
 			}
 		}
 	}
-	if job.Payload.Kind == "" {
-		job.Payload.Kind = "agent_turn"
-	}
 	job.Payload = cron.NormalizePayload(job.Payload)
 	return job, nil
 }

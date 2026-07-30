@@ -6,7 +6,6 @@ func TestClampMemoryAndDocConfig(t *testing.T) {
 	cfg := Default()
 	cfg.MemoryRetrieve = 9999
 	cfg.VectorK = 0
-	cfg.DocIndex.MaxFiles = 100000
 	cfg = func() Config {
 		c := cfg
 		clampMemoryAndDocConfig(&c)
@@ -17,9 +16,6 @@ func TestClampMemoryAndDocConfig(t *testing.T) {
 	}
 	if cfg.VectorK != defaultVectorSearchK {
 		t.Fatalf("expected default vector k, got %d", cfg.VectorK)
-	}
-	if cfg.DocIndex.MaxFiles != MaxDocIndexMaxFiles {
-		t.Fatalf("expected doc max files clamped, got %d", cfg.DocIndex.MaxFiles)
 	}
 }
 

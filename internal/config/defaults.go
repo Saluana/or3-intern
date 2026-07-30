@@ -15,7 +15,6 @@ const (
 	defaultSessionCacheLimit              = 64
 	defaultHistoryMaxMessages             = 40
 	defaultMaxMediaBytes                  = 20 * 1024 * 1024
-	defaultMaxToolLoops                   = 6
 	defaultMemoryRetrieveLimit            = 8
 	defaultVectorSearchK                  = 8
 	defaultFTSSearchK                     = 8
@@ -41,10 +40,6 @@ const (
 	defaultContextMaxInputTokens          = 16000
 	defaultContextOutputReserveTokens     = 1200
 	defaultContextSafetyMarginTokens      = 400
-	defaultContextManagerTimeoutSeconds   = 15
-	defaultContextManagerIdlePruneSeconds = 300
-	defaultContextManagerMaxInputTokens   = 1200
-	defaultContextManagerMaxOutputTokens  = 600
 	defaultEmailPollIntervalSeconds       = 30
 	defaultEmailMaxBodyChars              = 4000
 	defaultEmailSubjectPrefix             = "Re: "
@@ -92,8 +87,6 @@ func Default() Config {
 		HistoryMax:                       defaultHistoryMaxMessages,
 		MaxToolBytes:                     DefaultMaxToolBytes,
 		MaxMediaBytes:                    defaultMaxMediaBytes,
-		MaxToolLoops:                     defaultMaxToolLoops,
-		MaxToolLoopsExceededAction:       QuotaExceededActionAsk,
 		MemoryRetrieve:                   defaultMemoryRetrieveLimit,
 		VectorK:                          defaultVectorSearchK,
 		FTSK:                             defaultFTSSearchK,
@@ -104,9 +97,7 @@ func Default() Config {
 		ConsolidationMaxMessages:         defaultConsolidationMaxMessages,
 		ConsolidationMaxInputChars:       defaultConsolidationMaxInputChars,
 		ConsolidationAsyncTimeoutSeconds: defaultConsolidationAsyncTimeoutSecs,
-		Subagents:                        defaultSubagentsConfig(),
-		AgentCLI:                         defaultAgentCLIConfig(),
-		DocIndex:                         defaultDocIndexConfig(),
+		Runners:                          defaultRunnersConfig(),
 		Skills:                           defaultSkillsConfig(home, root),
 		Triggers:                         defaultTriggerConfig(),
 		Session:                          defaultSessionConfig(),
@@ -116,7 +107,6 @@ func Default() Config {
 		Providers:                        defaultProviderProfiles(),
 		ModelRouting:                     defaultModelRoutingConfig(),
 		FavoriteModels:                   defaultFavoriteModelsConfig(),
-		Tools:                            defaultToolsConfig(),
 		Hardening:                        defaultHardeningConfig(),
 		Cron:                             CronConfig{Enabled: true, StorePath: filepath.Join(root, "cron.db")},
 		Service:                          defaultServiceConfig(),
@@ -126,20 +116,15 @@ func Default() Config {
 			TasksFile:       filepath.Join(root, "HEARTBEAT.md"),
 			SessionKey:      DefaultHeartbeatSessionKey,
 		},
-		Channels:       defaultChannelsConfig(),
-		Context:        defaultContextConfig(),
-		ContextManager: defaultContextManagerConfig(),
+		Channels: defaultChannelsConfig(),
+		Context:  defaultContextConfig(),
 	}
 }
 
-func defaultSubagentsConfig() SubagentsConfig {
-	return SubagentsConfig{Enabled: false, MaxConcurrent: 1, MaxQueued: 32, TaskTimeoutSeconds: 300}
-}
-
-func defaultAgentCLIConfig() AgentCLIConfig {
-	return AgentCLIConfig{
-		Enabled:                    false,
-		DisabledRunners:            []string{},
+func defaultRunnersConfig() RunnersConfig {
+	return RunnersConfig{
+		Default:                    "opencode",
+		Disabled:                   []string{},
 		RuntimeMode:                map[string]string{"opencode": "auto", "codex": "auto"},
 		DefaultModels:              map[string]string{},
 		NativeServerURLs:           map[string]string{},
@@ -157,10 +142,6 @@ func defaultAgentCLIConfig() AgentCLIConfig {
 		MaxPersistedOutputBytes:    10485760,
 		ChildEnvAllowlist:          append([]string{}, defaultChildEnvAllowlist...),
 	}
-}
-
-func defaultDocIndexConfig() DocIndexConfig {
-	return DocIndexConfig{Enabled: false, MaxFiles: 100, MaxFileBytes: 64 * 1024, MaxChunks: 500, EmbedMaxBytes: 8 * 1024, RefreshSeconds: 300, RetrieveLimit: 5}
 }
 
 func defaultSkillsConfig(home, root string) SkillsConfig {
@@ -210,9 +191,8 @@ func defaultAuthConfig() AuthConfig {
 		SessionIdleTTLSeconds:      defaultAuthSessionIdleTTLSeconds,
 		SessionAbsoluteTTLSeconds:  defaultAuthSessionAbsoluteTTLSeconds,
 		StepUpTTLSeconds:           defaultAuthStepUpTTLSeconds,
-		FallbackPolicy:             AuthFallbackPairedTokenPlusWarn,
+		FallbackPolicy:             AuthFallbackAdminRecoveryOnly,
 		EnforcementMode:            AuthEnforcementOff,
-		AllowPairedTokenFallback:   false,
 		RequirePasskeyForSensitive: true,
 	}
 }
@@ -228,7 +208,6 @@ func defaultSecurityConfig(root string) SecurityConfig {
 			PairingCodeTTLSeconds:   defaultApprovalPairingCodeTTLSeconds,
 			PendingTTLSeconds:       defaultApprovalPendingTTLSeconds,
 			ApprovalTokenTTLSeconds: defaultApprovalTokenTTLSeconds,
-			Moderator:               defaultApprovalModeratorConfig(),
 			Pairing:                 ApprovalDomainConfig{Mode: ApprovalModeAsk},
 			Exec:                    ApprovalDomainConfig{Mode: ApprovalModeTrusted},
 			SkillExecution:          ApprovalDomainConfig{Mode: ApprovalModeTrusted},
@@ -255,12 +234,9 @@ func defaultProviderProfiles() ProviderProfiles {
 func defaultModelRoutingConfig() ModelRoutingConfig {
 	chat := ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIChatModel}}
 	return ModelRoutingConfig{
-		Chat:           chat,
-		Agents:         chat,
-		Subagents:      chat,
-		Summarization:  chat,
-		ContextManager: chat,
-		Embeddings:     ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIEmbedModel}},
+		Chat:          chat,
+		Summarization: chat,
+		Embeddings:    ModelRoleConfig{Primary: ModelRef{Provider: defaultOpenAIProviderKey, Model: defaultOpenAIEmbedModel}},
 	}
 }
 
@@ -276,10 +252,6 @@ func defaultFavoriteModelsConfig() FavoriteModelsConfig {
 	}
 }
 
-func defaultToolsConfig() ToolsConfig {
-	return ToolsConfig{BraveAPIKey: os.Getenv("BRAVE_API_KEY"), WebProxy: "", EnableExec: false, ExecTimeoutSeconds: 60, RestrictToWorkspace: true, AllowFullFileRead: false, PathAppend: "", MCPServers: map[string]MCPServerConfig{}}
-}
-
 func defaultHardeningConfig() HardeningConfig {
 	return HardeningConfig{
 		GuardedTools:        false,
@@ -290,18 +262,6 @@ func defaultHardeningConfig() HardeningConfig {
 		IsolateChannelPeers: true,
 		MetadataScanner:     MetadataScannerConfig{Mode: "warn", Allowlist: []string{}},
 		Sandbox:             SandboxConfig{Enabled: false, BubblewrapPath: "bwrap", AllowNetwork: false, WritablePaths: []string{}},
-		Quotas: HardeningQuotaConfig{
-			Enabled:                 true,
-			ExceededAction:          QuotaExceededActionAsk,
-			MaxToolCalls:            16,
-			MaxExecCalls:            2,
-			MaxWebCalls:             4,
-			MaxSubagentCalls:        2,
-			MaxSessionToolCalls:     256,
-			MaxSessionExecCalls:     32,
-			MaxSessionWebCalls:      64,
-			MaxSessionSubagentCalls: 16,
-		},
 	}
 }
 
@@ -342,25 +302,18 @@ func defaultContextConfig() ContextConfig {
 		Sections: ContextSectionBudgets{
 			SystemCore:       800,
 			SoulIdentity:     2800,
-			ToolPolicy:       900,
 			ActiveTaskCard:   700,
 			PinnedMemory:     1200,
 			MemoryDigest:     900,
 			RecentHistory:    2200,
 			RetrievedMemory:  1500,
 			WorkspaceContext: 1200,
-			ToolSchemas:      1400,
 		},
 		Retrieval: ContextRetrievalConfig{CandidateMultiplier: 3, MinScore: 0.03},
 		Pressure:  ContextPressureConfig{WarningPercent: 70, HighPercent: 85, EmergencyPercent: 95},
-		Tools:     ContextToolConfig{DynamicExpose: true},
 		Artifacts: ContextArtifactConfig{SummaryMaxChars: 500},
-		TaskCard:  ContextTaskCardConfig{Enabled: true, EnforcePlan: false, MaxRefs: 12, MaxPlanItems: 8},
+		TaskCard:  ContextTaskCardConfig{Enabled: true, MaxRefs: 12, MaxPlanItems: 8},
 	}
-}
-
-func defaultContextManagerConfig() ContextManagerConfig {
-	return ContextManagerConfig{Enabled: false, Provider: "", Model: "", TimeoutSeconds: defaultContextManagerTimeoutSeconds, IdlePruneSeconds: defaultContextManagerIdlePruneSeconds, MaxInputTokens: defaultContextManagerMaxInputTokens, MaxOutputTokens: defaultContextManagerMaxOutputTokens, AllowTaskUpdates: true, AllowStalePropose: true}
 }
 
 // DefaultPath returns the default on-disk config file path.

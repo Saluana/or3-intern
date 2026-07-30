@@ -1,14 +1,11 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -19,7 +16,6 @@ import (
 
 	"or3-intern/internal/config"
 	"or3-intern/internal/configedit"
-	"or3-intern/internal/mcp"
 )
 
 type configureTUIOptions struct {
@@ -39,10 +35,6 @@ const (
 	configureScreenReview
 	configureScreenSuccess
 	configureScreenQuitConfirm
-	configureScreenMCPServerList
-	configureScreenMCPNameInput
-	configureScreenMCPForm
-	configureScreenMCPDeleteConfirm
 )
 
 type configureFieldKind int
@@ -60,6 +52,7 @@ type configureField struct {
 	Key         string
 	Label       string
 	Description string
+	Status      string
 	Kind        configureFieldKind
 	Value       string
 	Choices     []string
@@ -77,8 +70,6 @@ type configureListItem struct {
 func (i configureListItem) FilterValue() string { return i.title + " " + i.description + " " + i.key }
 func (i configureListItem) Title() string       { return i.title }
 func (i configureListItem) Description() string { return i.description }
-
-var configureMCPTestManagerFactory serviceMCPTestManagerFactory
 
 type configureKeyMap struct {
 	Up     key.Binding
@@ -184,37 +175,33 @@ func newConfigureStyles() configureStyles {
 }
 
 type configureTUIModel struct {
-	options              configureTUIOptions
-	styles               configureStyles
-	keys                 configureKeyMap
-	help                 help.Model
-	sectionList          list.Model
-	channelList          list.Model
-	mcpList              list.Model
-	textInput            textinput.Model
-	width                int
-	height               int
-	screen               configureScreen
-	cfgPath              string
-	cwd                  string
-	cfg                  config.Config
-	original             config.Config
-	existed              bool
-	loadWarning          string
-	currentSection       string
-	currentChannel       string
-	currentMCPServerName string
-	fieldCursor          int
-	formScroll           int
-	editingFieldKey      string
-	editing              bool
-	dirty                bool
-	errorMessage         string
-	successMessage       string
-	mcpTestMessage       string
-	mcpRestartReminder   bool
-	quitting             bool
-	lastSection          string
+	options         configureTUIOptions
+	styles          configureStyles
+	keys            configureKeyMap
+	help            help.Model
+	sectionList     list.Model
+	channelList     list.Model
+	textInput       textinput.Model
+	width           int
+	height          int
+	screen          configureScreen
+	cfgPath         string
+	cwd             string
+	cfg             config.Config
+	original        config.Config
+	existed         bool
+	loadWarning     string
+	currentSection  string
+	currentChannel  string
+	fieldCursor     int
+	formScroll      int
+	editingFieldKey string
+	editing         bool
+	dirty           bool
+	errorMessage    string
+	successMessage  string
+	quitting        bool
+	lastSection     string
 }
 
 func runConfigureWithTUI(cfgPath, cwd string, args []string, options configureTUIOptions) error {
@@ -265,13 +252,6 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	channelList.SetShowHelp(false)
 	channelList.SetShowPagination(false)
 
-	mcpList := list.New(buildMCPServerItems(cfg, ""), delegate, 36, 16)
-	mcpList.Title = "MCP Servers"
-	mcpList.SetShowStatusBar(false)
-	mcpList.SetFilteringEnabled(false)
-	mcpList.SetShowHelp(false)
-	mcpList.SetShowPagination(false)
-
 	input := textinput.New()
 	input.Prompt = "» "
 	input.CharLimit = 512
@@ -284,7 +264,6 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 		help:        help.New(),
 		sectionList: sectionList,
 		channelList: channelList,
-		mcpList:     mcpList,
 		textInput:   input,
 		screen:      configureScreenSections,
 		cfgPath:     cfgPath,
@@ -299,11 +278,7 @@ func newConfigureTUIModel(cfgPath, cwd string, cfg config.Config, existed bool, 
 	}
 	if len(model.options.Restricted) == 1 {
 		model.currentSection = model.options.Restricted[0]
-		if model.currentSection == "mcp" {
-			model.screen = configureScreenMCPServerList
-		} else {
-			model.screen = configureScreenForm
-		}
+		model.screen = configureScreenForm
 	}
 	return model
 }
@@ -318,7 +293,6 @@ func (m configureTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		layout := deriveConfigureLayout(msg.Width, msg.Height)
 		m.sectionList.SetSize(layout.navWidth, layout.listHeight)
 		m.channelList.SetSize(layout.navWidth, layout.listHeight)
-		m.mcpList.SetSize(layout.navWidth, layout.listHeight)
 		m.textInput.Width = maxInt(20, layout.contentWidth-8)
 		m.ensureFieldCursorVisible(len(m.activeFields()))
 		return m, nil
@@ -373,9 +347,6 @@ func (m configureTUIModel) updateSectionPicker(msg tea.KeyMsg) (tea.Model, tea.C
 			if item.key == "channels" {
 				m.screen = configureScreenChannels
 				m.channelList.Select(0)
-			} else if item.key == "mcp" {
-				m.screen = configureScreenMCPServerList
-				m.mcpTestMessage = ""
 			} else {
 				m.fieldCursor = 0
 				m.formScroll = 0
@@ -409,168 +380,6 @@ func (m configureTUIModel) updateChannelPicker(msg tea.KeyMsg) (tea.Model, tea.C
 	return m, cmd
 }
 
-func (m configureTUIModel) updateMCPServerList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		if len(m.options.Restricted) == 1 && m.options.Restricted[0] == "mcp" {
-			m.quitting = true
-			return m, tea.Quit
-		}
-		m.screen = configureScreenSections
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Add) {
-		return m.startMCPNameInput()
-	}
-	if key.Matches(msg, m.keys.Delete) {
-		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
-			m.currentMCPServerName = item.key
-			m.screen = configureScreenMCPDeleteConfirm
-		}
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Test) {
-		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
-			m.currentMCPServerName = item.key
-			m.testMCPServer(item.key)
-		}
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Select) {
-		if item, ok := m.mcpList.SelectedItem().(configureListItem); ok {
-			if item.key == "__add__" {
-				return m.startMCPNameInput()
-			}
-			m.currentMCPServerName = item.key
-			m.currentSection = "mcp"
-			m.fieldCursor = 0
-			m.formScroll = 0
-			m.mcpTestMessage = ""
-			m.screen = configureScreenMCPForm
-		}
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.mcpList, cmd = m.mcpList.Update(msg)
-	return m, cmd
-}
-
-func (m configureTUIModel) startMCPNameInput() (tea.Model, tea.Cmd) {
-	m.currentSection = "mcp"
-	m.currentMCPServerName = ""
-	m.errorMessage = ""
-	m.textInput.Reset()
-	m.textInput.Focus()
-	m.textInput.EchoMode = textinput.EchoNormal
-	m.textInput.Prompt = "Name » "
-	m.textInput.Placeholder = "filesystem"
-	m.screen = configureScreenMCPNameInput
-	return m, textinput.Blink
-}
-
-func (m configureTUIModel) updateMCPNameInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		m.textInput.Blur()
-		m.screen = configureScreenMCPServerList
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.Select) {
-		name := strings.TrimSpace(m.textInput.Value())
-		if name == "" {
-			m.errorMessage = "MCP server name is required."
-			return m, nil
-		}
-		if m.cfg.Tools.MCPServers == nil {
-			m.cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
-		}
-		if _, exists := m.cfg.Tools.MCPServers[name]; exists {
-			m.errorMessage = "MCP server name already exists."
-			return m, nil
-		}
-		m.cfg.Tools.MCPServers[name] = config.MCPServerConfig{Enabled: true, Transport: "stdio"}
-		m.currentMCPServerName = name
-		m.currentSection = "mcp"
-		m.fieldCursor = 0
-		m.formScroll = 0
-		m.dirty = true
-		m.lastSection = "mcp"
-		m.mcpRestartReminder = true
-		m.errorMessage = ""
-		m.textInput.Blur()
-		m.refreshLists()
-		m.screen = configureScreenMCPForm
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
-}
-
-func (m configureTUIModel) updateMCPDeleteConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y":
-		if m.cfg.Tools.MCPServers != nil {
-			delete(m.cfg.Tools.MCPServers, m.currentMCPServerName)
-		}
-		m.dirty = true
-		m.lastSection = "mcp"
-		m.mcpRestartReminder = true
-		m.currentMCPServerName = ""
-		m.refreshLists()
-		m.screen = configureScreenMCPServerList
-	case "n", "N", "esc":
-		m.screen = configureScreenMCPServerList
-	}
-	return m, nil
-}
-
-func (m *configureTUIModel) testMCPServer(name string) {
-	server, ok := m.cfg.Tools.MCPServers[name]
-	if !ok {
-		m.errorMessage = "MCP server not found."
-		return
-	}
-	factory := configureMCPTestManagerFactory
-	if factory == nil {
-		factory = func(servers map[string]config.MCPServerConfig) serviceMCPTestManager {
-			return mcp.NewManager(servers)
-		}
-	}
-	manager := factory(map[string]config.MCPServerConfig{name: server})
-	if manager == nil {
-		m.errorMessage = "MCP test manager is unavailable."
-		return
-	}
-	defer manager.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := manager.Connect(ctx); err != nil {
-		m.mcpTestMessage = "test failed: " + boundServiceMCPError(err)
-		m.errorMessage = m.mcpTestMessage
-		m.refreshLists()
-		return
-	}
-	statuses := manager.ServerStatus()
-	for statusName, status := range statuses {
-		if statusName == name {
-			if status.Connected {
-				m.mcpTestMessage = fmt.Sprintf("test ok: %d tools", status.ToolCount)
-				m.errorMessage = ""
-			} else if strings.TrimSpace(status.LastError) != "" {
-				m.mcpTestMessage = "test failed: " + status.LastError
-				m.errorMessage = m.mcpTestMessage
-			} else {
-				m.mcpTestMessage = "test failed: not connected"
-				m.errorMessage = m.mcpTestMessage
-			}
-			m.refreshLists()
-			return
-		}
-	}
-	m.mcpTestMessage = "test failed: status unavailable"
-	m.errorMessage = m.mcpTestMessage
-	m.refreshLists()
-}
-
 func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := m.activeFields()
 	if len(fields) == 0 {
@@ -580,11 +389,6 @@ func (m configureTUIModel) updateSectionForm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if key.Matches(msg, m.keys.Back) {
 		if m.currentSection == "channels" {
 			m.screen = configureScreenChannels
-			return m, nil
-		}
-		if m.currentSection == "mcp" {
-			m.screen = configureScreenMCPServerList
-			m.mcpTestMessage = ""
 			return m, nil
 		}
 		m.screen = configureScreenSections
@@ -631,10 +435,6 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = configureScreenChannels
 			return m, nil
 		}
-		if m.lastSection == "mcp" || m.currentSection == "mcp" {
-			m.screen = configureScreenMCPServerList
-			return m, nil
-		}
 		if m.currentSection != "" {
 			m.screen = configureScreenForm
 			return m, nil
@@ -643,10 +443,6 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(msg, m.keys.Select, m.keys.Save) {
-		if err := config.ValidateMCPServers(m.cfg.Tools.MCPServers); err != nil {
-			m.errorMessage = err.Error()
-			return m, nil
-		}
 		if err := config.Save(m.cfgPath, m.cfg); err != nil {
 			m.errorMessage = err.Error()
 			return m, nil
@@ -654,9 +450,6 @@ func (m configureTUIModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.original = m.cfg
 		m.dirty = false
 		m.successMessage = "Configuration saved successfully."
-		if m.mcpRestartReminder {
-			m.successMessage += " Restart the service to apply MCP server changes."
-		}
 		m.screen = configureScreenSuccess
 		return m, nil
 	}
@@ -677,16 +470,12 @@ func (m configureTUIModel) updateQuitConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd
 func (m *configureTUIModel) refreshLists() {
 	m.sectionList.SetItems(buildConfigureSectionItems(m.cfg, m.options.Restricted))
 	m.channelList.SetItems(buildChannelItems(m.cfg))
-	m.mcpList.SetItems(buildMCPServerItems(m.cfg, m.mcpTestMessage))
 	m.ensureFieldCursorVisible(len(m.activeFields()))
 	if m.sectionList.Index() >= len(m.sectionList.Items()) && len(m.sectionList.Items()) > 0 {
 		m.sectionList.Select(len(m.sectionList.Items()) - 1)
 	}
 	if m.channelList.Index() >= len(m.channelList.Items()) && len(m.channelList.Items()) > 0 {
 		m.channelList.Select(len(m.channelList.Items()) - 1)
-	}
-	if m.mcpList.Index() >= len(m.mcpList.Items()) && len(m.mcpList.Items()) > 0 {
-		m.mcpList.Select(len(m.mcpList.Items()) - 1)
 	}
 }
 
@@ -742,9 +531,6 @@ func (m *configureTUIModel) startEditingField(field configureField) {
 
 func (m *configureTUIModel) applyEditedValue(value string) {
 	contextKey := m.currentChannel
-	if m.currentSection == "mcp" {
-		contextKey = m.currentMCPServerName
-	}
 	changed, err := applyFieldValue(&m.cfg, m.currentSection, contextKey, m.editingFieldKey, value)
 	if err != nil {
 		m.errorMessage = err.Error()
@@ -754,9 +540,6 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 	if changed {
 		m.dirty = true
 		m.lastSection = m.currentSection
-		if m.currentSection == "mcp" {
-			m.mcpRestartReminder = true
-		}
 	}
 	if m.currentSection == "channels" {
 		m.lastSection = "channels"
@@ -774,29 +557,17 @@ func (m *configureTUIModel) applyEditedValue(value string) {
 
 func (m *configureTUIModel) toggleField(fieldKey string) {
 	contextKey := m.currentChannel
-	if m.currentSection == "mcp" {
-		contextKey = m.currentMCPServerName
-	}
 	if toggleFieldValue(&m.cfg, m.currentSection, contextKey, fieldKey) {
 		m.dirty = true
 		m.lastSection = m.currentSection
-		if m.currentSection == "mcp" {
-			m.mcpRestartReminder = true
-		}
 	}
 }
 
 func (m *configureTUIModel) cycleChoice(fieldKey string, delta int) {
 	contextKey := m.currentChannel
-	if m.currentSection == "mcp" {
-		contextKey = m.currentMCPServerName
-	}
 	if cycleChoiceValue(&m.cfg, m.currentSection, contextKey, fieldKey, delta) {
 		m.dirty = true
 		m.lastSection = m.currentSection
-		if m.currentSection == "mcp" {
-			m.mcpRestartReminder = true
-		}
 	}
 }
 
@@ -853,9 +624,6 @@ func renderFormScreen(m configureTUIModel) string {
 	if m.currentSection == "channels" && strings.TrimSpace(m.currentChannel) != "" {
 		sectionLabel = sectionLabel + " · " + strings.Title(m.currentChannel)
 	}
-	if m.currentSection == "mcp" && strings.TrimSpace(m.currentMCPServerName) != "" {
-		sectionLabel = "MCP Servers · " + m.currentMCPServerName
-	}
 
 	rows := make([]string, 0, len(visibleFields)+4)
 	rows = append(rows, m.styles.section.Render(fmt.Sprintf("%s Field %d/%d", sectionLabel, m.fieldCursor+1, len(fields))))
@@ -874,9 +642,6 @@ func renderFormScreen(m configureTUIModel) string {
 	left := m.styles.panel.Width(layout.navWidth).Render(strings.Join(rows, "\n"))
 
 	hint := formContextHint(m.currentSection, m.currentChannel, m.fieldCursor, len(fields))
-	if m.currentSection == "mcp" {
-		hint = fmt.Sprintf("Editing %s. Save and restart the service to apply MCP server changes.", m.currentMCPServerName)
-	}
 	rightSections := []string{renderSummaryPanelMode(m.styles, m.cfg, hint, layout.compact)}
 	if m.editing {
 		rightSections = append(rightSections, m.styles.section.Render("Editing")+"\n"+m.textInput.View()+"\n"+m.styles.muted.Render("Enter to apply • esc to cancel"))
@@ -886,52 +651,6 @@ func renderFormScreen(m configureTUIModel) string {
 	}
 	right := m.styles.panel.Width(layout.detailWidth).Render(strings.Join(rightSections, "\n\n"))
 	return renderConfigureSplitPanels(layout, left, right)
-}
-
-func renderMCPPanel(m configureTUIModel) string {
-	lines := []string{
-		m.styles.section.Render("MCP add-ons"),
-		fmt.Sprintf("%s %s", m.styles.label.Render("Configured:"), m.styles.value.Render(fmt.Sprintf("%d servers", len(m.cfg.Tools.MCPServers)))),
-		fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%d servers", enabledMCPServerCount(m.cfg)))),
-		"",
-		m.styles.muted.Render("Enter edits the selected server. Press a to add, d to delete, t to test, s to review and save."),
-	}
-	if m.mcpRestartReminder {
-		lines = append(lines, "", m.styles.badgeWarn.Render("restart required")+" "+m.styles.muted.Render("MCP changes apply after restarting the service."))
-	}
-	if strings.TrimSpace(m.mcpTestMessage) != "" {
-		style := m.styles.success
-		if strings.Contains(m.mcpTestMessage, "failed") {
-			style = m.styles.error
-		}
-		lines = append(lines, "", style.Render(m.mcpTestMessage))
-	}
-	if item, ok := m.mcpList.SelectedItem().(configureListItem); ok && item.key != "__add__" {
-		server := m.cfg.Tools.MCPServers[item.key]
-		lines = append(lines, "",
-			m.styles.section.Render("Selected"),
-			fmt.Sprintf("%s %s", m.styles.label.Render("Name:"), m.styles.value.Render(item.key)),
-			fmt.Sprintf("%s %s", m.styles.label.Render("Transport:"), m.styles.value.Render(server.Transport)),
-			fmt.Sprintf("%s %s", m.styles.label.Render("Enabled:"), m.styles.value.Render(fmt.Sprintf("%t", server.Enabled))),
-		)
-		if server.Transport == "stdio" {
-			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("Command:"), m.styles.value.Render(emptyAsNone(server.Command))))
-		} else {
-			lines = append(lines, fmt.Sprintf("%s %s", m.styles.label.Render("URL:"), m.styles.value.Render(emptyAsNone(server.URL))))
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderMCPNameInput(m configureTUIModel) string {
-	return strings.Join([]string{
-		m.styles.section.Render("Add MCP server"),
-		m.styles.muted.Render("Choose a unique config name. You can edit transport details on the next screen."),
-		"",
-		m.textInput.View(),
-		"",
-		m.styles.muted.Render("Enter to create • esc to cancel"),
-	}, "\n")
 }
 
 func renderSelectedFieldPanel(styles configureStyles, field configureField, width int) string {
@@ -1148,7 +867,7 @@ func renderSummaryPanel(styles configureStyles, cfg config.Config, hint string) 
 
 func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint string, compact bool) string {
 	if compact {
-		providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model
+		providerSummary := configureProviderLabel(cfg.Provider.APIBase)
 		if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
 			providerSummary += " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 		}
@@ -1163,7 +882,7 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 			styles.section.Render("Current snapshot"),
 			fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 			fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d", cfg.DefaultSessionKey, cfg.WorkerCount))),
-			fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools))),
+			fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t", cfg.Security.Approvals.Enabled))),
 			fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.value.Render(channels)),
 		}
 		if hint != "" {
@@ -1176,7 +895,7 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 	if len(channelNames) == 0 {
 		channelsLine = fmt.Sprintf("%s %s", styles.label.Render("Channels:"), styles.muted.Render("none enabled"))
 	}
-	providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+	providerSummary := configureProviderLabel(cfg.Provider.APIBase) + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 	if cfg.Provider.EmbedDimensions > 0 {
 		providerSummary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
 	}
@@ -1185,10 +904,9 @@ func renderSummaryPanelMode(styles configureStyles, cfg config.Config, hint stri
 		fmt.Sprintf("%s %s", styles.label.Render("Provider:"), styles.value.Render(providerSummary)),
 		fmt.Sprintf("%s %s", styles.label.Render("Storage:"), styles.value.Render(cfg.DBPath+" · "+cfg.ArtifactsDir)),
 		fmt.Sprintf("%s %s", styles.label.Render("Runtime:"), styles.value.Render(fmt.Sprintf("session=%s · workers=%d · history=%d", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax))),
-		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir)))),
-		fmt.Sprintf("%s %s", styles.label.Render("Tools:"), styles.value.Render(fmt.Sprintf("Brave=%t · exec=%ds · proxy=%s", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds, emptyAsNone(cfg.Tools.WebProxy)))),
-		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · guarded=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Hardening.GuardedTools, cfg.Security.Network.Enabled))),
-		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
+		fmt.Sprintf("%s %s", styles.label.Render("Workspace:"), styles.value.Render(emptyAsNone(cfg.WorkspaceDir))),
+		fmt.Sprintf("%s %s", styles.label.Render("Security:"), styles.value.Render(fmt.Sprintf("approvals=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Security.Network.Enabled))),
+		fmt.Sprintf("%s %s", styles.label.Render("Skills:"), styles.value.Render(fmt.Sprintf("watch=%t · quarantine=%t", cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault))),
 		fmt.Sprintf("%s %s", styles.label.Render("Automation:"), styles.value.Render(fmt.Sprintf("cron=%t · heartbeat=%t · webhook=%t", cfg.Cron.Enabled, cfg.Heartbeat.Enabled, cfg.Triggers.Webhook.Enabled))),
 		channelsLine,
 		fmt.Sprintf("%s %s", styles.label.Render("Service:"), styles.value.Render(serviceSummary(cfg))),
@@ -1249,69 +967,6 @@ func buildChannelItems(cfg config.Config) []list.Item {
 	return items
 }
 
-func buildMCPServerItems(cfg config.Config, testMessage string) []list.Item {
-	names := sortedMCPServerNames(cfg.Tools.MCPServers)
-	items := make([]list.Item, 0, len(names)+1)
-	items = append(items, configureListItem{key: "__add__", title: "+ Add MCP server", description: "Create a stdio, SSE, or streamable-http server"})
-	for _, name := range names {
-		server := cfg.Tools.MCPServers[name]
-		status := "disabled"
-		if server.Enabled {
-			status = "enabled"
-		}
-		description := fmt.Sprintf("%s · %s", status, server.Transport)
-		if strings.TrimSpace(testMessage) != "" {
-			description += " · " + testMessage
-		}
-		items = append(items, configureListItem{key: name, title: name, description: description})
-	}
-	return items
-}
-
-func enabledMCPServerCount(cfg config.Config) int {
-	count := 0
-	for _, server := range cfg.Tools.MCPServers {
-		if server.Enabled {
-			count++
-		}
-	}
-	return count
-}
-
-func buildMCPFields(cfg config.Config, name string) []configureField {
-	server := cfg.Tools.MCPServers[name]
-	transportChoices := []string{"stdio", "sse", "streamable-http"}
-	fields := []configureField{
-		{Key: "mcp_enabled", Label: "Enabled", Description: "Expose this MCP server's tools after the service restarts.", Kind: configureFieldToggle, Value: onOff(server.Enabled)},
-		{Key: "mcp_transport", Label: "Transport", Description: "How or3-intern connects to the MCP server.", Kind: configureFieldChoice, Value: server.Transport, Choices: transportChoices, ChoiceIndex: indexOfChoice(transportChoices, server.Transport)},
-	}
-	switch server.Transport {
-	case "stdio":
-		fields = append(fields,
-			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start the MCP server.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
-			configureField{Key: "mcp_args", Label: "Arguments", Description: "Command arguments passed to the MCP server command.", Kind: configureFieldText, Value: strings.Join(server.Args, " "), EmptyHint: "-y @modelcontextprotocol/server-filesystem ."},
-			configureField{Key: "mcp_child_env_allowlist", Label: "Child env allowlist", Description: "Comma-separated inherited environment variable names for the child process.", Kind: configureFieldText, Value: strings.Join(server.ChildEnvAllowlist, ","), EmptyHint: "PATH,HOME"},
-		)
-	case "sse", "streamable-http":
-		fields = append(fields,
-			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
-			configureField{Key: "mcp_allow_insecure_http", Label: "Allow insecure HTTP", Description: "Allow plain HTTP only for loopback or localhost endpoints.", Kind: configureFieldToggle, Value: onOff(server.AllowInsecureHTTP)},
-		)
-	default:
-		fields = append(fields,
-			configureField{Key: "mcp_command", Label: "Command", Description: "Executable used to start stdio MCP servers.", Kind: configureFieldText, Value: server.Command, EmptyHint: "npx"},
-			configureField{Key: "mcp_url", Label: "URL", Description: "Remote MCP endpoint URL.", Kind: configureFieldText, Value: server.URL, EmptyHint: "http://127.0.0.1:3000/mcp"},
-		)
-	}
-	fields = append(fields,
-		configureField{Key: "mcp_headers", Label: "Headers", Description: "Comma-separated HTTP headers as Name=Value. Used only for remote transports.", Kind: configureFieldText, Value: formatStringMap(server.Headers), EmptyHint: "Authorization=Bearer ..."},
-		configureField{Key: "mcp_env", Label: "Environment", Description: "Comma-separated environment variables as NAME=VALUE for stdio servers.", Kind: configureFieldText, Value: formatStringMap(server.Env), EmptyHint: "TOKEN=..."},
-		configureField{Key: "mcp_connect_timeout", Label: "Connect timeout seconds", Description: "How long to wait while connecting to this MCP server.", Kind: configureFieldText, Value: formatInt(server.ConnectTimeoutSeconds), EmptyHint: "10"},
-		configureField{Key: "mcp_tool_timeout", Label: "Tool timeout seconds", Description: "Maximum runtime for each tool call from this MCP server.", Kind: configureFieldText, Value: formatInt(server.ToolTimeoutSeconds), EmptyHint: "30"},
-	)
-	return withHelpfulFieldDescriptions("mcp", name, fields)
-}
-
 func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAllowlist bool) string {
 	if !enabled {
 		return "disabled"
@@ -1322,7 +977,7 @@ func channelStatus(enabled bool, policy config.InboundPolicy, openAccess, hasAll
 func sectionStatus(cfg config.Config, section string) string {
 	switch section {
 	case "provider":
-		summary := configureProviderLabel(cfg.Provider.APIBase) + " · " + cfg.Provider.Model + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
+		summary := configureProviderLabel(cfg.Provider.APIBase) + " · embed=" + emptyAsNone(cfg.Provider.EmbedModel)
 		if cfg.Provider.EmbedDimensions > 0 {
 			summary += fmt.Sprintf(" · dims=%d", cfg.Provider.EmbedDimensions)
 		}
@@ -1332,23 +987,17 @@ func sectionStatus(cfg config.Config, section string) string {
 	case "runtime":
 		return fmt.Sprintf("session=%s · workers=%d · consolidation=%t", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.ConsolidationEnabled)
 	case "context":
-		return fmt.Sprintf("mode=%s · maxInput=%d · dynamicTools=%t", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.Tools.DynamicExpose)
+		return fmt.Sprintf("mode=%s", cfg.Context.Mode)
 	case "workspace":
-		return fmt.Sprintf("restrict=%t · fullRead=%t · %s", cfg.Tools.RestrictToWorkspace, cfg.Tools.AllowFullFileRead, emptyAsNone(cfg.WorkspaceDir))
-	case "tools":
-		return fmt.Sprintf("Brave=%t · exec=%ds", strings.TrimSpace(cfg.Tools.BraveAPIKey) != "", cfg.Tools.ExecTimeoutSeconds)
-	case "mcp":
-		return fmt.Sprintf("%d configured · %d enabled", len(cfg.Tools.MCPServers), enabledMCPServerCount(cfg))
-	case "docindex":
-		return fmt.Sprintf("enabled=%t · roots=%d · retrieve=%d", cfg.DocIndex.Enabled, len(cfg.DocIndex.Roots), cfg.DocIndex.RetrieveLimit)
+		return fmt.Sprintf("%s", emptyAsNone(cfg.WorkspaceDir))
 	case "skills":
-		return fmt.Sprintf("exec=%t · watch=%t · quarantine=%t", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault)
+		return fmt.Sprintf("watch=%t · quarantine=%t", cfg.Skills.Load.Watch, cfg.Skills.Policy.QuarantineByDefault)
 	case "auth":
 		return fmt.Sprintf("enabled=%t · mode=%s · rp=%s", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, emptyAsNone(cfg.Auth.RPID))
 	case "security":
 		return fmt.Sprintf("approvals=%t · audit=%t · network=%t", cfg.Security.Approvals.Enabled, cfg.Security.Audit.Enabled, cfg.Security.Network.Enabled)
 	case "hardening":
-		return fmt.Sprintf("guarded=%t · privileged=%t · sandbox=%t", cfg.Hardening.GuardedTools, cfg.Hardening.PrivilegedTools, cfg.Hardening.Sandbox.Enabled)
+		return fmt.Sprintf("sandbox=%t", cfg.Hardening.Sandbox.Enabled)
 	case "session":
 		return fmt.Sprintf("sharedDM=%t · links=%d", cfg.Session.DirectMessagesShareDefault, len(cfg.Session.IdentityLinks))
 	case "automation":
@@ -1360,8 +1009,6 @@ func sectionStatus(cfg config.Config, section string) string {
 		return strings.Join(enabledChannelNames(cfg), ", ")
 	case "service":
 		return serviceSummary(cfg)
-	case "agentcli":
-		return fmt.Sprintf("enabled=%t · concurrent=%d · queued=%d · timeout=%ds · sandboxAuto=%t", cfg.AgentCLI.Enabled, cfg.AgentCLI.MaxConcurrent, cfg.AgentCLI.MaxQueued, cfg.AgentCLI.DefaultTimeoutSeconds, cfg.AgentCLI.AllowSandboxAuto)
 	default:
 		return ""
 	}
@@ -1378,9 +1025,6 @@ func (m configureTUIModel) activeFields() []configureField {
 	if m.currentSection == "channels" {
 		return buildChannelFields(m.cfg, m.currentChannel)
 	}
-	if m.currentSection == "mcp" {
-		return buildMCPFields(m.cfg, m.currentMCPServerName)
-	}
 	return buildSectionFields(m.cfg, m.currentSection, m.cwd)
 }
 
@@ -1396,32 +1040,18 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		return []configureField{
 			{Key: "provider_preset", Label: "Provider preset", Description: "Cycle through the built-in presets.", Kind: configureFieldChoice, Value: preset, Choices: []string{"OpenAI", "OpenRouter", "Custom"}, ChoiceIndex: indexOfChoice([]string{"OpenAI", "OpenRouter", "Custom"}, preset)},
 			{Key: "provider_api_base", Label: "API base", Description: "OpenAI-compatible base URL.", Kind: configureFieldText, Value: cfg.Provider.APIBase, EmptyHint: "https://api.openai.com/v1"},
-			{Key: "provider_model", Label: "Chat model", Description: "Default chat model for turns.", Kind: configureFieldText, Value: cfg.Provider.Model, EmptyHint: "gpt-4.1-mini"},
 			{Key: "provider_embed", Label: "Embedding model", Description: "Model used for embeddings and retrieval.", Kind: configureFieldText, Value: cfg.Provider.EmbedModel, EmptyHint: "text-embedding-3-small"},
 			{Key: "provider_embed_dimensions", Label: "Embedding dimensions", Description: "Optional override sent to embedding providers that support dimension truncation. Use 0 for the provider default.", Kind: configureFieldText, Value: formatInt(cfg.Provider.EmbedDimensions), EmptyHint: "0"},
-			{Key: "provider_temperature", Label: "Temperature", Description: "Sampling temperature for chat turns.", Kind: configureFieldText, Value: formatFloat(cfg.Provider.Temperature), EmptyHint: "0"},
+			{Key: "provider_temperature", Label: "Temperature", Description: "Sampling temperature for summarization and embedding provider calls.", Kind: configureFieldText, Value: formatFloat(cfg.Provider.Temperature), EmptyHint: "0"},
 			{Key: "provider_timeout", Label: "Timeout seconds", Description: "HTTP timeout for provider calls.", Kind: configureFieldText, Value: formatInt(cfg.Provider.TimeoutSeconds), EmptyHint: "60"},
-			{Key: "provider_vision", Label: "Enable vision", Description: "Allow image inputs when the model and runtime support it.", Kind: configureFieldToggle, Value: onOff(cfg.Provider.EnableVision)},
 			{Key: "provider_api_key", Label: "API key", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Provider.APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "provider_openai_api_key", Label: "OpenAI API key", Description: "Hidden OpenAI key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openai").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "provider_openrouter_api_key", Label: "OpenRouter API key", Description: "Hidden OpenRouter key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "openrouter").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
 			{Key: "provider_custom_api_base", Label: "Custom API base", Description: "OpenAI-compatible custom provider base URL for local models or another hosted service.", Kind: configureFieldText, Value: providerProfileValue(cfg, "custom").APIBase, EmptyHint: "http://127.0.0.1:8000/v1"},
 			{Key: "provider_custom_api_key", Label: "Custom API key", Description: "Hidden custom provider key. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(providerProfileValue(cfg, "custom").APIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
-			{Key: "routing_chat_provider", Label: "Chat provider", Description: "Provider used for normal chat turns.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Chat.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Chat.Primary.Provider)},
-			{Key: "routing_chat_model", Label: "Chat model", Description: "Model used for normal chat turns.", Kind: configureFieldText, Value: cfg.ModelRouting.Chat.Primary.Model, EmptyHint: "gpt-4.1-mini"},
-			{Key: "routing_chat_fallbacks", Label: "Chat fallbacks", Description: "Comma-separated provider/model entries tried after transient failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Chat.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
-			{Key: "routing_agents_provider", Label: "Agents provider", Description: "Provider used for agent-style work.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Agents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Agents.Primary.Provider)},
-			{Key: "routing_agents_model", Label: "Agents model", Description: "Model used for agent-style work.", Kind: configureFieldText, Value: cfg.ModelRouting.Agents.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
-			{Key: "routing_agents_fallbacks", Label: "Agents fallbacks", Description: "Comma-separated provider/model entries tried after transient agent failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Agents.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
-			{Key: "routing_subagents_provider", Label: "Subagents provider", Description: "Provider used for internal subagent jobs.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Subagents.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Subagents.Primary.Provider)},
-			{Key: "routing_subagents_model", Label: "Subagents model", Description: "Model used for internal subagent jobs.", Kind: configureFieldText, Value: cfg.ModelRouting.Subagents.Primary.Model, EmptyHint: cfg.ModelRouting.Agents.Primary.Model},
-			{Key: "routing_subagents_fallbacks", Label: "Subagents fallbacks", Description: "Comma-separated provider/model entries tried after transient subagent failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Subagents.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_summarization_provider", Label: "Summarization provider", Description: "Provider used for memory consolidation and summaries.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Summarization.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Summarization.Primary.Provider)},
 			{Key: "routing_summarization_model", Label: "Summarization model", Description: "Model used for memory consolidation and summaries.", Kind: configureFieldText, Value: cfg.ModelRouting.Summarization.Primary.Model, EmptyHint: cfg.ModelRouting.Chat.Primary.Model},
 			{Key: "routing_summarization_fallbacks", Label: "Summarization fallbacks", Description: "Comma-separated provider/model entries tried after transient summarization failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Summarization.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
-			{Key: "routing_context_provider", Label: "Context manager provider", Description: "Provider used for context-manager maintenance proposals.", Kind: configureFieldChoice, Value: cfg.ModelRouting.ContextManager.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.ContextManager.Primary.Provider)},
-			{Key: "routing_context_model", Label: "Context manager model", Description: "Model used for context-manager maintenance proposals.", Kind: configureFieldText, Value: cfg.ModelRouting.ContextManager.Primary.Model, EmptyHint: cfg.ModelRouting.Summarization.Primary.Model},
-			{Key: "routing_context_fallbacks", Label: "Context manager fallbacks", Description: "Comma-separated provider/model entries tried after transient context-manager failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.ContextManager.Fallbacks), EmptyHint: "openrouter/openai/gpt-4o-mini"},
 			{Key: "routing_embeddings_provider", Label: "Embeddings provider", Description: "Provider used for memory and document embeddings.", Kind: configureFieldChoice, Value: cfg.ModelRouting.Embeddings.Primary.Provider, Choices: providerChoices, ChoiceIndex: indexOfChoice(providerChoices, cfg.ModelRouting.Embeddings.Primary.Provider)},
 			{Key: "routing_embeddings_model", Label: "Embeddings model", Description: "Model used for memory and document embeddings.", Kind: configureFieldText, Value: cfg.ModelRouting.Embeddings.Primary.Model, EmptyHint: "text-embedding-3-small"},
 			{Key: "routing_embeddings_fallbacks", Label: "Embeddings fallbacks", Description: "Comma-separated provider/model entries tried after transient embedding failures.", Kind: configureFieldText, Value: formatModelRefs(cfg.ModelRouting.Embeddings.Fallbacks), EmptyHint: "openai/text-embedding-3-small"},
@@ -1454,8 +1084,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "runtime_history_max", Label: "History max messages", Description: "Conversation messages retained in active prompt history.", Kind: configureFieldText, Value: formatInt(cfg.HistoryMax), EmptyHint: "40"},
 			{Key: "runtime_max_tool_bytes", Label: "Max tool bytes", Description: "Max tool output bytes before artifact spillover.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolBytes), EmptyHint: "98304"},
 			{Key: "runtime_max_media_bytes", Label: "Max media bytes", Description: "Largest media payload accepted by the runtime.", Kind: configureFieldText, Value: formatInt(cfg.MaxMediaBytes), EmptyHint: "20971520"},
-			{Key: "runtime_max_tool_loops", Label: "Max tool loops", Description: "Maximum assistant tool-call rounds per turn.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolLoops), EmptyHint: "6"},
-			{Key: "runtime_max_tool_loops_exceeded_action", Label: "Tool loop limit action", Description: "What to do when the runtime hits the max tool-loop budget: ask or fail.", Kind: configureFieldText, Value: string(cfg.MaxToolLoopsExceededAction), EmptyHint: "ask"},
 			{Key: "runtime_memory_retrieve", Label: "Memory retrieve limit", Description: "How many long-term memory hits are injected into prompts.", Kind: configureFieldText, Value: formatInt(cfg.MemoryRetrieve), EmptyHint: "8"},
 			{Key: "runtime_vector_k", Label: "Vector search K", Description: "Semantic memory candidate count before ranking.", Kind: configureFieldText, Value: formatInt(cfg.VectorK), EmptyHint: "8"},
 			{Key: "runtime_fts_k", Label: "FTS search K", Description: "Keyword memory candidate count before ranking.", Kind: configureFieldText, Value: formatInt(cfg.FTSK), EmptyHint: "8"},
@@ -1467,10 +1095,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "runtime_consolidation_max_messages", Label: "Consolidation max messages", Description: "Max messages summarized in one consolidation pass.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationMaxMessages), EmptyHint: "50"},
 			{Key: "runtime_consolidation_max_input_chars", Label: "Consolidation max input chars", Description: "Prompt budget for consolidation transcript input.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationMaxInputChars), EmptyHint: "12000"},
 			{Key: "runtime_consolidation_async_timeout", Label: "Consolidation async timeout", Description: "Timeout for async consolidation passes, in seconds.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationAsyncTimeoutSeconds), EmptyHint: "30"},
-			{Key: "runtime_subagents_enabled", Label: "Enable subagents", Description: "Allow internal subagent orchestration.", Kind: configureFieldToggle, Value: onOff(cfg.Subagents.Enabled)},
-			{Key: "runtime_subagents_max_concurrent", Label: "Subagents max concurrent", Description: "Maximum concurrent subagents.", Kind: configureFieldText, Value: formatInt(cfg.Subagents.MaxConcurrent), EmptyHint: "1"},
-			{Key: "runtime_subagents_max_queued", Label: "Subagents max queued", Description: "Maximum queued subagent tasks.", Kind: configureFieldText, Value: formatInt(cfg.Subagents.MaxQueued), EmptyHint: "32"},
-			{Key: "runtime_subagents_timeout", Label: "Subagents timeout seconds", Description: "Timeout for each subagent task.", Kind: configureFieldText, Value: formatInt(cfg.Subagents.TaskTimeoutSeconds), EmptyHint: "300"},
 		}
 	case "context":
 		modeChoices := []string{"poor", "balanced", "quality", "custom"}
@@ -1480,39 +1104,15 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 		return []configureField{
 			{Key: "context_mode", Label: "Context mode", Description: "Packet budget preset. Existing configs stay quality-leaning unless changed.", Kind: configureFieldChoice, Value: modeValue, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, modeValue)},
-			{Key: "context_max_input_tokens", Label: "Max input tokens", Description: "Approximate total input-token budget for prompt packets.", Kind: configureFieldText, Value: formatInt(cfg.Context.MaxInputTokens), EmptyHint: "16000"},
-			{Key: "context_output_reserve", Label: "Output reserve tokens", Description: "Tokens reserved for model output before packing input sections.", Kind: configureFieldText, Value: formatInt(cfg.Context.OutputReserveTokens), EmptyHint: "1200"},
-			{Key: "context_safety_margin", Label: "Safety margin tokens", Description: "Extra buffer retained below the configured model input budget.", Kind: configureFieldText, Value: formatInt(cfg.Context.SafetyMarginTokens), EmptyHint: "400"},
-			{Key: "context_dynamic_tools", Label: "Dynamic tool schemas", Description: "Expose only likely tool schemas each turn while runtime guards still enforce policy.", Kind: configureFieldToggle, Value: onOff(cfg.Context.Tools.DynamicExpose)},
 			{Key: "context_retrieval_multiplier", Label: "Candidate multiplier", Description: "How many retrieval candidates to consider before budgeted packing.", Kind: configureFieldText, Value: formatInt(cfg.Context.Retrieval.CandidateMultiplier), EmptyHint: "3"},
 			{Key: "context_retrieval_min_score", Label: "Minimum retrieval score", Description: "Minimum score for memory/document candidates before packing.", Kind: configureFieldText, Value: formatFloat(cfg.Context.Retrieval.MinScore), EmptyHint: "0.03"},
 			{Key: "context_pressure_warning", Label: "Pressure warning percent", Description: "Context utilization level that starts soft pressure warnings.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.WarningPercent), EmptyHint: "70"},
 			{Key: "context_pressure_high", Label: "Pressure high percent", Description: "Context utilization level that triggers stronger compression.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.HighPercent), EmptyHint: "85"},
 			{Key: "context_pressure_emergency", Label: "Pressure emergency percent", Description: "Context utilization level that triggers emergency pruning.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.EmergencyPercent), EmptyHint: "95"},
-			{Key: "context_section_system_core", Label: "System core budget", Description: "Section budget for core system instructions.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SystemCore), EmptyHint: "1200"},
-			{Key: "context_section_soul_identity", Label: "Soul identity budget", Description: "Section budget for identity and soul bootstrap material.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.SoulIdentity), EmptyHint: "1200"},
-			{Key: "context_section_tool_policy", Label: "Tool policy budget", Description: "Section budget for tool policy and safety guidance.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolPolicy), EmptyHint: "900"},
-			{Key: "context_section_active_task_card", Label: "Active task card budget", Description: "Section budget for current goal, plan, decisions, refs, and active files.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ActiveTaskCard), EmptyHint: "800"},
-			{Key: "context_section_pinned_memory", Label: "Pinned memory budget", Description: "Section budget for pinned durable memory.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.PinnedMemory), EmptyHint: "900"},
-			{Key: "context_section_recent_history", Label: "Recent history budget", Description: "Section budget for recent conversation history.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RecentHistory), EmptyHint: "2200"},
-			{Key: "context_section_retrieved_memory", Label: "Retrieved memory budget", Description: "Section budget for retrieved memory snippets.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.RetrievedMemory), EmptyHint: "1500"},
-			{Key: "context_section_memory_digest", Label: "Memory digest budget", Description: "Section budget for durable memory digest lines.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.MemoryDigest), EmptyHint: "900"},
-			{Key: "context_section_workspace", Label: "Workspace context budget", Description: "Section budget for workspace context and indexed docs.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.WorkspaceContext), EmptyHint: "1200"},
-			{Key: "context_section_tool_schemas", Label: "Tool schema budget", Description: "Section budget for exposed tool schemas.", Kind: configureFieldText, Value: formatInt(cfg.Context.Sections.ToolSchemas), EmptyHint: "1400"},
 			{Key: "context_task_card_enabled", Label: "Task card", Description: "Track current goal, plan, decisions, refs, and active files across turns.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.Enabled)},
-			{Key: "context_task_card_enforce_plan", Label: "Require plan before writes", Description: "Block write, exec, and web tools until create_plan establishes an active task plan. Best for untrusted or multi-step workflows; leave off for simple local use.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.EnforcePlan)},
 			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
 			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
 			{Key: "context_artifact_summary_chars", Label: "Artifact summary chars", Description: "Bounded artifact/tool-output summary size stored for retrieval.", Kind: configureFieldText, Value: formatInt(cfg.Context.Artifacts.SummaryMaxChars), EmptyHint: "500"},
-			{Key: "context_manager_enabled", Label: "Context manager", Description: "Enable optional low-cost maintenance-model proposals.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.Enabled)},
-			{Key: "context_manager_provider", Label: "Context manager provider", Description: "Optional provider override for context-manager proposals. Blank uses the main provider.", Kind: configureFieldText, Value: cfg.ContextManager.Provider, EmptyHint: cfg.Provider.APIBase},
-			{Key: "context_manager_model", Label: "Context manager model", Description: "Optional model for context-manager proposals. Blank uses deterministic pruning only.", Kind: configureFieldText, Value: cfg.ContextManager.Model, EmptyHint: "gpt-4.1-mini"},
-			{Key: "context_manager_timeout", Label: "Context manager timeout", Description: "Timeout for optional context-manager calls, in seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.TimeoutSeconds), EmptyHint: "15"},
-			{Key: "context_manager_idle_prune", Label: "Idle prune seconds", Description: "Inactivity period before automatic context pruning runs. Default is 300 seconds.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.IdlePruneSeconds), EmptyHint: "300"},
-			{Key: "context_manager_max_input", Label: "Context manager max input", Description: "Input-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxInputTokens), EmptyHint: "1200"},
-			{Key: "context_manager_max_output", Label: "Context manager max output", Description: "Output-token cap for context-manager proposals.", Kind: configureFieldText, Value: formatInt(cfg.ContextManager.MaxOutputTokens), EmptyHint: "600"},
-			{Key: "context_manager_allow_task_updates", Label: "Allow task updates", Description: "Allow context-manager proposals to update active task metadata.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowTaskUpdates)},
-			{Key: "context_manager_allow_stale_propose", Label: "Allow stale proposals", Description: "Allow proposals even when the manager works from slightly stale state.", Kind: configureFieldToggle, Value: onOff(cfg.ContextManager.AllowStalePropose)},
 		}
 	case "workspace":
 		workspace := cfg.WorkspaceDir
@@ -1520,33 +1120,12 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			workspace = cwd
 		}
 		return []configureField{
-			{Key: "workspace_restrict", Label: "Restrict file tools", Description: "Keep file tools inside the selected workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.RestrictToWorkspace)},
-			{Key: "workspace_allow_full_read", Label: "Read outside workspace", Description: "Allow read/list/search across the computer while writes stay in the workspace.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.AllowFullFileRead)},
 			{Key: "workspace_dir", Label: "Workspace directory", Description: "Project root for workspace-restricted file tools.", Kind: configureFieldText, Value: workspace, EmptyHint: cwd},
 			{Key: "workspace_allowed_dir", Label: "Allowed directory", Description: "Optional additional allowed root used by some flows and integrations.", Kind: configureFieldText, Value: cfg.AllowedDir, EmptyHint: cwd},
-		}
-	case "tools":
-		return []configureField{
-			{Key: "tools_brave", Label: "Brave Search key", Description: "Hidden secret for Brave web search. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Tools.BraveAPIKey), SecretHint: "blank keeps current • type clear to remove", EmptyHint: "not configured"},
-			{Key: "tools_web_proxy", Label: "Web proxy", Description: "Optional outbound proxy URL for web access.", Kind: configureFieldText, Value: cfg.Tools.WebProxy, EmptyHint: "http://proxy.internal:8080"},
-			{Key: "tools_enable_exec", Label: "Enable exec tool", Description: "Register the built-in exec tool so approved local programs can run.", Kind: configureFieldToggle, Value: onOff(cfg.Tools.EnableExec)},
-			{Key: "tools_exec_timeout", Label: "Exec timeout seconds", Description: "Default timeout for built-in exec-capable tools.", Kind: configureFieldText, Value: formatInt(cfg.Tools.ExecTimeoutSeconds), EmptyHint: "60"},
-			{Key: "tools_path_append", Label: "PATH append", Description: "Extra PATH entries appended for child process execution.", Kind: configureFieldText, Value: cfg.Tools.PathAppend, EmptyHint: "/opt/homebrew/bin"},
-		}
-	case "docindex":
-		return []configureField{
-			{Key: "docindex_enabled", Label: "Enable doc index", Description: "Index workspace files for retrieval-augmented prompts.", Kind: configureFieldToggle, Value: onOff(cfg.DocIndex.Enabled)},
-			{Key: "docindex_roots", Label: "Roots", Description: "Comma-separated directories to index.", Kind: configureFieldText, Value: strings.Join(cfg.DocIndex.Roots, ","), EmptyHint: "docs,src"},
-			{Key: "docindex_max_files", Label: "Max files", Description: "Maximum files indexed in one scope.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.MaxFiles), EmptyHint: "100"},
-			{Key: "docindex_max_file_bytes", Label: "Max file bytes", Description: "Largest file size to index.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.MaxFileBytes), EmptyHint: "65536"},
-			{Key: "docindex_max_chunks", Label: "Max chunks", Description: "Upper bound on indexed chunks.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.MaxChunks), EmptyHint: "500"},
-			{Key: "docindex_embed_max_bytes", Label: "Embed max bytes", Description: "Max content bytes embedded per indexed file.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.EmbedMaxBytes), EmptyHint: "8192"},
-			{Key: "docindex_refresh_seconds", Label: "Refresh seconds", Description: "Periodic refresh cadence for indexed roots.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.RefreshSeconds), EmptyHint: "300"},
-			{Key: "docindex_retrieve_limit", Label: "Retrieve limit", Description: "How many indexed doc hits are injected into prompts.", Kind: configureFieldText, Value: formatInt(cfg.DocIndex.RetrieveLimit), EmptyHint: "5"},
+			{Key: "filesystem_browsing", Label: "Full filesystem browsing", Description: "Browse and select any folder on this computer when choosing working directories and attachments.", Kind: configureFieldToggle, Value: onOff(cfg.FilesystemBrowsing)},
 		}
 	case "skills":
 		return []configureField{
-			{Key: "skills_enable_exec", Label: "Enable skill exec", Description: "Allow skills to run external commands when approved by policy.", Kind: configureFieldToggle, Value: onOff(cfg.Skills.EnableExec)},
 			{Key: "skills_max_run_seconds", Label: "Max run seconds", Description: "Timeout for skill execution.", Kind: configureFieldText, Value: formatInt(cfg.Skills.MaxRunSeconds), EmptyHint: "30"},
 			{Key: "skills_managed_dir", Label: "Managed skills directory", Description: "Where installed and local managed skills are stored.", Kind: configureFieldText, Value: cfg.Skills.ManagedDir, EmptyHint: "~/.or3-intern/skills"},
 			{Key: "skills_quarantine", Label: "Quarantine by default", Description: "Require explicit approval before new external skills are trusted.", Kind: configureFieldToggle, Value: onOff(cfg.Skills.Policy.QuarantineByDefault)},
@@ -1565,7 +1144,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 	case "auth":
 		modeChoices := []string{"off", "warn", "enforce-sensitive", "enforce-session"}
-		fallbackChoices := []string{"paired-token-only", "paired-token-plus-warning", "admin-recovery-only"}
+		fallbackChoices := []string{"admin-recovery-only"}
 		return []configureField{
 			{Key: "auth_enabled", Label: "Enable auth", Description: "Enable passkey/session auth support for the service API.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.Enabled)},
 			{Key: "auth_rp_id", Label: "RP ID", Description: "WebAuthn relying-party ID.", Kind: configureFieldText, Value: cfg.Auth.RPID, EmptyHint: "or3.chat"},
@@ -1575,9 +1154,8 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "auth_session_idle_ttl", Label: "Session idle TTL seconds", Description: "Idle expiration for auth sessions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.SessionIdleTTLSeconds), EmptyHint: "1800"},
 			{Key: "auth_session_absolute_ttl", Label: "Session absolute TTL seconds", Description: "Absolute expiration for auth sessions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.SessionAbsoluteTTLSeconds), EmptyHint: "43200"},
 			{Key: "auth_step_up_ttl", Label: "Step-up TTL seconds", Description: "Recent-auth window for sensitive actions.", Kind: configureFieldText, Value: formatInt(cfg.Auth.StepUpTTLSeconds), EmptyHint: "300"},
-			{Key: "auth_fallback_policy", Label: "Fallback policy", Description: "Compatibility policy for pairing-only clients.", Kind: configureFieldChoice, Value: cfg.Auth.FallbackPolicy, Choices: fallbackChoices, ChoiceIndex: indexOfChoice(fallbackChoices, cfg.Auth.FallbackPolicy)},
+			{Key: "auth_fallback_policy", Label: "Fallback policy", Description: "Recovery policy for unauthenticated admin setup.", Kind: configureFieldChoice, Value: cfg.Auth.FallbackPolicy, Choices: fallbackChoices, ChoiceIndex: indexOfChoice(fallbackChoices, cfg.Auth.FallbackPolicy)},
 			{Key: "auth_enforcement_mode", Label: "Enforcement mode", Description: "Auth rollout enforcement level.", Kind: configureFieldChoice, Value: string(cfg.Auth.EnforcementMode), Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, string(cfg.Auth.EnforcementMode))},
-			{Key: "auth_allow_paired_token_fallback", Label: "Allow paired-token fallback", Description: "Permit paired-device token compatibility when policy allows it.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.AllowPairedTokenFallback)},
 			{Key: "auth_require_passkey_for_sensitive", Label: "Require passkey for sensitive routes", Description: "Require recent passkey verification for high-risk routes.", Kind: configureFieldToggle, Value: onOff(cfg.Auth.RequirePasskeyForSensitive)},
 		}
 	case "security":
@@ -1597,22 +1175,9 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "security_approvals_pending_ttl", Label: "Pending TTL seconds", Description: "Expiration for pending approval requests.", Kind: configureFieldText, Value: formatInt(cfg.Security.Approvals.PendingTTLSeconds), EmptyHint: "900"},
 			{Key: "security_approvals_token_ttl", Label: "Approval-token TTL seconds", Description: "Expiration for one-shot approval tokens.", Kind: configureFieldText, Value: formatInt(cfg.Security.Approvals.ApprovalTokenTTLSeconds), EmptyHint: "300"},
 			{Key: "security_approval_pairing_mode", Label: "Pairing mode", Description: "Approval rule for device/channel pairing.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Pairing.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.Pairing.Mode))},
-			{Key: "security_approval_exec_mode", Label: "Exec mode", Description: "Approval rule for command execution.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Exec.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.Exec.Mode))},
-			{Key: "security_approval_skill_mode", Label: "Skill execution mode", Description: "Approval rule for skill execution.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.SkillExecution.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.SkillExecution.Mode))},
 			// Note: Secret access mode is not yet implemented - approval gate not wired to secret store
 			// {Key: "security_approval_secret_mode", Label: "Secret access mode", Description: "Approval rule for reading stored secrets.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.SecretAccess.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.SecretAccess.Mode))},
 			{Key: "security_approval_message_mode", Label: "Message-send mode", Description: "Approval rule for outbound send-message actions.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.MessageSend.Mode), Choices: approvalChoices, ChoiceIndex: indexOfChoice(approvalChoices, string(cfg.Security.Approvals.MessageSend.Mode))},
-			{Key: "security_approval_moderator_enabled", Label: "AI approval moderator", Description: "Review pending approvals with a fast model before escalating to you.", Kind: configureFieldToggle, Value: onOff(cfg.Security.Approvals.Moderator.Enabled && cfg.Security.Approvals.Enabled)},
-			{Key: "security_approval_moderator_preset", Label: "Moderator preset", Description: "Balanced, cautious, hands-off, or manual review for all risk levels.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Moderator.Preset), Choices: []string{"balanced", "cautious", "hands_off", "manual"}, ChoiceIndex: indexOfChoice([]string{"balanced", "cautious", "hands_off", "manual"}, string(cfg.Security.Approvals.Moderator.Preset))},
-			{Key: "security_approval_moderator_provider", Label: "Moderator provider", Description: "Provider profile key for approval review calls.", Kind: configureFieldText, Value: cfg.Security.Approvals.Moderator.Provider, EmptyHint: "chat primary provider"},
-			{Key: "security_approval_moderator_model", Label: "Moderator model", Description: "Fast model used for approval review.", Kind: configureFieldText, Value: cfg.Security.Approvals.Moderator.Model, EmptyHint: "chat primary model"},
-			{Key: "security_approval_moderator_timeout", Label: "Moderator timeout seconds", Description: "Maximum time for one moderator review.", Kind: configureFieldText, Value: formatInt(cfg.Security.Approvals.Moderator.TimeoutSeconds), EmptyHint: "8"},
-			{Key: "security_approval_moderator_failure_action", Label: "Moderator failure action", Description: "What to do when review fails or times out.", Kind: configureFieldChoice, Value: string(cfg.Security.Approvals.Moderator.FailureAction), Choices: []string{"escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"escalate", "deny"}, string(cfg.Security.Approvals.Moderator.FailureAction))},
-			{Key: "security_approval_moderator_user_policy", Label: "Moderator user policy", Description: "Extra rules appended to built-in moderator policy.", Kind: configureFieldText, Value: cfg.Security.Approvals.Moderator.UserPolicy, EmptyHint: "never use grep"},
-			{Key: "security_approval_moderator_action_low", Label: "Moderator action (low risk)", Description: "Override for low-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "low"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "low"))},
-			{Key: "security_approval_moderator_action_medium", Label: "Moderator action (medium risk)", Description: "Override for medium-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "medium"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "medium"))},
-			{Key: "security_approval_moderator_action_high", Label: "Moderator action (high risk)", Description: "Override for high-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "high"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "high"))},
-			{Key: "security_approval_moderator_action_extreme", Label: "Moderator action (extreme risk)", Description: "Override for extreme-risk approvals; empty inherits preset.", Kind: configureFieldChoice, Value: moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "extreme"), Choices: []string{"", "approve", "escalate", "deny"}, ChoiceIndex: indexOfChoice([]string{"", "approve", "escalate", "deny"}, moderatorActionFieldValue(cfg.Security.Approvals.Moderator, "extreme"))},
 			{Key: "security_profiles_enabled", Label: "Enable access profiles", Description: "Map channels and triggers to named runtime capability profiles.", Kind: configureFieldToggle, Value: onOff(cfg.Security.Profiles.Enabled)},
 			{Key: "security_profiles_default", Label: "Default profile", Description: "Fallback profile name applied when no channel/trigger mapping matches.", Kind: configureFieldText, Value: cfg.Security.Profiles.Default, EmptyHint: "guarded"},
 			{Key: "security_profiles_channels", Label: "Channel profile mappings", Description: "Comma-separated `channel=profile` mappings, e.g. `telegram=ops,slack=guarded`.", Kind: configureFieldText, Value: formatStringMap(cfg.Security.Profiles.Channels), EmptyHint: "telegram=ops,slack=guarded"},
@@ -1625,26 +1190,12 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 		}
 	case "hardening":
 		return []configureField{
-			{Key: "hardening_guarded_tools", Label: "Enable guarded tools", Description: "Allow guarded-capability tools like file writes and web fetches.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.GuardedTools)},
-			{Key: "hardening_privileged_tools", Label: "Enable privileged tools", Description: "Allow privileged-capability tools in addition to guarded tools.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.PrivilegedTools)},
-			{Key: "hardening_exec_shell", Label: "Enable exec shell mode", Description: "Permit shell-style command execution when approvals and policy allow it.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.EnableExecShell)},
 			{Key: "hardening_isolate_channel_peers", Label: "Isolate channel peers", Description: "Prevent one channel identity from sharing another channel’s capability context.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.IsolateChannelPeers)},
-			{Key: "hardening_exec_allowed_programs", Label: "Exec allowed programs", Description: "Comma-separated allowlist of binaries available to exec-capable tools.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.ExecAllowedPrograms, ","), EmptyHint: "cat,echo,git"},
 			{Key: "hardening_child_env_allowlist", Label: "Child env allowlist", Description: "Comma-separated environment variables passed to child processes.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.ChildEnvAllowlist, ","), EmptyHint: "PATH,HOME,TMPDIR"},
 			{Key: "hardening_sandbox_enabled", Label: "Enable sandbox", Description: "Run exec-capable tools inside a restricted sandbox.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Sandbox.Enabled)},
 			{Key: "hardening_sandbox_bwrap", Label: "Bubblewrap path", Description: "Path to the bubblewrap executable.", Kind: configureFieldText, Value: cfg.Hardening.Sandbox.BubblewrapPath, EmptyHint: "bwrap"},
 			{Key: "hardening_sandbox_allow_network", Label: "Sandbox allow network", Description: "Permit outbound networking from inside the sandbox.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Sandbox.AllowNetwork)},
 			{Key: "hardening_sandbox_writable_paths", Label: "Sandbox writable paths", Description: "Comma-separated writable paths made available inside the sandbox.", Kind: configureFieldText, Value: strings.Join(cfg.Hardening.Sandbox.WritablePaths, ","), EmptyHint: "/tmp,/var/tmp"},
-			{Key: "hardening_quotas_enabled", Label: "Enable hardening quotas", Description: "Enforce per-message and per-session quotas on sensitive tool categories.", Kind: configureFieldToggle, Value: onOff(cfg.Hardening.Quotas.Enabled)},
-			{Key: "hardening_quota_exceeded_action", Label: "Quota exceeded action", Description: "What to do when a quota is reached: ask or fail.", Kind: configureFieldText, Value: string(cfg.Hardening.Quotas.ExceededAction), EmptyHint: "ask"},
-			{Key: "hardening_max_tool_calls", Label: "Max tool calls per message", Description: "Total tool-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxToolCalls), EmptyHint: "16"},
-			{Key: "hardening_max_exec_calls", Label: "Max exec calls per message", Description: "Exec-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxExecCalls), EmptyHint: "2"},
-			{Key: "hardening_max_web_calls", Label: "Max web calls per message", Description: "Web-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxWebCalls), EmptyHint: "4"},
-			{Key: "hardening_max_subagent_calls", Label: "Max subagent calls per message", Description: "Subagent-call quota per message.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSubagentCalls), EmptyHint: "2"},
-			{Key: "hardening_max_session_tool_calls", Label: "Max tool calls per session", Description: "Total tool-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionToolCalls), EmptyHint: "256"},
-			{Key: "hardening_max_session_exec_calls", Label: "Max exec calls per session", Description: "Exec-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionExecCalls), EmptyHint: "32"},
-			{Key: "hardening_max_session_web_calls", Label: "Max web calls per session", Description: "Web-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionWebCalls), EmptyHint: "64"},
-			{Key: "hardening_max_session_subagent_calls", Label: "Max subagent calls per session", Description: "Subagent-call quota per session.", Kind: configureFieldText, Value: formatInt(cfg.Hardening.Quotas.MaxSessionSubagentCalls), EmptyHint: "16"},
 		}
 	case "session":
 		return []configureField{
@@ -1669,30 +1220,13 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "automation_filewatch_debounce", Label: "File-watch debounce seconds", Description: "Debounce window before emitting a trigger.", Kind: configureFieldText, Value: formatInt(cfg.Triggers.FileWatch.DebounceSeconds), EmptyHint: "2"},
 		}
 	case "service":
-		capabilityChoices := []string{"safe", "guarded", "privileged"}
 		return []configureField{
 			{Key: "service_enabled", Label: "Enable service API", Description: "Expose the internal authenticated HTTP API.", Kind: configureFieldToggle, Value: onOff(cfg.Service.Enabled)},
 			{Key: "service_listen", Label: "Listen address", Description: "Bind address for the internal service.", Kind: configureFieldText, Value: cfg.Service.Listen, EmptyHint: "127.0.0.1:9100"},
 			{Key: "service_secret", Label: "Shared secret", Description: "Hidden secret. Enter replaces it; type clear to remove it.", Kind: configureFieldSecret, Value: secretDisplay(cfg.Service.Secret), SecretHint: "blank keeps current · type clear to remove", EmptyHint: "not configured"},
-			{Key: "service_max_capability", Label: "Service max capability", Description: "Highest tool capability level the app/service API may request.", Kind: configureFieldChoice, Value: cfg.Service.MaxCapability, Choices: capabilityChoices, ChoiceIndex: indexOfChoice(capabilityChoices, cfg.Service.MaxCapability)},
 			{Key: "service_allow_unauthenticated_pairing", Label: "Allow first-time local device pairing", Description: "Let a phone or browser on this same computer ask for a one-time pairing code before it has a saved key.", Kind: configureFieldToggle, Value: onOff(cfg.Service.AllowUnauthenticatedPairing)},
 			{Key: "service_trusted_browser_origins", Label: "Trusted app origins", Description: "Comma-separated browser origins allowed to call the service API from a private-network app.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserOrigins, ","), EmptyHint: "http://100.x.y.z:3060,http://app.local:3060"},
 			{Key: "service_trusted_browser_cidrs", Label: "Trusted app CIDRs", Description: "Comma-separated remote IPs or CIDRs allowed to use trusted app origins.", Kind: configureFieldText, Value: strings.Join(cfg.Service.TrustedBrowserCIDRs, ","), EmptyHint: "100.64.0.0/10,192.168.1.0/24"},
-		}
-	case "agentcli":
-		modeChoices := []string{"review", "safe_edit", "sandbox_auto"}
-		isolationChoices := []string{"host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous"}
-		disabledRunners := strings.Join(cfg.AgentCLI.DisabledRunners, ",")
-		return []configureField{
-			{Key: "agentCLI_enabled", Label: "Enable external CLI agents", Description: "Allow the service to discover and run external CLIs like OpenCode, Codex, Claude, and Gemini.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.Enabled)},
-			{Key: "agentCLI_max_concurrent", Label: "Max concurrent external runs", Description: "How many external CLI agents may run at once.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxConcurrent), EmptyHint: "1"},
-			{Key: "agentCLI_max_queued", Label: "Max queued external runs", Description: "How many external CLI jobs may wait in line.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxQueued), EmptyHint: "16"},
-			{Key: "agentCLI_default_timeout", Label: "Default timeout (seconds)", Description: "How long each external CLI run may take before timing out.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.DefaultTimeoutSeconds), EmptyHint: "900"},
-			{Key: "agentCLI_max_timeout", Label: "Max timeout (seconds)", Description: "Hard upper bound for run timeouts.", Kind: configureFieldText, Value: formatInt(cfg.AgentCLI.MaxTimeoutSeconds), EmptyHint: "7200"},
-			{Key: "agentCLI_allow_sandbox_auto", Label: "Allow sandbox full autonomy", Description: "Enable dangerous full-autonomy mode for sandboxed runs. Requires sandbox infrastructure.", Kind: configureFieldToggle, Value: onOff(cfg.AgentCLI.AllowSandboxAuto)},
-			{Key: "agentCLI_default_mode", Label: "Default run mode", Description: "Default permission mode for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultMode, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, cfg.AgentCLI.DefaultMode)},
-			{Key: "agentCLI_default_isolation", Label: "Default isolation level", Description: "Default isolation boundary for external CLI runs.", Kind: configureFieldChoice, Value: cfg.AgentCLI.DefaultIsolation, Choices: isolationChoices, ChoiceIndex: indexOfChoice(isolationChoices, cfg.AgentCLI.DefaultIsolation)},
-			{Key: "agentCLI_disabled_runners", Label: "Disabled runners (comma-separated)", Description: "Runner IDs to exclude from discovery. Leave empty to allow all detected runners.", Kind: configureFieldText, Value: disabledRunners, EmptyHint: "opencode,gemini"},
 		}
 	}
 	return nil
@@ -1764,230 +1298,143 @@ func helpfulFieldDescription(section, channel, key string) string {
 }
 
 var helpfulSectionFieldDescriptions = map[string]string{
-	"provider_preset":                        "Choose the company or service OR3 uses for AI. OpenAI and OpenRouter fill in known defaults. Choose Custom only if you already have a compatible API URL.",
-	"provider_api_base":                      "The web address OR3 sends AI requests to. Warning: if this is wrong, chat, memory cleanup, and embeddings can stop working.",
-	"provider_model":                         "The main AI model used to answer you. Bigger models may be smarter but slower or more expensive. Warning: a model name your provider does not support will break chat.",
-	"provider_embed":                         "The model used to turn text into searchable memory. This must match your provider. Warning: changing it can require rebuilding memory and document embeddings.",
-	"provider_embed_dimensions":              "Advanced: requested size for memory-search vectors. Most users should leave this at 0. Warning: changing it can make existing memory vectors incompatible until rebuilt.",
-	"provider_temperature":                   "Controls how varied the assistant's wording is. 0 is focused and repeatable; higher values are more creative but less predictable.",
-	"provider_timeout":                       "How long OR3 waits for the AI provider before giving up. Increase this for slow models; lower values fail faster when the provider hangs.",
-	"provider_vision":                        "Lets OR3 send images to the AI model when the model supports vision. Leave off if your provider or model cannot read images.",
-	"provider_api_key":                       "Secret key used to access your AI provider. It is hidden on screen. Warning: deleting or mistyping it will prevent OR3 from contacting the provider.",
-	"provider_openai_api_key":                "Secret OpenAI key used when any model role routes to OpenAI. Leave blank to keep the existing key or type clear to remove it.",
-	"provider_openrouter_api_key":            "Secret OpenRouter key used when any model role routes to OpenRouter. Leave blank to keep the existing key or type clear to remove it.",
-	"provider_custom_api_base":               "OpenAI-compatible custom provider base URL for local models or another hosted service. Leave blank unless you have a custom endpoint ready.",
-	"provider_custom_api_key":                "Secret custom provider key used with the custom API base. Leave blank to keep the existing key or type clear to remove it.",
-	"routing_chat_provider":                  "Provider used for normal chat turns and direct replies. Choose a provider that has a valid API key and supports your selected chat model.",
-	"routing_chat_model":                     "Model used for normal chat turns and direct replies. Favorites are only shortcuts; this exact model ID is sent to the provider.",
-	"routing_chat_fallbacks":                 "Comma-separated provider/model fallbacks tried after transient chat failures. Use entries like openrouter/openai/gpt-4o-mini.",
-	"routing_agents_provider":                "Provider used for agent-style work. Most users can match chat, while advanced setups may use a stronger or cheaper provider.",
-	"routing_agents_model":                   "Model used for agent-style work. Use a model that handles tools and longer reasoning well.",
-	"routing_agents_fallbacks":               "Comma-separated provider/model fallbacks tried after transient agent failures. Leave blank to use only the primary.",
-	"routing_subagents_provider":             "Provider used for internal subagent jobs. This can be cheaper than chat when background helpers do routine work.",
-	"routing_subagents_model":                "Model used for internal subagent jobs. Use a model that balances cost and reliability for background work.",
-	"routing_subagents_fallbacks":            "Comma-separated provider/model fallbacks tried after transient subagent failures. Leave blank to use only the primary.",
-	"routing_summarization_provider":         "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
-	"routing_summarization_model":            "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
-	"routing_summarization_fallbacks":        "Comma-separated provider/model fallbacks tried after transient summarization failures. Leave blank to use only the primary.",
-	"routing_context_provider":               "Provider used for context-manager cleanup proposals. This can be a small reliable model because outputs are guarded before use.",
-	"routing_context_model":                  "Model used for context-manager cleanup proposals. Leave near the summarization model unless context cleanup needs different behavior.",
-	"routing_context_fallbacks":              "Comma-separated provider/model fallbacks tried after transient context-manager failures. Leave blank to use only the primary.",
-	"routing_embeddings_provider":            "Provider used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
-	"routing_embeddings_model":               "Model used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
-	"routing_embeddings_fallbacks":           "Comma-separated provider/model fallbacks tried after transient embedding failures. Warning: fallback embeddings should produce compatible vectors.",
-	"routing_embeddings_dimensions":          "Optional dimensions override for the embeddings role. Use 0 for provider defaults; changing it can require rebuilding vectors.",
-	"favorites_openai":                       "Comma-separated favorite OpenAI model IDs shown first in the app. Favorites do not change routing until selected in a role.",
-	"favorites_openrouter":                   "Comma-separated favorite OpenRouter model IDs shown first in the app. Favorites do not change routing until selected in a role.",
-	"storage_db":                             "Where OR3 stores conversation history, memory, approvals, devices, and other local state. Warning: changing this path can make existing history seem missing unless you move the database too.",
-	"storage_artifacts":                      "Folder for large saved outputs, attachments, and files that are too large to keep directly in chat. Warning: changing it can make older artifact links unavailable.",
-	"storage_soul":                           "Optional text file that describes OR3's core personality or operating instructions. Keep it readable and trustworthy because it is added to prompts.",
-	"storage_agents":                         "Optional text file for extra instructions about how OR3 should behave in this environment. Bad instructions here can confuse every chat.",
-	"storage_tools":                          "Optional text file with notes about available tools. Use it for reminders, not secrets, because it can be included in prompts.",
-	"storage_identity":                       "Optional identity file that tells OR3 who or what it represents. Keep this stable; changes can alter how the assistant introduces or reasons about itself.",
-	"storage_memory":                         "Optional static memory file always available to OR3. Use for durable facts you want remembered; avoid private secrets unless you intend them to be prompt-visible.",
-	"runtime_default_session":                "The default conversation space for local chat. Messages with the same session key share history and memory context.",
-	"runtime_profile":                        "A preset safety posture. Hosted profiles are stricter for servers; local-dev is more permissive. Warning: changing this can enable or block tools at startup.",
-	"runtime_bootstrap_max_chars":            "Maximum text OR3 reads from each instruction or memory file. Lower values make prompts smaller; higher values include more background but cost more tokens.",
-	"runtime_bootstrap_total_chars":          "Maximum combined text OR3 reads from all bootstrap files. Warning: setting this too high can make every request slower and more expensive.",
-	"runtime_session_cache":                  "How many active conversations OR3 keeps ready in memory. Most users should leave this alone unless running many separate sessions.",
-	"runtime_history_max":                    "How many recent chat messages stay directly visible to the AI. Lower values are faster; higher values preserve more short-term context but use more tokens.",
-	"runtime_max_tool_bytes":                 "Maximum size of a tool result kept directly in chat. Larger results may be saved as artifacts instead. Warning: very high values can overwhelm the AI prompt.",
-	"runtime_max_media_bytes":                "Largest image or attachment OR3 will accept. Warning: raising this can use more disk space and memory.",
-	"runtime_max_tool_loops":                 "Maximum number of tool-use rounds OR3 can do for one request. Higher values allow more complex work but can run longer or cost more.",
-	"runtime_memory_retrieve":                "How many saved memory items OR3 may add to a prompt. Higher values can improve recall but may add old or distracting context.",
-	"runtime_vector_k":                       "Advanced memory search setting: how many meaning-based memory matches to consider. Most users should leave this near the default.",
-	"runtime_fts_k":                          "Advanced memory search setting: how many keyword-based memory matches to consider. Most users should leave this near the default.",
-	"runtime_vector_scan_limit":              "Advanced performance limit for memory search. Higher values may find better matches but can slow retrieval on large memory stores.",
-	"runtime_worker_count":                   "How many background workers can process queued events. Increase only if OR3 is serving many channels or automations; too high can increase load.",
-	"runtime_consolidation_enabled":          "Lets OR3 summarize older conversation history into durable memory. Turning it off can make long-term recall worse, but may reduce background AI calls.",
-	"runtime_consolidation_model":            "Optional model used only for memory summarizing and the /new archive step. Leave blank to use the chat model. Warning: an unsupported model breaks memory cleanup.",
-	"runtime_consolidation_window":           "How many older messages should build up before OR3 tries to summarize them. Lower values summarize more often; higher values wait longer.",
-	"runtime_consolidation_max_messages":     "Maximum messages summarized in one memory-cleanup pass. Higher values can improve summaries but make each cleanup slower.",
-	"runtime_consolidation_max_input_chars":  "Maximum transcript text sent to the memory-summary model. Higher values preserve more detail but cost more and can timeout on small models.",
-	"runtime_consolidation_async_timeout":    "How long background memory cleanup may run before OR3 gives up. Increase this if summaries timeout on slower providers.",
-	"runtime_subagents_enabled":              "Allows OR3 to start helper agents for separate subtasks. Warning: enabling this can increase AI usage and should stay off unless you need parallel work.",
-	"runtime_subagents_max_concurrent":       "How many helper agents may run at the same time. Higher values can be faster but cost more and use more provider capacity.",
-	"runtime_subagents_max_queued":           "How many helper-agent tasks may wait in line. Large queues can hide work that will run later, so keep this modest.",
-	"runtime_subagents_timeout":              "Maximum time one helper-agent task may run. Longer timeouts help complex jobs finish but may leave expensive work running longer.",
-	"context_mode":                           "Overall prompt-budget preset. Quality includes more context; poor is smaller and cheaper; custom preserves your manual budget values.",
-	"context_max_input_tokens":               "Approximate total room available for instructions, memory, tools, documents, and recent chat before OR3 asks the model to answer. Warning: too high may exceed your model limit and fail.",
-	"context_output_reserve":                 "Room saved for the AI's answer. If this is too low, replies may be cut short; if too high, OR3 has less room for context.",
-	"context_safety_margin":                  "Extra empty space kept as a buffer so prompts do not accidentally exceed the model limit. Most users should keep a safety margin.",
-	"context_dynamic_tools":                  "Shows the AI only the tools that seem relevant to the current request, while backend safety rules still apply. This usually makes prompts smaller and less confusing.",
-	"context_retrieval_multiplier":           "How many extra memory candidates OR3 checks before choosing what fits. Higher values may find better memories but can slow searches.",
-	"context_retrieval_min_score":            "How relevant a memory must be before OR3 includes it. Higher values are stricter; too high can make OR3 forget useful context.",
-	"context_pressure_warning":               "Prompt fullness percentage where OR3 starts being careful about space. Lower values make it compress earlier.",
-	"context_pressure_high":                  "Prompt fullness percentage where OR3 becomes more aggressive about trimming less important context.",
-	"context_pressure_emergency":             "Prompt fullness percentage where OR3 may drop low-priority context to avoid model errors. Warning: setting this too high can cause over-limit failures.",
-	"context_section_system_core":            "Space reserved for core system rules that keep OR3 safe and consistent. Warning: setting this too low can remove important operating instructions.",
-	"context_section_soul_identity":          "Space reserved for identity/personality bootstrap files. Lower this if those files are large and crowd out chat history.",
-	"context_section_tool_policy":            "Space reserved for safety rules about tool use. Warning: too low can remove guidance about when tools are allowed.",
-	"context_section_active_task_card":       "Space reserved for the current goal, plan, decisions, files, and references. This helps OR3 stay oriented across long tasks.",
-	"context_section_pinned_memory":          "Space reserved for high-priority saved memory. Lower values reduce durable recall; higher values leave less room for recent chat.",
-	"context_section_recent_history":         "Space reserved for recent conversation messages. Higher values help continuity; lower values make OR3 rely more on summaries.",
-	"context_section_retrieved_memory":       "Space reserved for memories found by search. Higher values improve recall but can bring in stale or less relevant details.",
-	"context_section_memory_digest":          "Space reserved for compact memory summaries. This gives OR3 a quick overview without loading every memory item.",
-	"context_section_workspace":              "Space reserved for workspace/document snippets. Increase if OR3 needs more project files in context; decrease if prompts feel crowded.",
-	"context_section_tool_schemas":           "Space reserved for tool descriptions shown to the AI. Warning: too low can hide tools; too high crowds out chat and memory.",
-	"context_task_card_enabled":              "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
-	"context_task_card_enforce_plan":         "When on, write, exec, web, MCP, skill, and subagent tools stay blocked until create_plan establishes an active plan. Turn off for simple local edits without a planning step.",
-	"context_task_card_max_refs":             "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
-	"context_task_card_max_plan":             "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
-	"context_artifact_summary_chars":         "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
-	"context_manager_enabled":                "The context manager is an optional helper that suggests what to keep, trim, or update in OR3's working context. Leave off unless you want experimental automatic context maintenance.",
-	"context_manager_provider":               "Optional AI provider URL for the context manager helper. Leave blank to use the main provider. Warning: a wrong URL can break context-manager calls.",
-	"context_manager_model":                  "Optional model for the context manager helper. It should be cheap and reliable because it only helps organize context, not answer the user.",
-	"context_manager_timeout":                "How long OR3 waits for the context manager helper. Shorter timeouts avoid delays; longer timeouts give slow providers more time.",
-	"context_manager_idle_prune":             "How many idle seconds OR3 waits before archiving recent chat into memory and clearing the live context window. Default: 300 seconds.",
-	"context_manager_max_input":              "Maximum input size sent to the context manager helper. This is not the main chat budget; it is only for the helper that reviews context.",
-	"context_manager_max_output":             "Maximum output size allowed from the context manager helper. Keep this small so helper suggestions do not become noisy.",
-	"context_manager_allow_task_updates":     "Allows the context manager helper to suggest updates to the active task card. Warning: bad suggestions can make the task summary less accurate.",
-	"context_manager_allow_stale_propose":    "Allows context-manager suggestions even if they may be based on slightly older state. Leave on for responsiveness; turn off if you prefer stricter freshness.",
-	"workspace_restrict":                     "Keeps file tools inside the selected workspace folder. Strongly recommended. Warning: turning this off may let OR3 read or write outside this project when tools allow it.",
-	"workspace_allow_full_read":              "Lets OR3 read, list, and search files outside the workspace while write and edit tools remain restricted to the workspace.",
-	"workspace_dir":                          "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
-	"workspace_allowed_dir":                  "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
-	"tools_brave":                            "Secret key for Brave web search. Leave blank if you do not use Brave search. Warning: removing it disables that search provider.",
-	"tools_web_proxy":                        "Optional proxy server for web requests. Only set this if your network requires it; a wrong proxy can break web access.",
-	"tools_exec_timeout":                     "How long local command tools may run before they are stopped. Higher values help long builds; lower values prevent stuck commands.",
-	"tools_path_append":                      "Extra folders added to PATH for command tools. Warning: adding untrusted folders can make OR3 run unexpected programs.",
-	"docindex_enabled":                       "Indexes selected workspace files so OR3 can find relevant project docs. This improves answers but uses storage and embedding calls.",
-	"docindex_roots":                         "Folders, relative to the workspace, that OR3 should index. Warning: avoid private or huge folders unless you want them searchable by OR3.",
-	"docindex_max_files":                     "Maximum files indexed per root. Lower values are faster; higher values cover more of a large project.",
-	"docindex_max_file_bytes":                "Largest file OR3 will index. Lower values skip big generated files; higher values may slow indexing.",
-	"docindex_max_chunks":                    "Maximum text chunks stored from indexed files. Higher values improve coverage but use more storage and embeddings.",
-	"docindex_embed_max_bytes":               "Maximum text from one file sent for embeddings. Higher values improve search for large files but cost more.",
-	"docindex_refresh_seconds":               "How often OR3 refreshes the document index while running. Lower values update faster but do more background work.",
-	"docindex_retrieve_limit":                "How many document snippets OR3 may add to a prompt. Higher values give more project context but can crowd out conversation.",
-	"skills_enable_exec":                     "Allows installed skills to run commands when policy permits. Warning: only enable this for skills you trust.",
-	"skills_max_run_seconds":                 "Maximum time a skill command may run. Lower values stop stuck skills sooner; higher values help long-running skills finish.",
-	"skills_managed_dir":                     "Folder where OR3 stores installed or managed skills. Changing it can make installed skills seem missing unless you move them too.",
-	"skills_quarantine":                      "Requires new external skills to be reviewed before they are trusted. Strongly recommended for safety.",
-	"skills_approved":                        "Specific skill IDs that are pre-approved. Warning: only list skills you trust because they may access tools according to their permissions.",
-	"skills_trusted_owners":                  "Skill publishers trusted by default. Warning: trusting an owner can trust future skills from that owner.",
-	"skills_blocked_owners":                  "Skill publishers OR3 should refuse to install or use. Use this to block sources you do not trust.",
-	"skills_trusted_registries":              "Skill registries OR3 may trust. Warning: only add registries you control or trust.",
-	"skills_global_dir":                      "Shared user-level folder scanned for skills available to every OR3 agent. Defaults to ~/.agents/skills.",
-	"skills_global_disabled":                 "Turns off the shared ~/.agents/skills scan without deleting any installed skills.",
-	"skills_extra_dirs":                      "Additional local folders scanned for skills. Warning: skills in these folders may become available to OR3.",
-	"skills_watch":                           "Automatically reloads skills when files change. Useful during development; turn off if you want changes to require restart.",
-	"skills_watch_debounce":                  "Delay before reloading changed skill files. Higher values avoid repeated reloads while files are still being saved.",
-	"skills_clawhub_site":                    "Human-facing ClawHub website URL used in messages and help text. Most users should leave this alone.",
-	"skills_clawhub_registry":                "Machine-readable registry URL used to fetch skill metadata. Warning: a wrong or untrusted registry can break or risk skill installs.",
-	"skills_clawhub_install":                 "Subfolder name used when installing fetched skills. Change only if you know where you want remote skills stored.",
-	"auth_enabled":                           "Turns on passkey/session auth support for the service API. Keep this off until RP ID and allowed origins are configured correctly.",
-	"auth_rp_id":                             "The relying-party ID used for passkeys, such as or3.chat or localhost. Warning: this must be a real domain, not a URL or raw IP.",
-	"auth_rp_display_name":                   "Human-readable relying-party name shown during passkey prompts.",
-	"auth_allowed_origins":                   "Exact web origins allowed to begin and finish WebAuthn ceremonies. Warning: wildcards and insecure non-localhost origins are rejected.",
-	"auth_related_origins":                   "Optional extra exact origins allowed for narrow multi-origin deployments. Keep this list small and controlled.",
-	"auth_session_idle_ttl":                  "How long an auth session may sit idle before OR3 requires another passkey login.",
-	"auth_session_absolute_ttl":              "Maximum lifetime of an auth session even if the app stays active.",
-	"auth_step_up_ttl":                       "How long recent verification stays valid for sensitive actions such as terminal, files, and settings changes.",
-	"auth_fallback_policy":                   "Controls what older pairing-only clients may do while auth is enabled.",
-	"auth_enforcement_mode":                  "Controls rollout behavior: off, warn, enforce-sensitive, or enforce-session.",
-	"auth_allow_paired_token_fallback":       "Allows paired-device tokens to keep working for compatibility when policy permits.",
-	"auth_require_passkey_for_sensitive":     "Marks high-risk routes as requiring recent passkey verification when auth is active.",
-	"security_secret_store_enabled":          "Stores sensitive secrets encrypted in the local database instead of only in config files. Recommended when using service mode or channels.",
-	"security_secret_store_required":         "Refuses to start if encrypted secret storage is unavailable. Safer, but warning: misconfigured keys can block startup.",
-	"security_secret_store_key_file":         "File containing the encryption key for stored secrets. Warning: losing this key can make encrypted secrets unreadable.",
-	"security_audit_enabled":                 "Records important actions in a tamper-evident safety log so you can review what OR3 did.",
-	"security_audit_strict":                  "Stops sensitive work if the audit log cannot be written. Safer, but warning: disk or permission problems can block operations.",
-	"security_audit_key_file":                "File containing the signing key for audit records. Warning: losing or replacing it can affect audit verification.",
-	"security_audit_verify_on_start":         "Checks the audit log at startup for tampering or corruption. Safer, but may slow startup on large logs.",
-	"security_approvals_enabled":             "Turns on approval workflows for risky actions, device pairing, secrets, messages, and commands. Recommended for shared or hosted setups.",
-	"security_approvals_host_id":             "Stable name for this OR3 host when creating approvals and pairing tokens. Warning: changing it can invalidate outstanding approvals.",
-	"security_approvals_key_file":            "File containing the signing key for approvals and pairing. Warning: losing it can prevent approval tokens from validating.",
-	"security_approvals_pairing_ttl":         "How long a device/channel pairing code remains valid, in seconds. Shorter is safer; longer is easier during setup.",
-	"security_approvals_pending_ttl":         "How long a pending approval waits before expiring. Shorter reduces stale approvals; longer gives humans more time to respond.",
-	"security_approvals_token_ttl":           "How long a one-time approval token can be used. Shorter is safer; too short can be annoying during manual workflows.",
-	"security_approval_pairing_mode":         "Controls whether new devices and channels are denied, ask for approval, use an allowlist, or are trusted. Warning: trusted is more permissive.",
-	"security_approval_exec_mode":            "Controls approvals for local command execution. Warning: trusted command execution can change files or run programs without asking.",
-	"security_approval_skill_mode":           "Controls approvals for skills that run code or commands. Warning: trusted skills can perform powerful actions without asking.",
-	"security_approval_secret_mode":          "Controls approvals for reading stored secrets. Warning: trusted access can expose sensitive credentials to tools or channels.",
-	"security_approval_message_mode":         "Controls approvals for sending messages through channels. Warning: trusted mode can let OR3 send outbound messages without asking.",
-	"security_approval_moderator_enabled":    "Uses a fast model to review pending approvals before they reach you. Reduces approval fatigue while keeping high-risk actions escalated.",
-	"security_approval_moderator_preset":     "Chooses default risk handling: balanced auto-approves low/medium work, cautious escalates more, hands_off is more autonomous, manual sends everything to you.",
-	"security_approval_moderator_provider":   "Provider profile key used only for approval review calls. Leave empty to reuse the chat provider.",
-	"security_approval_moderator_model":        "Model used for approval review. Pick a fast, inexpensive model; leave empty to reuse the chat model.",
-	"security_approval_moderator_timeout":    "Maximum seconds to wait for one moderator review before applying the failure action.",
-	"security_approval_moderator_failure_action": "What happens when moderator review fails or times out. Escalate is safer; deny blocks the action.",
-	"security_approval_moderator_user_policy":  "Extra plain-language rules appended to built-in moderator policy, such as never use grep. Built-in hard denials still win.",
-	"security_approval_moderator_action_low":     "What the moderator does for low-risk approvals when set; leave empty to inherit the preset.",
-	"security_approval_moderator_action_medium":  "What the moderator does for medium-risk approvals when set; leave empty to inherit the preset.",
-	"security_approval_moderator_action_high":    "What the moderator does for high-risk approvals when set; leave empty to inherit the preset.",
-	"security_approval_moderator_action_extreme": "What the moderator does for extreme-risk approvals when set; leave empty to inherit the preset.",
-	"security_profiles_enabled":              "Applies named safety profiles to different channels or triggers. Useful for giving public channels less power than local chat.",
-	"security_profiles_default":              "Fallback profile used when no channel or trigger-specific profile matches. Warning: a permissive default affects many entry points.",
-	"security_profiles_channels":             "Maps channels to safety profiles, such as telegram=guarded. Warning: mistakes can give a channel more access than intended.",
-	"security_profiles_triggers":             "Maps automation triggers to safety profiles, such as webhook=guarded. Warning: webhooks should usually have restrictive profiles.",
-	"security_network_enabled":               "Turns on outbound network rules for web, provider, and MCP traffic. Useful for hosted or locked-down setups.",
-	"security_network_default_deny":          "Blocks outbound network access unless a host is explicitly allowed. Safer, but warning: missing hosts can break providers and channels.",
-	"security_network_allowed_hosts":         "Hosts OR3 may contact when network policy is active. Warning: add only hosts you trust and need.",
-	"security_network_allow_loopback":        "Allows OR3 to contact services on this same computer, such as localhost. Usually needed for local tools and bridges.",
-	"security_network_allow_private":         "Allows OR3 to contact private network addresses. Warning: enable only if OR3 must reach internal services on your LAN/VPC.",
-	"hardening_guarded_tools":                "Allows medium-risk tools like file writes and web fetches when policy permits. Turning this off blocks many useful actions.",
-	"hardening_privileged_tools":             "Allows high-risk tools in addition to guarded tools. Warning: enable only in trusted environments.",
-	"hardening_exec_shell":                   "Allows shell-style command execution. Warning: shells are powerful and can run destructive commands if other safeguards allow them.",
-	"hardening_isolate_channel_peers":        "Keeps identities from different channels separated so one sender does not inherit another sender's access. Recommended for safety.",
-	"hardening_exec_allowed_programs":        "List of programs command tools may run. Warning: adding powerful programs like sh, bash, rm, or sudo increases risk.",
-	"hardening_child_env_allowlist":          "Environment variables passed to child commands. Warning: do not include variables that contain secrets unless you intend commands to see them.",
-	"hardening_sandbox_enabled":              "Runs command-capable tools in a restricted sandbox when available. Recommended for safer command execution.",
-	"hardening_sandbox_bwrap":                "Path to the bubblewrap sandbox program. Warning: a wrong path can make sandboxed command execution fail.",
-	"hardening_sandbox_allow_network":        "Allows sandboxed commands to use the network. Warning: leaving this on can let commands download or upload data.",
-	"hardening_sandbox_writable_paths":       "Folders sandboxed commands may write to. Warning: only include folders you are comfortable letting commands modify.",
-	"hardening_quotas_enabled":               "Limits how many sensitive tool calls OR3 can make per message and per session. Recommended to prevent runaway tool use.",
-	"hardening_quota_exceeded_action":        "What happens when a quota is reached. Use ask to create an approval request, or fail to stop immediately.",
-	"runtime_max_tool_loops_exceeded_action": "What happens when the runtime exhausts its tool-call rounds for one turn. Use ask to pause for approval, or fail to stop immediately.",
-	"hardening_max_tool_calls":               "Maximum total tool calls for one message. Higher values allow bigger jobs but can run longer and cost more.",
-	"hardening_max_exec_calls":               "Maximum command-execution calls for one message. Keep low unless you regularly need multi-step command workflows.",
-	"hardening_max_web_calls":                "Maximum web calls for one message. Higher values allow broader research but can be slower and noisier.",
-	"hardening_max_subagent_calls":           "Maximum helper-agent starts for one message. Higher values can multiply cost and background work.",
-	"hardening_max_session_tool_calls":       "Maximum total tool calls across one session before approval or failure.",
-	"hardening_max_session_exec_calls":       "Maximum command-execution calls across one session before approval or failure.",
-	"hardening_max_session_web_calls":        "Maximum web calls across one session before approval or failure.",
-	"hardening_max_session_subagent_calls":   "Maximum helper-agent starts across one session before approval or failure.",
-	"session_direct_messages_share_default":  "Makes direct messages share the default memory/session scope. Warning: turn off if different people or channels should not share context.",
-	"session_identity_links":                 "Maps multiple channel identities to one person or workspace identity. Warning: wrong links can merge separate users' context.",
-	"automation_cron_enabled":                "Enables saved scheduled jobs. Warning: scheduled jobs can cause OR3 to act later without you actively typing a request.",
-	"automation_cron_store_path":             "File where scheduled jobs are saved. Changing it can make existing scheduled jobs disappear unless you move the file.",
-	"automation_heartbeat_enabled":           "Lets OR3 run recurring maintenance prompts from a task file. Warning: this can generate AI calls on a schedule.",
-	"automation_heartbeat_interval":          "How often heartbeat maintenance runs, in minutes. Lower values run more often and may increase cost.",
-	"automation_heartbeat_tasks_file":        "Markdown file listing recurring heartbeat tasks. Warning: tasks in this file can cause automated assistant work.",
-	"automation_heartbeat_session":           "Session used for heartbeat work. Keeping a separate session helps automated tasks avoid polluting normal chat history.",
-	"automation_webhook_enabled":             "Allows external HTTP requests to trigger OR3. Warning: enable only with a strong secret and restrictive safety profile.",
-	"automation_webhook_addr":                "Address where the webhook server listens. Binding to 127.0.0.1 is local-only; 0.0.0.0 may expose it to your network.",
-	"automation_webhook_secret":              "Secret required for webhook callers. Warning: weak or missing secrets can let others trigger OR3.",
-	"automation_webhook_max_body_kb":         "Largest webhook request OR3 accepts. Lower values reduce abuse risk; higher values allow larger payloads.",
-	"automation_filewatch_enabled":           "Lets OR3 react when watched files change. Warning: this can trigger work automatically when files are saved.",
-	"automation_filewatch_paths":             "Files or folders watched for changes. Warning: watching busy folders can create lots of events.",
-	"automation_filewatch_poll_seconds":      "How often OR3 checks watched files. Lower values react faster but use more background work.",
-	"automation_filewatch_debounce":          "How long OR3 waits after a file change before acting. Higher values avoid duplicate events while files are still being written.",
-	"service_enabled":                        "Starts OR3's internal HTTP API so other local apps or devices can connect. Warning: expose it only when protected by a strong secret.",
-	"service_listen":                         "Network address for the internal service. 127.0.0.1 is local-only; 0.0.0.0 may expose OR3 to your network.",
-	"service_secret":                         "Shared secret required by service clients. Warning: a weak or leaked secret can allow unauthorized access.",
-	"service_allow_unauthenticated_pairing":  "Allows a first-time phone or browser on this same computer to ask for a pairing code before it has a saved key. Warning: leave this off unless the service listen address stays local-only such as 127.0.0.1 or localhost.",
-	"service_trusted_browser_origins":        "Exact browser origins allowed to make service API calls from a private-network app. Add only origins you control, including the scheme and port.",
-	"service_trusted_browser_cidrs":          "Remote client IPs or CIDR ranges allowed with trusted app origins. Use narrow ranges when possible; Tailscale is usually 100.64.0.0/10.",
+	"provider_preset":                       "Choose the company or service OR3 uses for AI. OpenAI and OpenRouter fill in known defaults. Choose Custom only if you already have a compatible API URL.",
+	"provider_api_base":                     "The web address OR3 sends AI requests to. Warning: if this is wrong, summarization, memory cleanup, and embeddings can stop working.",
+	"provider_embed":                        "The model used to turn text into searchable memory. This must match your provider. Warning: changing it can require rebuilding memory and document embeddings.",
+	"provider_embed_dimensions":             "Advanced: requested size for memory-search vectors. Most users should leave this at 0. Warning: changing it can make existing memory vectors incompatible until rebuilt.",
+	"provider_temperature":                  "Sampling temperature for OR3 provider calls such as summarization helpers. External runners use their own model settings.",
+	"provider_timeout":                      "Timeout for OR3 provider calls such as summarization helpers. External runners use runner-specific timeouts.",
+	"provider_api_key":                      "Secret key used to access your AI provider. It is hidden on screen. Warning: deleting or mistyping it will prevent OR3 from contacting the provider.",
+	"provider_openai_api_key":               "Secret OpenAI key used when any model role routes to OpenAI. Leave blank to keep the existing key or type clear to remove it.",
+	"provider_openrouter_api_key":           "Secret OpenRouter key used when any model role routes to OpenRouter. Leave blank to keep the existing key or type clear to remove it.",
+	"provider_custom_api_base":              "OpenAI-compatible custom provider base URL for local models or another hosted service. Leave blank unless you have a custom endpoint ready.",
+	"provider_custom_api_key":               "Secret custom provider key used with the custom API base. Leave blank to keep the existing key or type clear to remove it.",
+	"routing_summarization_provider":        "Provider used for memory consolidation and summaries. A cheaper model is often enough if it follows structured instructions reliably.",
+	"routing_summarization_model":           "Model used for memory consolidation and summaries. Changing this affects future summaries, not existing saved memory by itself.",
+	"routing_summarization_fallbacks":       "Comma-separated provider/model fallbacks tried after transient summarization failures. Leave blank to use only the primary.",
+	"routing_embeddings_provider":           "Provider used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_model":              "Model used for memory and document embeddings. Warning: changing this can require rebuilding existing memory and document vectors.",
+	"routing_embeddings_fallbacks":          "Comma-separated provider/model fallbacks tried after transient embedding failures. Warning: fallback embeddings should produce compatible vectors.",
+	"routing_embeddings_dimensions":         "Optional dimensions override for the embeddings role. Use 0 for provider defaults; changing it can require rebuilding vectors.",
+	"favorites_openai":                      "Comma-separated favorite OpenAI model IDs shown first in the app. Favorites do not change routing until selected in a role.",
+	"favorites_openrouter":                  "Comma-separated favorite OpenRouter model IDs shown first in the app. Favorites do not change routing until selected in a role.",
+	"storage_db":                            "Where OR3 stores conversation history, memory, approvals, devices, and other local state. Warning: changing this path can make existing history seem missing unless you move the database too.",
+	"storage_artifacts":                     "Folder for large saved outputs, attachments, and files that are too large to keep directly in chat. Warning: changing it can make older artifact links unavailable.",
+	"storage_soul":                          "Optional text file that describes OR3's core personality or operating instructions. Keep it readable and trustworthy because it is added to prompts.",
+	"storage_agents":                        "Optional text file for extra instructions about how OR3 should behave in this environment. Bad instructions here can confuse every chat.",
+	"storage_tools":                         "Optional text file with notes about available tools. Use it for reminders, not secrets, because it can be included in prompts.",
+	"storage_identity":                      "Optional identity file that tells OR3 who or what it represents. Keep this stable; changes can alter how the assistant introduces or reasons about itself.",
+	"storage_memory":                        "Optional static memory file always available to OR3. Use for durable facts you want remembered; avoid private secrets unless you intend them to be prompt-visible.",
+	"runtime_default_session":               "The default conversation space for local chat. Messages with the same session key share history and memory context.",
+	"runtime_profile":                       "A preset safety posture. Hosted profiles are stricter for servers; local-dev is more permissive. Warning: changing this can enable or block tools at startup.",
+	"runtime_bootstrap_max_chars":           "Maximum text OR3 reads from each instruction or memory file. Lower values make prompts smaller; higher values include more background but cost more tokens.",
+	"runtime_bootstrap_total_chars":         "Maximum combined text OR3 reads from all bootstrap files. Warning: setting this too high can make every request slower and more expensive.",
+	"runtime_session_cache":                 "How many active conversations OR3 keeps ready in memory. Most users should leave this alone unless running many separate sessions.",
+	"runtime_history_max":                   "How many recent chat messages stay directly visible to the AI. Lower values are faster; higher values preserve more short-term context but use more tokens.",
+	"runtime_max_tool_bytes":                "Maximum size of a tool result kept directly in chat. Larger results may be saved as artifacts instead. Warning: very high values can overwhelm the AI prompt.",
+	"runtime_max_media_bytes":               "Largest image or attachment OR3 will accept. Warning: raising this can use more disk space and memory.",
+	"runtime_memory_retrieve":               "How many saved memory items OR3 may add to a prompt. Higher values can improve recall but may add old or distracting context.",
+	"runtime_vector_k":                      "Advanced memory search setting: how many meaning-based memory matches to consider. Most users should leave this near the default.",
+	"runtime_fts_k":                         "Advanced memory search setting: how many keyword-based memory matches to consider. Most users should leave this near the default.",
+	"runtime_vector_scan_limit":             "Advanced performance limit for memory search. Higher values may find better matches but can slow retrieval on large memory stores.",
+	"runtime_worker_count":                  "How many background workers can process queued events. Increase only if OR3 is serving many channels or automations; too high can increase load.",
+	"runtime_consolidation_enabled":         "Lets OR3 summarize older conversation history into durable memory. Turning it off can make long-term recall worse, but may reduce background AI calls.",
+	"runtime_consolidation_model":           "Optional model used only for memory summarizing and the /new archive step. Leave blank to use the chat model. Warning: an unsupported model breaks memory cleanup.",
+	"runtime_consolidation_window":          "How many older messages should build up before OR3 tries to summarize them. Lower values summarize more often; higher values wait longer.",
+	"runtime_consolidation_max_messages":    "Maximum messages summarized in one memory-cleanup pass. Higher values can improve summaries but make each cleanup slower.",
+	"runtime_consolidation_max_input_chars": "Maximum transcript text sent to the memory-summary model. Higher values preserve more detail but cost more and can timeout on small models.",
+	"runtime_consolidation_async_timeout":   "How long background memory cleanup may run before OR3 gives up. Increase this if summaries timeout on slower providers.",
+	"context_mode":                          "Overall prompt-budget preset. Quality includes more context; poor is smaller and cheaper; custom preserves your manual budget values.",
+	"context_retrieval_multiplier":          "How many extra memory candidates OR3 checks before choosing what fits. Higher values may find better memories but can slow searches.",
+	"context_retrieval_min_score":           "How relevant a memory must be before OR3 includes it. Higher values are stricter; too high can make OR3 forget useful context.",
+	"context_pressure_warning":              "Prompt fullness percentage where OR3 starts being careful about space. Lower values make it compress earlier.",
+	"context_pressure_high":                 "Prompt fullness percentage where OR3 becomes more aggressive about trimming less important context.",
+	"context_pressure_emergency":            "Prompt fullness percentage where OR3 may drop low-priority context to avoid model errors. Warning: setting this too high can cause over-limit failures.",
+	"context_task_card_enabled":             "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
+	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
+	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
+	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
+	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
+	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
+	"skills_max_run_seconds":                "Maximum time a skill command may run. Lower values stop stuck skills sooner; higher values help long-running skills finish.",
+	"skills_managed_dir":                    "Folder where OR3 stores installed or managed skills. Changing it can make installed skills seem missing unless you move them too.",
+	"skills_quarantine":                     "Requires new external skills to be reviewed before they are trusted. Strongly recommended for safety.",
+	"skills_approved":                       "Specific skill IDs that are pre-approved. Warning: only list skills you trust because they may access tools according to their permissions.",
+	"skills_trusted_owners":                 "Skill publishers trusted by default. Warning: trusting an owner can trust future skills from that owner.",
+	"skills_blocked_owners":                 "Skill publishers OR3 should refuse to install or use. Use this to block sources you do not trust.",
+	"skills_trusted_registries":             "Skill registries OR3 may trust. Warning: only add registries you control or trust.",
+	"skills_global_dir":                     "Shared user-level folder scanned for skills available to every OR3 agent. Defaults to ~/.agents/skills.",
+	"skills_global_disabled":                "Turns off the shared ~/.agents/skills scan without deleting any installed skills.",
+	"skills_extra_dirs":                     "Additional local folders scanned for skills. Warning: skills in these folders may become available to OR3.",
+	"skills_watch":                          "Automatically reloads skills when files change. Useful during development; turn off if you want changes to require restart.",
+	"skills_watch_debounce":                 "Delay before reloading changed skill files. Higher values avoid repeated reloads while files are still being saved.",
+	"skills_clawhub_site":                   "Human-facing ClawHub website URL used in messages and help text. Most users should leave this alone.",
+	"skills_clawhub_registry":               "Machine-readable registry URL used to fetch skill metadata. Warning: a wrong or untrusted registry can break or risk skill installs.",
+	"skills_clawhub_install":                "Subfolder name used when installing fetched skills. Change only if you know where you want remote skills stored.",
+	"auth_enabled":                          "Turns on passkey/session auth support for the service API. Keep this off until RP ID and allowed origins are configured correctly.",
+	"auth_rp_id":                            "The relying-party ID used for passkeys, such as or3.chat or localhost. Warning: this must be a real domain, not a URL or raw IP.",
+	"auth_rp_display_name":                  "Human-readable relying-party name shown during passkey prompts.",
+	"auth_allowed_origins":                  "Exact web origins allowed to begin and finish WebAuthn ceremonies. Warning: wildcards and insecure non-localhost origins are rejected.",
+	"auth_related_origins":                  "Optional extra exact origins allowed for narrow multi-origin deployments. Keep this list small and controlled.",
+	"auth_session_idle_ttl":                 "How long an auth session may sit idle before OR3 requires another passkey login.",
+	"auth_session_absolute_ttl":             "Maximum lifetime of an auth session even if the app stays active.",
+	"auth_step_up_ttl":                      "How long recent verification stays valid for sensitive actions such as terminal, files, and settings changes.",
+	"auth_fallback_policy":                  "Controls admin recovery behavior when auth is enabled.",
+	"auth_enforcement_mode":                 "Controls rollout behavior: off, warn, enforce-sensitive, or enforce-session.",
+	"auth_require_passkey_for_sensitive":    "Marks high-risk routes as requiring recent passkey verification when auth is active.",
+	"security_secret_store_enabled":         "Stores sensitive secrets encrypted in the local database instead of only in config files. Recommended when using service mode or channels.",
+	"security_secret_store_required":        "Refuses to start if encrypted secret storage is unavailable. Safer, but warning: misconfigured keys can block startup.",
+	"security_secret_store_key_file":        "File containing the encryption key for stored secrets. Warning: losing this key can make encrypted secrets unreadable.",
+	"security_audit_enabled":                "Records important actions in a tamper-evident safety log so you can review what OR3 did.",
+	"security_audit_strict":                 "Stops sensitive work if the audit log cannot be written. Safer, but warning: disk or permission problems can block operations.",
+	"security_audit_key_file":               "File containing the signing key for audit records. Warning: losing or replacing it can affect audit verification.",
+	"security_audit_verify_on_start":        "Checks the audit log at startup for tampering or corruption. Safer, but may slow startup on large logs.",
+	"security_approvals_enabled":            "Turns on approval workflows for risky actions, device pairing, secrets, messages, and commands. Recommended for shared or hosted setups.",
+	"security_approvals_host_id":            "Stable name for this OR3 host when creating approvals and pairing tokens. Warning: changing it can invalidate outstanding approvals.",
+	"security_approvals_key_file":           "File containing the signing key for approvals and pairing. Warning: losing it can prevent approval tokens from validating.",
+	"security_approvals_pairing_ttl":        "How long a device/channel pairing code remains valid, in seconds. Shorter is safer; longer is easier during setup.",
+	"security_approvals_pending_ttl":        "How long a pending approval waits before expiring. Shorter reduces stale approvals; longer gives humans more time to respond.",
+	"security_approvals_token_ttl":          "How long a one-time approval token can be used. Shorter is safer; too short can be annoying during manual workflows.",
+	"security_approval_pairing_mode":        "Controls whether new devices and channels are denied, ask for approval, use an allowlist, or are trusted. Warning: trusted is more permissive.",
+	"security_approval_secret_mode":         "Controls approvals for reading stored secrets. Warning: trusted access can expose sensitive credentials to tools or channels.",
+	"security_approval_message_mode":        "Controls approvals for sending messages through channels. Warning: trusted mode can let OR3 send outbound messages without asking.",
+	"security_profiles_enabled":             "Applies named safety profiles to different channels or triggers. Useful for giving public channels less power than local chat.",
+	"security_profiles_default":             "Fallback profile used when no channel or trigger-specific profile matches. Warning: a permissive default affects many entry points.",
+	"security_profiles_channels":            "Maps channels to safety profiles, such as telegram=guarded. Warning: mistakes can give a channel more access than intended.",
+	"security_profiles_triggers":            "Maps automation triggers to safety profiles, such as webhook=guarded. Warning: webhooks should usually have restrictive profiles.",
+	"security_network_enabled":              "Turns on outbound network rules for web, provider, and MCP traffic. Useful for hosted or locked-down setups.",
+	"security_network_default_deny":         "Blocks outbound network access unless a host is explicitly allowed. Safer, but warning: missing hosts can break providers and channels.",
+	"security_network_allowed_hosts":        "Hosts OR3 may contact when network policy is active. Warning: add only hosts you trust and need.",
+	"security_network_allow_loopback":       "Allows OR3 to contact services on this same computer, such as localhost. Usually needed for local tools and bridges.",
+	"security_network_allow_private":        "Allows OR3 to contact private network addresses. Warning: enable only if OR3 must reach internal services on your LAN/VPC.",
+	"hardening_isolate_channel_peers":       "Keeps identities from different channels separated so one sender does not inherit another sender's access. Recommended for safety.",
+	"hardening_child_env_allowlist":         "Environment variables passed to child commands. Warning: do not include variables that contain secrets unless you intend commands to see them.",
+	"hardening_sandbox_enabled":             "Runs command-capable tools in a restricted sandbox when available. Recommended for safer command execution.",
+	"hardening_sandbox_bwrap":               "Path to the bubblewrap sandbox program. Warning: a wrong path can make sandboxed command execution fail.",
+	"hardening_sandbox_allow_network":       "Allows sandboxed commands to use the network. Warning: leaving this on can let commands download or upload data.",
+	"hardening_sandbox_writable_paths":      "Folders sandboxed commands may write to. Warning: only include folders you are comfortable letting commands modify.",
+	"session_direct_messages_share_default": "Makes direct messages share the default memory/session scope. Warning: turn off if different people or channels should not share context.",
+	"session_identity_links":                "Maps multiple channel identities to one person or workspace identity. Warning: wrong links can merge separate users' context.",
+	"automation_cron_enabled":               "Enables saved scheduled jobs. Warning: scheduled jobs can cause OR3 to act later without you actively typing a request.",
+	"automation_cron_store_path":            "File where scheduled jobs are saved. Changing it can make existing scheduled jobs disappear unless you move the file.",
+	"automation_heartbeat_enabled":          "Lets OR3 run recurring maintenance prompts from a task file. Warning: this can generate AI calls on a schedule.",
+	"automation_heartbeat_interval":         "How often heartbeat maintenance runs, in minutes. Lower values run more often and may increase cost.",
+	"automation_heartbeat_tasks_file":       "Markdown file listing recurring heartbeat tasks. Warning: tasks in this file can cause automated assistant work.",
+	"automation_heartbeat_session":          "Session used for heartbeat work. Keeping a separate session helps automated tasks avoid polluting normal chat history.",
+	"automation_webhook_enabled":            "Allows external HTTP requests to trigger OR3. Warning: enable only with a strong secret and restrictive safety profile.",
+	"automation_webhook_addr":               "Address where the webhook server listens. Binding to 127.0.0.1 is local-only; 0.0.0.0 may expose it to your network.",
+	"automation_webhook_secret":             "Secret required for webhook callers. Warning: weak or missing secrets can let others trigger OR3.",
+	"automation_webhook_max_body_kb":        "Largest webhook request OR3 accepts. Lower values reduce abuse risk; higher values allow larger payloads.",
+	"automation_filewatch_enabled":          "Lets OR3 react when watched files change. Warning: this can trigger work automatically when files are saved.",
+	"automation_filewatch_paths":            "Files or folders watched for changes. Warning: watching busy folders can create lots of events.",
+	"automation_filewatch_poll_seconds":     "How often OR3 checks watched files. Lower values react faster but use more background work.",
+	"automation_filewatch_debounce":         "How long OR3 waits after a file change before acting. Higher values avoid duplicate events while files are still being written.",
+	"service_enabled":                       "Starts OR3's internal HTTP API so other local apps or devices can connect. Warning: expose it only when protected by a strong secret.",
+	"service_listen":                        "Network address for the internal service. 127.0.0.1 is local-only; 0.0.0.0 may expose OR3 to your network.",
+	"service_secret":                        "Shared secret required by service clients. Warning: a weak or leaked secret can allow unauthorized access.",
+	"service_allow_unauthenticated_pairing": "Allows a first-time phone or browser on this same computer to ask for a pairing code before it has a saved key. Warning: leave this off unless the service listen address stays local-only such as 127.0.0.1 or localhost.",
+	"service_trusted_browser_origins":       "Exact browser origins allowed to make service API calls from a private-network app. Add only origins you control, including the scheme and port.",
+	"service_trusted_browser_cidrs":         "Remote client IPs or CIDR ranges allowed with trusted app origins. Use narrow ranges when possible; Tailscale is usually 100.64.0.0/10.",
 }
 
 func helpfulChannelFieldDescription(channel, key string) string {
@@ -2071,35 +1518,8 @@ func toggleFieldValue(cfg *config.Config, section, channel, fieldKey string) boo
 		}
 		return false
 	}
-	if section == "mcp" && fieldKey == "mcp_enabled" {
-		if cfg.Tools.MCPServers == nil {
-			return false
-		}
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false
-		}
-		server.Enabled = !server.Enabled
-		cfg.Tools.MCPServers[channel] = server
-		return true
-	}
-	if section == "mcp" && fieldKey == "mcp_allow_insecure_http" {
-		if cfg.Tools.MCPServers == nil {
-			return false
-		}
-		server, ok := cfg.Tools.MCPServers[channel]
-		if !ok {
-			return false
-		}
-		server.AllowInsecureHTTP = !server.AllowInsecureHTTP
-		cfg.Tools.MCPServers[channel] = server
-		return true
-	}
 	current := false
 	fields := buildSectionFields(*cfg, section, "")
-	if section == "mcp" {
-		fields = buildMCPFields(*cfg, channel)
-	}
 	for _, field := range fields {
 		if field.Key == fieldKey {
 			current = field.Value == "on"
@@ -2115,9 +1535,6 @@ func cycleChoiceValue(cfg *config.Config, section, channel, fieldKey string, del
 	}
 	if section != "channels" {
 		fields := buildSectionFields(*cfg, section, "")
-		if section == "mcp" {
-			fields = buildMCPFields(*cfg, channel)
-		}
 		for _, field := range fields {
 			if field.Key == fieldKey && len(field.Choices) > 0 {
 				next := field.Choices[wrapIndex(indexOfChoice(field.Choices, field.Value)+delta, len(field.Choices))]
@@ -2168,8 +1585,6 @@ func currentSecretValue(cfg config.Config, section, fieldKey string) string {
 	switch fieldKey {
 	case "provider_api_key":
 		return cfg.Provider.APIKey
-	case "tools_brave":
-		return cfg.Tools.BraveAPIKey
 	case "automation_webhook_secret":
 		return cfg.Triggers.Webhook.Secret
 	case "service_secret":
@@ -2212,34 +1627,6 @@ func parseBoolValue(value string, field string) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid boolean for %s: %q", field, value)
 	}
-}
-
-func normalizeConfigureCapability(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "safe":
-		return "safe"
-	case "guarded":
-		return "guarded"
-	case "privileged":
-		return "privileged"
-	default:
-		return ""
-	}
-}
-
-func moderatorActionFieldValue(moderator config.ApprovalModeratorConfig, level string) string {
-	var configured string
-	switch level {
-	case "low":
-		configured = string(moderator.Actions.Low)
-	case "medium":
-		configured = string(moderator.Actions.Medium)
-	case "high":
-		configured = string(moderator.Actions.High)
-	case "extreme":
-		configured = string(moderator.Actions.Extreme)
-	}
-	return strings.TrimSpace(configured)
 }
 
 func formatInt(value int) string { return strconv.Itoa(value) }
@@ -2551,10 +1938,4 @@ func clampInt(value, lower, upper int) int {
 		return upper
 	}
 	return value
-}
-
-func configSnapshotsEqual(left, right config.Config) bool {
-	leftJSON, _ := json.Marshal(left)
-	rightJSON, _ := json.Marshal(right)
-	return string(leftJSON) == string(rightJSON)
 }

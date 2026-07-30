@@ -123,7 +123,6 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 
 func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 	var roots []serviceFileRoot
-	splitReadWrite := s.config.Tools.RestrictToWorkspace && s.config.Tools.AllowFullFileRead
 	add := func(id, label, path string, writable bool) {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -133,15 +132,18 @@ func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 			roots = append(roots, serviceFileRoot{ID: id, Label: label, Path: abs, Writable: writable})
 		}
 	}
-	if splitReadWrite {
-		add("computer", "Computer", string(filepath.Separator), false)
-	}
-	add("allowed", "Allowed Folder", s.config.AllowedDir, !splitReadWrite)
+	add("allowed", "Allowed Folder", s.config.AllowedDir, true)
 	add("workspace", "Workspace", s.config.WorkspaceDir, true)
 	add("artifacts", "Artifacts", s.config.ArtifactsDir, false)
+	if home, err := os.UserHomeDir(); err == nil {
+		add("home", "Home", home, false)
+	}
+	if s.config.FilesystemBrowsing {
+		add("filesystem", "Full Filesystem", "/", false)
+	}
 	if len(roots) == 0 {
 		if cwd, err := os.Getwd(); err == nil {
-			roots = append(roots, serviceFileRoot{ID: "cwd", Label: "Current Directory", Path: cwd, Writable: !splitReadWrite})
+			roots = append(roots, serviceFileRoot{ID: "cwd", Label: "Current Directory", Path: cwd, Writable: true})
 		}
 	}
 	return roots
@@ -158,7 +160,7 @@ func (s *serviceServer) serviceFileRootByID(id string) (serviceFileRoot, bool) {
 
 func (s *serviceServer) defaultSearchFileRoot() (serviceFileRoot, bool) {
 	roots := s.serviceFileRoots()
-	for _, id := range []string{"workspace", "allowed", "computer", "cwd"} {
+	for _, id := range []string{"workspace", "allowed", "home", "computer", "cwd"} {
 		for _, root := range roots {
 			if root.ID == id {
 				return root, true

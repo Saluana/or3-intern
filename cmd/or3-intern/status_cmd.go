@@ -90,7 +90,7 @@ func runStatusCommand(cfg config.Config, validationError string, database *db.DB
 	fmt.Fprintf(stdout, "Devices: %s\n", view.Devices)
 	fmt.Fprintf(stdout, "Activity log: %s\n", view.ActivityLog)
 	if detailed {
-		fmt.Fprintf(stdout, "Context: mode=%s maxInputTokens=%d outputReserve=%d dynamicTools=%v\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.OutputReserveTokens, cfg.Context.Tools.DynamicExpose)
+		fmt.Fprintf(stdout, "Context: mode=%s maxInputTokens=%d outputReserve=%d\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.OutputReserveTokens)
 		if !cfg.ContextConfigured {
 			fmt.Fprintln(stdout, "Context note: using legacy context behavior because config.json has no top-level context section.")
 		}

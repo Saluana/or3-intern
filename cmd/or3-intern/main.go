@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"or3-intern/internal/requestctx"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,8 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"or3-intern/internal/agent"
-	"or3-intern/internal/agentcli"
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/artifacts"
 	"or3-intern/internal/bus"
@@ -32,9 +32,11 @@ import (
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/security"
+	"or3-intern/internal/serviceerrors"
 	"or3-intern/internal/skills"
+	"or3-intern/internal/streaming"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/triggers"
 )
@@ -96,14 +98,6 @@ func newConsolidationProviderClient(cfg config.Config) *providers.Client {
 	return newRoleProviderClientWithTimeout(cfg, config.ModelRoleSummarization, effectiveConsolidationTimeout(cfg))
 }
 
-func newContextManagerProviderClient(cfg config.Config) *providers.Client {
-	timeout := time.Duration(cfg.ContextManager.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
-	return newRoleProviderClientWithTimeout(cfg, config.ModelRoleContextManager, timeout)
-}
-
 func newEmbeddingProviderClient(cfg config.Config) *providers.Client {
 	return newRoleProviderClient(cfg, config.ModelRoleEmbeddings)
 }
@@ -144,7 +138,6 @@ func newModelRefClient(cfg config.Config, ref config.ModelRef, timeout time.Dura
 		timeout = time.Duration(profile.TimeoutSeconds) * time.Second
 	}
 	prov := providers.New(strings.TrimRight(profile.APIBase, "/"), profile.APIKey, timeout)
-	prov.ProviderName = strings.TrimSpace(ref.Provider)
 	prov.EmbedDimensions = profile.DefaultDimensions
 	prov.HostPolicy = buildHostPolicy(cfg)
 	return prov
@@ -170,27 +163,6 @@ func roleTemperatureOrDefault(role config.ModelRoleConfig, fallback float64) flo
 func roleProviderVision(cfg config.Config, provider string) bool {
 	profile, ok := cfg.ProviderProfile(provider)
 	return ok && profile.EnableVision
-}
-
-func runtimeModelConfigFromConfig(cfg config.Config) agent.RuntimeModelConfig {
-	chatRole := cfg.ModelRole(config.ModelRoleChat)
-	subagentRole := cfg.ModelRole(config.ModelRoleSubagents)
-	contextRole := cfg.ModelRole(config.ModelRoleContextManager)
-	live := agent.RuntimeModelConfig{
-		Provider:         newProviderClient(cfg),
-		Model:            chatRole.Primary.Model,
-		Temperature:      roleTemperatureOrDefault(chatRole, cfg.Provider.Temperature),
-		SubagentProvider: newRoleProviderClient(cfg, config.ModelRoleSubagents),
-		SubagentModel:    subagentRole.Primary.Model,
-		ContextManagerModel: serviceFirstNonEmpty(
-			cfg.ContextManager.Model,
-			contextRole.Primary.Model,
-		),
-	}
-	if cfg.ContextManager.Enabled {
-		live.ContextManagerProvider = newContextManagerProviderClient(cfg)
-	}
-	return live
 }
 
 func main() {
@@ -264,6 +236,17 @@ func main() {
 			}
 			cmd = "chat"
 			args = []string{"chat"}
+		case "connect":
+			ctx, cancel := connectSignalContext()
+			defer cancel()
+			if err := runConnectCommand(ctx, cfgPathOrDefault(cfgPath), args[1:], os.Stdout, os.Stderr); err != nil {
+				if isUsageError(err) {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				fmt.Fprintln(os.Stderr, "connect error:", err)
+				os.Exit(1)
+			}
 		}
 		if cmd != "chat" {
 			return
@@ -331,6 +314,31 @@ func main() {
 		}
 		return
 	}
+	if cmd == "cron" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		cfg, _, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, "cron error:", loadErr)
+			os.Exit(1)
+		}
+		storePath := strings.TrimSpace(cfg.Cron.StorePath)
+		if storePath == "" {
+			fmt.Fprintln(os.Stderr, "cron error: cron store path not configured")
+			os.Exit(1)
+		}
+		if err := runCronCommand(context.Background(), storePath, args[1:], os.Stdout, os.Stderr); err != nil {
+			if isUsageError(err) {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			fmt.Fprintln(os.Stderr, "cron error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cmd == "access" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -363,7 +371,7 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := loadedRuntimeConfig.Config
-	if err := prepareRuntimeStorage(cfg); err != nil {
+	if err := prepareRuntimeStorage(&cfg, cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime storage error:", err)
 		os.Exit(1)
 	}
@@ -447,9 +455,6 @@ func main() {
 	}
 	prov := newProviderClient(cfg)
 	embedProv := newEmbeddingProviderClient(cfg)
-	chatRole := cfg.ModelRole(config.ModelRoleChat)
-	subagentRole := cfg.ModelRole(config.ModelRoleSubagents)
-	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
 
 	b := bus.New(256)
@@ -461,216 +466,60 @@ func main() {
 		os.Exit(1)
 	}
 
-	mcpManager := buildRuntimeMCPManager(ctx, cfg)
-
-	// skills
-	inv := buildRuntimeSkillsInventory(ctx, cfg, cfgPath, mcpManager)
 	var cronSvc *cron.Service
-	var subagentManager *agent.SubagentManager
-	var agentCLIManager *agentcli.Manager
-	enableSubagents := subagentsEnabledForCommand(cmd, cfg)
-	buildRuntimeTools := func() *tools.Registry {
-		return buildToolRegistry(cfg, d, embedProv, channelManager, &inv, cronSvc, subagentManager, mcpManager, approvalBroker)
-	}
-	buildBackgroundTools := func() *tools.Registry {
-		return buildBackgroundToolRegistry(cfg, d, embedProv, channelManager, &inv, cronSvc, mcpManager, approvalBroker)
-	}
+	var runnerManager *runners.Manager
 
 	ret := memory.NewRetriever(d)
 	ret.EmbedFingerprint = currentEmbedFingerprint(cfg)
 	ret.VectorScanLimit = cfg.VectorScanLimit
 
-	var docIndexer *memory.DocIndexer
 	var docRetriever *memory.DocRetriever
-	if cfg.DocIndex.Enabled && len(cfg.DocIndex.Roots) > 0 {
-		docIndexer = &memory.DocIndexer{
-			DB: d,
-			Config: memory.DocIndexConfig{
-				Roots:          cfg.DocIndex.Roots,
-				MaxFiles:       cfg.DocIndex.MaxFiles,
-				MaxFileBytes:   cfg.DocIndex.MaxFileBytes,
-				MaxChunks:      cfg.DocIndex.MaxChunks,
-				EmbedMaxBytes:  cfg.DocIndex.EmbedMaxBytes,
-				RefreshSeconds: cfg.DocIndex.RefreshSeconds,
-				RetrieveLimit:  cfg.DocIndex.RetrieveLimit,
-			},
-		}
-		docRetriever = &memory.DocRetriever{DB: d}
-		// Initial sync in background (don't block startup)
-		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
-				log.Printf("doc index sync failed: %v", err)
-			}
-		}()
-	}
-	if docIndexer != nil && cfg.DocIndex.RefreshSeconds > 0 {
-		go func() {
-			ticker := time.NewTicker(time.Duration(cfg.DocIndex.RefreshSeconds) * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				syncCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				if err := docIndexer.SyncRoots(syncCtx, scope.GlobalMemoryScope); err != nil {
-					log.Printf("doc index refresh failed: %v", err)
-				}
-				cancel()
-			}
-		}()
-	}
 
-	rt := &agent.Runtime{
-		DB:               d,
-		Provider:         prov,
-		Model:            chatRole.Primary.Model,
-		Temperature:      roleTemperatureOrDefault(chatRole, cfg.Provider.Temperature),
-		SubagentProvider: newRoleProviderClient(cfg, config.ModelRoleSubagents),
-		SubagentModel:    subagentRole.Primary.Model,
-		Tools:            buildRuntimeTools(),
-		Builder: applyContextConfigToBuilder(cfg, &agent.Builder{
-			DB:                     d,
-			Artifacts:              art,
-			Skills:                 inv,
-			Mem:                    ret,
-			Provider:               embedProv,
-			EmbedModel:             embedRole.Primary.Model,
-			EmbedFingerprint:       currentEmbedFingerprint(cfg),
-			EnableVision:           roleProviderVision(cfg, chatRole.Primary.Provider),
-			Soul:                   loadBootstrapFile(cfg.SoulFile, cfg.WorkspaceDir, "SOUL.md", agent.DefaultSoul),
-			AgentInstructions:      loadBootstrapFile(cfg.AgentsFile, cfg.WorkspaceDir, "AGENTS.md", agent.DefaultAgentInstructions),
-			ToolNotes:              loadBootstrapFile(cfg.ToolsFile, cfg.WorkspaceDir, "TOOLS.md", agent.DefaultToolNotes),
-			IdentityText:           loadBootstrapFile(cfg.IdentityFile, cfg.WorkspaceDir, "IDENTITY.md", ""),
-			StaticMemory:           loadBootstrapFile(cfg.MemoryFile, cfg.WorkspaceDir, "MEMORY.md", ""),
-			HeartbeatTasksFile:     cfg.Heartbeat.TasksFile,
-			BootstrapMaxChars:      cfg.BootstrapMaxChars,
-			BootstrapTotalMaxChars: cfg.BootstrapTotalMaxChars,
-			HistoryMax:             cfg.HistoryMax,
-			VectorK:                cfg.VectorK,
-			FTSK:                   cfg.FTSK,
-			TopK:                   cfg.MemoryRetrieve,
-			DocRetriever:           docRetriever,
-			DocRetrieveLimit:       cfg.DocIndex.RetrieveLimit,
-			WorkspaceDir:           cfg.WorkspaceDir,
-		}),
-		Artifacts:                   art,
-		MaxToolBytes:                cfg.MaxToolBytes,
-		MaxToolLoops:                cfg.MaxToolLoops,
-		MaxToolLoopsExceededAction:  cfg.MaxToolLoopsExceededAction,
-		DynamicToolExposure:         cfg.ContextConfigured && cfg.Context.Tools.DynamicExpose,
-		EnforceActivePlan:           cfg.ContextConfigured && cfg.Context.TaskCard.Enabled && cfg.Context.TaskCard.EnforcePlan,
-		Deliver:                     delivererFunc(channelManager.Deliver),
-		DefaultScopeKey:             cfg.DefaultSessionKey,
-		LinkDirectMessages:          cfg.Session.DirectMessagesShareDefault,
-		IdentityScopeMap:            buildIdentityScopeMap(cfg),
-		Hardening:                   cfg.Hardening,
-		AccessProfiles:              cfg.Security.Profiles,
-		WorkspaceDir:                cfg.WorkspaceDir,
-		Audit:                       auditLogger,
-		ApprovalBroker:              approvalBroker,
-		ContextManager:              cfg.ContextManager,
-		DisableRollingConsolidation: !cfg.ConsolidationEnabled,
+	serviceHost := serviceHostDeps{
+		DB:            d,
+		Audit:         auditLogger,
+		Artifacts:     art,
+		Mem:           ret,
+		DocRetriever:  docRetriever,
+		EmbedProvider: embedProv,
 	}
-	if cfg.ContextManager.Enabled {
-		rt.ContextManagerProvider = newContextManagerProviderClient(cfg)
-	}
-	rt.ApplyLiveModelConfig(runtimeModelConfigFromConfig(cfg))
 	serviceJobs := buildServiceJobRegistry(cmd)
-	if serviceJobs != nil {
-		rt.Deliver = nil
-		rt.Streamer = nil
-	}
 
-	agentCLIManager = buildRuntimeAgentCLIManager(cfg, d, serviceJobs)
-	if agentCLIManager != nil {
-		if err := startRuntimeAgentCLIManager(ctx, agentCLIManager); err != nil {
-			fmt.Fprintln(os.Stderr, "agent CLI manager error:", err)
+	runnerManager = buildRuntimeRunnerManager(cfg, d, serviceJobs)
+	if runnerManager != nil && cmd != "service" {
+		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
+			fmt.Fprintln(os.Stderr, "runner manager error:", err)
 			os.Exit(1)
 		}
 	}
+	chatManager := buildRuntimeChatManager(cfg, d, runnerManager, serviceJobs, approvalBroker)
+	turnOrchestrator := buildRunnerTurnOrchestrator(cfg, chatManager, d, ret, docRetriever, embedProv)
 
-	// cron service + tool
-	cronSvc = buildRuntimeCronService(cfg, b, agentCLIManager)
+	cronSvc = buildRuntimeCronService(cfg, b, runnerManager, turnOrchestrator)
 	if cronSvc != nil {
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
 			os.Exit(1)
 		}
-		rt.Tools = buildRuntimeTools()
 	}
-
-	if enableSubagents {
-		subagentManager = &agent.SubagentManager{
-			DB:            d,
-			Runtime:       rt,
-			Deliver:       delivererFunc(channelManager.Deliver),
-			MaxConcurrent: cfg.Subagents.MaxConcurrent,
-			MaxQueued:     cfg.Subagents.MaxQueued,
-			TaskTimeout:   time.Duration(cfg.Subagents.TaskTimeoutSeconds) * time.Second,
-			Jobs:          serviceJobs,
-			BackgroundTools: func() *tools.Registry {
-				return buildBackgroundTools()
-			},
+	if consolidator, scheduler := startMemoryConsolidation(ctx, cfg, d, del); consolidator != nil {
+		_ = consolidator
+		if chatManager != nil && scheduler != nil {
+			chatManager.OnSuccessfulTurn = scheduler.Trigger
 		}
-		if cmd == "service" {
-			subagentManager.Deliver = nil
-		}
-		if err := subagentManager.Start(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "subagent manager error:", err)
-			os.Exit(1)
-		}
-		rt.Tools = buildRuntimeTools()
-	}
-	if cfg.ConsolidationEnabled || cfg.ContextManager.Enabled {
-		rt.Consolidator = &memory.Consolidator{
-			DB:                 d,
-			Provider:           newConsolidationProviderClient(cfg),
-			EmbedModel:         embedRole.Primary.Model,
-			EmbedFingerprint:   currentEmbedFingerprint(cfg),
-			ChatModel:          effectiveConsolidationModel(cfg),
-			WindowSize:         cfg.ConsolidationWindowSize,
-			MaxMessages:        cfg.ConsolidationMaxMessages,
-			MaxInputChars:      cfg.ConsolidationMaxInputChars,
-			CanonicalPinnedKey: "long_term_memory",
-		}
-		rt.ConsolidationScheduler = memory.NewSchedulerWithContext(
-			ctx,
-			effectiveConsolidationTimeout(cfg),
-			func(runCtx context.Context, sessionKey string) {
-				historyMax := cfg.HistoryMax
-				if historyMax <= 0 {
-					historyMax = 40
-				}
-				for i := 0; i < schedulerMaxConsolidationPasses; i++ {
-					didWork, err := rt.Consolidator.RunOnce(runCtx, sessionKey, historyMax, memory.RunMode{})
-					if err != nil {
-						message := fmt.Sprintf("consolidation failed for %s: %v", sessionKey, err)
-						if del != nil {
-							del.ShowNoticeForSession(sessionKey, message)
-						} else {
-							log.Printf("%s", message)
-						}
-						return
-					}
-					if !didWork {
-						return
-					}
-				}
-			},
-		)
 	}
 
 	var heartbeatSvc *heartbeat.Service
 	switch cmd {
 	case "chat":
-		rt.Streamer = del
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, rt, cfg.WorkerCount, del, channelManager, nil)
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager, CLI: del})
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, rt, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: rt, Broker: approvalBroker, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -695,18 +544,17 @@ func main() {
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
 	case "service":
-		channelRuntime := channelWorkerRuntime(rt, delivererFunc(channelManager.Deliver))
-		runWorkers(ctx, b, channelRuntime, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Runtime: channelRuntime, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
 		}
-		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, serviceJobs, approvalBroker, unsafeDev, cronSvc, mcpManager, channelManager); err != nil {
+		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHost, runnerManager, chatManager, turnOrchestrator, serviceJobs, approvalBroker, unsafeDev, cronSvc, channelManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
 	case "agent":
-		// one-shot: or3-intern agent -m "hello"
+		// one-shot: or3-intern agent -m "hello" (runner-backed; built-in agent loop deprecated)
 		fs := flag.NewFlagSet("agent", flag.ExitOnError)
 		var msg string
 		var session string
@@ -719,9 +567,24 @@ func main() {
 			fmt.Fprintln(os.Stderr, "missing -m message")
 			os.Exit(2)
 		}
-		agentCtx := tools.ContextWithApprovalToken(ctx, approvalToken)
-		agentCtx = tools.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
-		if err := rt.Handle(agentCtx, bus.Event{Type: bus.EventUserMessage, SessionKey: session, Channel: "cli", From: "local", Message: msg}); err != nil {
+		fmt.Fprintln(os.Stderr, "note: `or3-intern agent` now enqueues a runner chat turn; use `or3-intern chat` for interactive sessions")
+		agentCtx := requestctx.ContextWithApprovalToken(ctx, approvalToken)
+		agentCtx = requestctx.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
+		if turnOrchestrator == nil {
+			fmt.Fprintln(os.Stderr, "agent error: runner orchestration unavailable; enable runners and configure a default runner")
+			os.Exit(1)
+		}
+		_, err := turnOrchestrator.StartTurn(agentCtx, app.RunnerTurnRequest{
+			SessionKey:    session,
+			Channel:       "cli",
+			From:          "local",
+			Message:       msg,
+			TriggerKind:   "user_message",
+			ApprovalToken: approvalToken,
+			Actor:         "cli",
+			Role:          approval.RoleOperator,
+		})
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "agent error:", err)
 			os.Exit(1)
 		}
@@ -744,15 +607,35 @@ func main() {
 			fmt.Fprintln(os.Stderr, "migrate-openclaw error:", err)
 			os.Exit(1)
 		}
+	case "memory":
+		if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "memory error:", err)
+			os.Exit(1)
+		}
+		if err := runMemoryCommandWithDeps(ctx, cfg, d, args[1:], memoryCommandDeps{
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "memory error:", err)
+			os.Exit(1)
+		}
 	case "skills":
+		if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "skills error:", err)
+			os.Exit(1)
+		}
+		bundledDir, bundledErr := resolveBundledSkillsDir(cfgPath)
+		if bundledErr != nil {
+			fmt.Fprintln(os.Stderr, "skills error:", bundledErr)
+			os.Exit(1)
+		}
 		deps := skillsCommandDeps{
 			Client: newClawHubClient(cfg),
 			LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
-				return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+				return loadAvailableToolNamesWithManager(ctx, cfg, struct{}{})
 			},
 			LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
-				builtin := filepath.Join(filepath.Dir(cfgPathOrDefault(cfgPath)), "builtin_skills")
-				return buildSkillsInventory(cfg, builtin, toolNames)
+				return buildSkillsInventory(cfg, bundledDir, toolNames)
 			},
 			Audit: func(ctx context.Context, eventType string, payload any) error {
 				if auditLogger == nil {
@@ -767,36 +650,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "skills error:", err)
 			os.Exit(1)
 		}
-	case "approvals":
-		if err := runApprovalsCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
-				fmt.Fprintln(os.Stderr, "approvals error:", err)
-			}
-			os.Exit(1)
-		}
-	case "devices":
-		if err := runDevicesCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "devices error:", err)
-			os.Exit(1)
-		}
-	case "pairing":
-		if err := runPairingCommand(ctx, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "pairing error:", err)
-			os.Exit(1)
-		}
-	case "connect-device":
-		if err := runConnectDeviceCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdout, os.Stderr); err != nil {
-			if translated := translateAndPrintError(err, os.Stderr); translated == nil {
-				os.Exit(1)
-			}
-			fmt.Fprintln(os.Stderr, "connect-device error:", err)
-			os.Exit(1)
-		}
-	case "pair":
-		if err := runPairCommand(ctx, cfgPathOrDefault(cfgPath), &cfg, d, approvalBroker, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "pair error:", err)
-			os.Exit(1)
-		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
 		os.Exit(2)
@@ -805,20 +658,8 @@ func main() {
 	if heartbeatSvc != nil {
 		heartbeatSvc.Stop()
 	}
-	if mcpManager != nil {
-		if err := mcpManager.Close(); err != nil {
-			log.Printf("mcp shutdown failed: %v", err)
-		}
-	}
 	if cronSvc != nil {
 		cronSvc.Stop()
-	}
-	if subagentManager != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
-		if err := subagentManager.Stop(shutdownCtx); err != nil {
-			log.Printf("subagent manager stop failed: %v", err)
-		}
-		cancel()
 	}
 	_ = channelManager.StopAll(context.Background())
 }
@@ -835,35 +676,9 @@ func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
 	}
 }
 
-func applyContextConfigToBuilder(cfg config.Config, builder *agent.Builder) *agent.Builder {
-	if builder == nil {
-		return nil
-	}
-	if !cfg.ContextConfigured {
-		return builder
-	}
-	builder.ContextMaxInputTokens = cfg.Context.MaxInputTokens
-	builder.ContextOutputReserveTokens = cfg.Context.OutputReserveTokens
-	builder.ContextSafetyMarginTokens = cfg.Context.SafetyMarginTokens
-	builder.ContextSectionBudgets = agent.ContextSectionBudgets{
-		SystemCore:       cfg.Context.Sections.SystemCore,
-		SoulIdentity:     cfg.Context.Sections.SoulIdentity,
-		ToolPolicy:       cfg.Context.Sections.ToolPolicy,
-		ActiveTaskCard:   cfg.Context.Sections.ActiveTaskCard,
-		PinnedMemory:     cfg.Context.Sections.PinnedMemory,
-		MemoryDigest:     cfg.Context.Sections.MemoryDigest,
-		RecentHistory:    cfg.Context.Sections.RecentHistory,
-		RetrievedMemory:  cfg.Context.Sections.RetrievedMemory,
-		WorkspaceContext: cfg.Context.Sections.WorkspaceContext,
-		ToolSchemas:      cfg.Context.Sections.ToolSchemas,
-	}
-	builder.DisableTaskCard = !cfg.Context.TaskCard.Enabled
-	return builder
-}
-
 func commandHandledBeforeConfigLoad(cmd string) bool {
 	switch cmd {
-	case "config-path", "version", "configure", "init", "setup", "settings":
+	case "config-path", "version", "configure", "init", "setup", "settings", "connect":
 		return true
 	default:
 		return false
@@ -916,7 +731,7 @@ func currentWorkingDir() string {
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
 	switch cmd {
-	case "capabilities", "embeddings", "scope":
+	case "approvals", "capabilities", "devices", "embeddings", "pairing", "scope":
 		return true
 	default:
 		return false
@@ -932,18 +747,6 @@ func configErrorHint(err error) string {
 		return "hint: run `or3-intern configure --section channels` and choose an inbound access mode for the enabled channel"
 	}
 	return ""
-}
-
-func subagentsEnabledForCommand(cmd string, cfg config.Config) bool {
-	if !cfg.Subagents.Enabled {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(cmd)) {
-	case "service", "chat", "serve":
-		return true
-	default:
-		return false
-	}
 }
 
 func buildIdentityScopeMap(cfg config.Config) map[string]string {
@@ -970,85 +773,7 @@ func (f delivererFunc) Deliver(ctx context.Context, channel, to, text string) er
 	return f(ctx, channel, to, text)
 }
 
-type mcpToolRegistrar interface {
-	RegisterTools(reg *tools.Registry) int
-}
-
-func buildToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker) *tools.Registry {
-	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, spawnManager, mcpRegistrar, approvalBroker, true)
-}
-
-func buildBackgroundToolRegistry(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker) *tools.Registry {
-	return buildToolRegistryWithOptions(cfg, d, prov, channelManager, inv, cronSvc, nil, mcpRegistrar, approvalBroker, false)
-}
-
-func buildToolRegistryWithOptions(cfg config.Config, d *db.DB, prov *providers.Client, channelManager *rootchannels.Manager, inv *skills.Inventory, cronSvc *cron.Service, spawnManager tools.SpawnEnqueuer, mcpRegistrar mcpToolRegistrar, approvalBroker *approval.Broker, includeSendMessage bool) *tools.Registry {
-	reg := tools.NewRegistry()
-	fileWriteRoot := allowedRoot(cfg)
-	fileReadRoot := allowedReadRoot(cfg)
-	sandboxCfg := tools.BubblewrapConfig{Enabled: cfg.Hardening.Sandbox.Enabled, BubblewrapPath: cfg.Hardening.Sandbox.BubblewrapPath, AllowNetwork: cfg.Hardening.Sandbox.AllowNetwork, WritablePaths: append([]string{}, cfg.Hardening.Sandbox.WritablePaths...)}
-	hostPolicy := buildHostPolicy(cfg)
-	if shouldRegisterExecTool(cfg) {
-		reg.Register(&tools.ExecTool{Timeout: time.Duration(cfg.Tools.ExecTimeoutSeconds) * time.Second, RestrictDir: fileWriteRoot, PathAppend: cfg.Tools.PathAppend, AllowedPrograms: append([]string{}, cfg.Hardening.ExecAllowedPrograms...), ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, EnableLegacyShell: cfg.Hardening.EnableExecShell, ApprovalBroker: approvalBroker})
-	}
-	reg.Register(&tools.ReadFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.SearchFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.ReadArtifact{Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}, MaxReadBytes: int64(cfg.MaxToolBytes)})
-	reg.Register(&tools.WriteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.EditFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.DeleteFile{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.ListDir{FileTool: tools.FileTool{Root: fileReadRoot, WriteRoot: fileWriteRoot}})
-	reg.Register(&tools.WebFetch{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
-	reg.Register(&tools.WebFetchMarkdown{HostPolicy: hostPolicy, Store: &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}})
-	reg.Register(&tools.WebSearch{APIKey: cfg.Tools.BraveAPIKey, HostPolicy: hostPolicy})
-	reg.Register(&tools.MemorySetPinned{DB: d})
-	embedRole := cfg.ModelRole(config.ModelRoleEmbeddings)
-	reg.Register(&tools.MemoryAddNote{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg)})
-	reg.Register(&tools.MemorySearch{DB: d, Provider: prov, EmbedModel: embedRole.Primary.Model, EmbedFingerprint: currentEmbedFingerprint(cfg), VectorK: cfg.VectorK, FTSK: cfg.FTSK, TopK: cfg.MemoryRetrieve, VectorScanLimit: cfg.VectorScanLimit})
-	reg.Register(&tools.MemoryRecent{DB: d, DefaultLimit: 10, MaxLimit: cfg.HistoryMax, MaxChars: 240})
-	reg.Register(&tools.MemoryGetPinned{DB: d, MaxChars: 400})
-	planBase := agent.NewPlanToolBase(d)
-	reg.Register(&agent.CreatePlanTool{PlanToolBase: planBase})
-	reg.Register(&agent.UpdatePlanTool{PlanToolBase: planBase})
-	reg.Register(&agent.CompletePlanTaskTool{PlanToolBase: planBase})
-	reg.Register(&agent.RemovePlanTool{PlanToolBase: planBase})
-	if includeSendMessage {
-		reg.Register(&tools.SendMessage{
-			Deliver: func(ctx context.Context, channel, to, text string, meta map[string]any) error {
-				if channelManager == nil {
-					return fmt.Errorf("channel manager not configured")
-				}
-				return channelManager.DeliverWithMeta(ctx, channel, to, text, meta)
-			},
-			AllowedRoot:    fileWriteRoot,
-			ArtifactsDir:   cfg.ArtifactsDir,
-			MaxMediaBytes:  cfg.MaxMediaBytes,
-			ApprovalBroker: approvalBroker,
-		})
-	}
-	if inv != nil {
-		reg.Register(&tools.ReadSkill{Inventory: inv})
-		if cfg.Skills.EnableExec {
-			reg.Register(&tools.RunSkill{RunSkillScript: tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d}})
-			reg.Register(&tools.RunSkillScript{Inventory: inv, Enabled: true, Timeout: time.Duration(cfg.Skills.MaxRunSeconds) * time.Second, ChildEnvAllowlist: append([]string{}, cfg.Hardening.ChildEnvAllowlist...), Sandbox: sandboxCfg, ApprovalBroker: approvalBroker, DB: d})
-		}
-	}
-	if cronSvc != nil {
-		reg.Register(&tools.CronTool{Svc: cronSvc})
-	}
-	if spawnManager != nil {
-		reg.Register(&tools.SpawnSubagent{Manager: spawnManager})
-	}
-	if mcpRegistrar != nil {
-		mcpRegistrar.RegisterTools(reg)
-	}
-	return reg
-}
-
 func shouldRegisterExecTool(cfg config.Config) bool {
-	if !cfg.Tools.EnableExec {
-		return false
-	}
 	if len(cfg.Hardening.ExecAllowedPrograms) == 0 {
 		return false
 	}
@@ -1106,10 +831,8 @@ func cfgPathOrDefault(p string) string {
 }
 
 func allowedRoot(cfg config.Config) string {
-	if cfg.Tools.RestrictToWorkspace {
-		if cfg.WorkspaceDir != "" {
-			return cfg.WorkspaceDir
-		}
+	if cfg.WorkspaceDir != "" {
+		return cfg.WorkspaceDir
 	}
 	if cfg.AllowedDir != "" {
 		return cfg.AllowedDir
@@ -1118,9 +841,6 @@ func allowedRoot(cfg config.Config) string {
 }
 
 func allowedReadRoot(cfg config.Config) string {
-	if cfg.Tools.RestrictToWorkspace && cfg.Tools.AllowFullFileRead {
-		return ""
-	}
 	return allowedRoot(cfg)
 }
 
@@ -1131,7 +851,7 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler) {
+func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTurnOrchestrator, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler, commandHandler *channelCommandHandler) {
 	if n <= 0 {
 		n = 4
 	}
@@ -1139,8 +859,8 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 	for i := 0; i < n; i++ {
 		go func() {
 			for ev := range events {
-				cctx, cancel := agent.WithTimeout(ctx, channelWorkerTimeoutSeconds(ev))
-				cctx = agent.ContextWithConversationSession(cctx, ev.SessionKey)
+				cctx, cancel := context.WithTimeout(ctx, time.Duration(channelWorkerTimeoutSeconds(ev))*time.Second)
+				cctx = streaming.ContextWithConversationSession(cctx, ev.SessionKey)
 				if handled, err := approvalHandler.Handle(cctx, ev); handled {
 					if err != nil {
 						log.Printf("channel approval command failed: channel=%s session=%s err=%v", ev.Channel, ev.SessionKey, err)
@@ -1148,16 +868,32 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 					cancel()
 					continue
 				}
+				if next, handled, err := commandHandler.Handle(cctx, ev); handled {
+					if err != nil {
+						log.Printf("channel command failed: channel=%s session=%s err=%v", ev.Channel, ev.SessionKey, err)
+					}
+					cancel()
+					continue
+				} else {
+					ev = next
+				}
 				stopTyping := func() {}
 				if ev.Channel != "cli" && channelManager != nil {
 					stopTyping = channelManager.StartTyping(cctx, ev.Channel, "", ev.Meta)
 				}
 				if ev.Channel == "cli" && cliDeliverer != nil {
 					if observer := cliDeliverer.Observer(); observer != nil {
-						cctx = agent.ContextWithConversationObserver(cctx, observer)
+						cctx = streaming.ContextWithConversationObserver(cctx, observer)
 					}
 				}
-				if err := rt.Handle(cctx, ev); err != nil {
+				var err error
+				var result app.RunnerTurnResult
+				if turnOrchestrator != nil {
+					result, err = turnOrchestrator.StartBusEventTurn(cctx, ev)
+				} else {
+					err = app.ErrRunnerRuntimeUnavailable
+				}
+				if err != nil {
 					if ev.Channel == "cli" {
 						if cliDeliverer != nil {
 							cliDeliverer.ShowErrorForSession(ev.SessionKey, err)
@@ -1166,6 +902,8 @@ func runWorkers(ctx context.Context, b *bus.Bus, rt *agent.Runtime, n int, cliDe
 						deliverChannelRuntimeError(cctx, channelManager, ev, err)
 						log.Printf("handle event failed: type=%s session=%s err=%v", ev.Type, ev.SessionKey, err)
 					}
+				} else if ev.Channel != "cli" && turnOrchestrator != nil {
+					deliverChannelTurnResult(cctx, channelManager, ev, turnOrchestrator, result)
 				}
 				stopTyping()
 				cancel()
@@ -1189,9 +927,9 @@ func deliverChannelRuntimeError(ctx context.Context, channelManager *rootchannel
 	if errors.As(err, &approvalErr) {
 		return
 	}
-	code := agent.PublicErrorCode(err)
+	code := serviceerrors.PublicErrorCode(err)
 	if code == "" {
-		code = agent.PublicErrorUnknown
+		code = serviceerrors.PublicErrorUnknown
 	}
 	text := "I hit a problem while handling that request (" + code + "). Please retry, or review the details in the OR3 app."
 	if derr := channelManager.DeliverWithMeta(ctx, ev.Channel, channelEventTarget(ev), text, rootchannels.ReplyMeta(ev.Meta)); derr != nil {
@@ -1199,42 +937,49 @@ func deliverChannelRuntimeError(ctx context.Context, channelManager *rootchannel
 	}
 }
 
-func channelWorkerRuntime(rt *agent.Runtime, deliverer agent.Deliverer) *agent.Runtime {
-	if rt == nil {
-		return &agent.Runtime{Deliver: deliverer}
+func deliverChannelTurnResult(ctx context.Context, channelManager *rootchannels.Manager, ev bus.Event, turnOrchestrator *app.RunnerTurnOrchestrator, result app.RunnerTurnResult) {
+	if channelManager == nil || turnOrchestrator == nil || strings.TrimSpace(result.RunnerChatTurnID) == "" {
+		return
 	}
-	channelRuntime := &agent.Runtime{
-		DB:                          rt.DB,
-		Provider:                    rt.Provider,
-		Model:                       rt.Model,
-		Temperature:                 rt.Temperature,
-		SubagentProvider:            rt.SubagentProvider,
-		SubagentModel:               rt.SubagentModel,
-		Tools:                       rt.Tools,
-		Hardening:                   rt.Hardening,
-		AccessProfiles:              rt.AccessProfiles,
-		WorkspaceDir:                rt.WorkspaceDir,
-		Builder:                     rt.Builder,
-		Artifacts:                   rt.Artifacts,
-		MaxToolBytes:                rt.MaxToolBytes,
-		MaxToolLoops:                rt.MaxToolLoops,
-		MaxToolLoopsExceededAction:  rt.MaxToolLoopsExceededAction,
-		ToolPreviewBytes:            rt.ToolPreviewBytes,
-		DynamicToolExposure:         rt.DynamicToolExposure,
-		Audit:                       rt.Audit,
-		ApprovalBroker:              rt.ApprovalBroker,
-		ContextManager:              rt.ContextManager,
-		ContextManagerProvider:      rt.ContextManagerProvider,
-		Deliver:                     deliverer,
-		Consolidator:                rt.Consolidator,
-		ConsolidationScheduler:      rt.ConsolidationScheduler,
-		DisableRollingConsolidation: rt.DisableRollingConsolidation,
-		DefaultScopeKey:             rt.DefaultScopeKey,
-		LinkDirectMessages:          rt.LinkDirectMessages,
-		IdentityScopeMap:            rt.IdentityScopeMap,
+	final, ok := turnOrchestrator.WaitForTurnResult(ctx, result)
+	if !ok {
+		log.Printf("channel turn delivery skipped: channel=%s session=%s turn=%s reason=timeout_or_missing", ev.Channel, ev.SessionKey, result.RunnerChatTurnID)
+		return
 	}
-	channelRuntime.ApplyLiveModelConfig(rt.CurrentModelConfig())
-	return channelRuntime
+	text := channelTurnDeliveryText(final)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if derr := channelManager.DeliverWithMeta(ctx, ev.Channel, channelEventTarget(ev), text, rootchannels.ReplyMeta(ev.Meta)); derr != nil {
+		log.Printf("channel turn delivery failed: channel=%s session=%s turn=%s err=%v", ev.Channel, ev.SessionKey, result.RunnerChatTurnID, derr)
+	}
+}
+
+func channelTurnDeliveryText(final app.RunnerTurnFinalResult) string {
+	if text := strings.TrimSpace(final.FinalText); text != "" {
+		return text
+	}
+	if errMessage := strings.TrimSpace(final.ErrorMessage); errMessage != "" {
+		status := strings.ReplaceAll(strings.TrimSpace(final.Status), "_", " ")
+		if status == "" {
+			status = "failed"
+		}
+		return "Runner turn " + status + ": " + errMessage
+	}
+	switch final.Status {
+	case db.RunnerChatTurnStatusSucceeded:
+		return "(no output)"
+	case db.RunnerChatTurnStatusApprovalRequired:
+		return "OR3 needs your approval before the runner can continue. Review the request in the app, or reply with the approval command if one was shown."
+	case db.RunnerChatTurnStatusTimedOut:
+		return "Runner turn timed out. Check the OR3 app for details."
+	case db.RunnerChatTurnStatusAborted:
+		return "Runner turn was aborted."
+	case db.RunnerChatTurnStatusFailed:
+		return "Runner turn failed. Check the OR3 app for details."
+	default:
+		return ""
+	}
 }
 
 func loadBootstrapFile(configPath, workspaceDir, baseName, fallback string) string {

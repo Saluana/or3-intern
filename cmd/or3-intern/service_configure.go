@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
+	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
+	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 type serviceConfigureChange struct {
@@ -59,6 +65,7 @@ type serviceConfigureField struct {
 	Key         string   `json:"key"`
 	Label       string   `json:"label"`
 	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
 	Kind        string   `json:"kind"`
 	Value       any      `json:"value,omitempty"`
 	Choices     []string `json:"choices,omitempty"`
@@ -91,8 +98,6 @@ func serviceConfigureFieldDefinition(cfg config.Config, section, channel, fieldK
 	switch section {
 	case "channels":
 		fields = buildChannelFields(cfg, channel)
-	case "mcp":
-		fields = buildMCPFields(cfg, channel)
 	default:
 		fields = buildSectionFields(cfg, section, "")
 	}
@@ -136,6 +141,7 @@ func toServiceConfigureFields(fields []configureField) []serviceConfigureField {
 			Key:         field.Key,
 			Label:       field.Label,
 			Description: field.Description,
+			Status:      field.Status,
 			Kind:        serviceConfigureFieldKind(field.Kind),
 			Value:       serviceConfigureFieldValue(field),
 			Choices:     append([]string{}, field.Choices...),
@@ -320,9 +326,7 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 		return
 	}
 	s.config = next
-	if s.runtime != nil {
-		s.runtime.ApplyLiveModelConfig(runtimeModelConfigFromConfig(next))
-	}
+	s.applyLiveRunnerConfig(next)
 	if s.controlSvc != nil {
 		s.controlSvc.Config = next
 		s.controlSvc.Provider = newProviderClient(next)
@@ -333,6 +337,46 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 	if s.modelCatalog != nil {
 		s.modelCatalog.Clear()
 	}
+}
+
+func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
+	if s == nil {
+		return
+	}
+	if s.runnerManager == nil {
+		database := s.runtimeDB()
+		s.runnerManager = buildRuntimeRunnerManager(next, database, s.jobs)
+		if err := startRuntimeRunnerManager(context.Background(), s.runnerManager); err != nil {
+			log.Printf("runner manager: live start failed: %v", err)
+			s.runnerManager = nil
+		}
+	} else {
+		s.runnerManager.ApplyConfig(
+			next.Runners,
+			next.Runners.MaxConcurrent,
+			next.Runners.MaxQueued,
+			time.Duration(next.Runners.DefaultTimeoutSeconds)*time.Second,
+			runners.OpenCodeExternalDirectoriesFromConfig(next),
+			allowedRoot(next),
+		)
+	}
+	database := s.runtimeDB()
+	s.chatManager = buildRuntimeChatManager(next, database, s.runnerManager, s.jobs, s.broker)
+	s.turnOrchestrator = s.rebuildRunnerTurnOrchestrator(next, database)
+	if s.appSvc != nil {
+		s.appSvc.SetRunnerRuntime(s.runnerManager, s.turnOrchestrator)
+	}
+}
+
+func (s *serviceServer) runtimeDB() *db.DB {
+	return s.serviceDB()
+}
+
+func (s *serviceServer) rebuildRunnerTurnOrchestrator(next config.Config, database *db.DB) *app.RunnerTurnOrchestrator {
+	if s == nil || s.chatManager == nil {
+		return nil
+	}
+	return buildRunnerTurnOrchestrator(next, s.chatManager, database, s.serviceMemRetriever(), s.serviceDocRetriever(), s.serviceEmbedProvider())
 }
 
 func serviceNormalizeProviderKey(value string) string {
@@ -465,7 +509,7 @@ func serviceProviderStatus(cfg config.Config) map[string]any {
 		})
 	}
 	roleItems := map[string]any{}
-	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleAgents, config.ModelRoleSubagents, config.ModelRoleSummarization, config.ModelRoleContextManager, config.ModelRoleEmbeddings} {
+	for _, roleName := range []string{config.ModelRoleChat, config.ModelRoleSummarization, config.ModelRoleEmbeddings} {
 		role := cfg.ModelRole(roleName)
 		roleItems[roleName] = map[string]any{
 			"primary":         role.Primary,

@@ -122,18 +122,8 @@ func TestValidateConfigSnapshotDoesNotApplyEnvOverrides(t *testing.T) {
 
 func TestValidateConfigSnapshotDoesNotMutateInputMaps(t *testing.T) {
 	cfg := config.Default()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"broken": {
-			Enabled:   true,
-			Transport: "stdio",
-		},
-	}
 
 	_ = validateConfigSnapshot(cfg)
-
-	if !cfg.Tools.MCPServers["broken"].Enabled {
-		t.Fatal("expected snapshot validation not to quarantine caller MCP map")
-	}
 }
 
 func TestServiceFindingsRequireEffectiveProfileForExposedIngress(t *testing.T) {
@@ -151,7 +141,7 @@ func TestServiceFindingsRequireEffectiveProfileForExposedIngress(t *testing.T) {
 	cfg.Security.Profiles.Enabled = true
 	cfg.Security.Profiles.Default = "service-safe"
 	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
-		"service-safe": {MaxCapability: "safe", AllowedTools: []string{"search"}},
+		"service-safe": {MaxCapability: "safe"},
 	}
 	report = Evaluate(cfg, Options{Mode: ModeStartupService})
 	if doctorReportHasFinding(report, "service.effective_profile_missing") {
@@ -205,18 +195,6 @@ func TestDoctorStartupFixtureCoverageForStabilityProfiles(t *testing.T) {
 				return cfg
 			}(),
 			want: "service.effective_profile_missing",
-		},
-		{
-			name: "remote-mcp",
-			cfg: func() config.Config {
-				cfg := config.Default()
-				cfg.RuntimeProfile = config.ProfileHostedService
-				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-					"remote": {Enabled: true, Transport: "streamablehttp", URL: "https://mcp.example"},
-				}
-				return cfg
-			}(),
-			want: "mcp.http_no_default_deny",
 		},
 		{
 			name: "privileged-exec",

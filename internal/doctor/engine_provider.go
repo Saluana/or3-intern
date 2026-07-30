@@ -7,13 +7,12 @@ import (
 )
 
 func providerFindings(cfg config.Config, opts Options) []Finding {
-	blockOnStartup := opts.Mode == ModeStartupChat || opts.Mode == ModeStartupServe || opts.Mode == ModeConfigurePostSave
 	findings := []Finding{}
 	if strings.TrimSpace(cfg.Provider.APIBase) == "" {
 		findings = append(findings, Finding{
 			ID:       "provider.endpoint_missing",
 			Area:     "provider",
-			Severity: severityFor(opts.Mode, SeverityWarn, blockOnStartup),
+			Severity: SeverityWarn,
 			Summary:  "AI provider endpoint is missing",
 			Detail:   "OR3 needs an OpenAI-compatible endpoint before chat can start.",
 			FixMode:  FixModeInteractive,
@@ -24,7 +23,7 @@ func providerFindings(cfg config.Config, opts Options) []Finding {
 		findings = append(findings, Finding{
 			ID:       "provider.api_key_missing",
 			Area:     "provider",
-			Severity: severityFor(opts.Mode, SeverityWarn, blockOnStartup),
+			Severity: SeverityWarn,
 			Summary:  "AI provider key is missing",
 			Detail:   "The provider key is required to verify billing and access with the AI service.",
 			FixMode:  FixModeInteractive,
@@ -35,7 +34,7 @@ func providerFindings(cfg config.Config, opts Options) []Finding {
 		findings = append(findings, Finding{
 			ID:       "provider.chat_model_missing",
 			Area:     "provider",
-			Severity: severityFor(opts.Mode, SeverityWarn, blockOnStartup),
+			Severity: SeverityWarn,
 			Summary:  "Chat model is missing",
 			Detail:   "OR3 needs a chat model name before it can send messages.",
 			FixMode:  FixModeInteractive,

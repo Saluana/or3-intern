@@ -1,21 +1,26 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"or3-intern/internal/agent"
-	"or3-intern/internal/agentcli"
+	"or3-intern/internal/app"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 	"or3-intern/internal/tools"
+	"or3-intern/internal/turns"
 )
 
 const serviceRunnerChatBodyLimit = 64 * 1024
+const serviceRunnerChatPromptCompileTimeout = 8 * time.Second
+const serviceRunnerChatAppSessionKeyPrefixMaxBytes = 256
 
 func (s *serviceServer) runnerChatWriteUnavailable() bool {
 	return s == nil || s.chatManager == nil || s.chatManager.Manager == nil
@@ -23,31 +28,33 @@ func (s *serviceServer) runnerChatWriteUnavailable() bool {
 
 // runnerChatCreateSessionRequest is the body for POST /runner-chat/sessions.
 type runnerChatCreateSessionRequest struct {
-	AppSessionKey    string `json:"app_session_key"`
-	RunnerID         string `json:"runner_id"`
-	ContinuationMode string `json:"continuation_mode"`
-	Model            string `json:"model"`
-	Mode             string `json:"mode"`
-	Isolation        string `json:"isolation"`
-	Cwd              string `json:"cwd"`
-	MaxTurns         int    `json:"max_turns"`
+	AppSessionKey     string `json:"app_session_key"`
+	RunnerID          string `json:"runner_id"`
+	ContinuationMode  string `json:"continuation_mode"`
+	Model             string `json:"model"`
+	Mode              string `json:"mode"`
+	Isolation         string `json:"isolation"`
+	Cwd               string `json:"cwd"`
+	MaxTurns          int    `json:"max_turns"`
+	ApprovalAutopilot *bool  `json:"approval_autopilot"`
 }
 
 // runnerChatStartTurnRequest is the body for POST /runner-chat/sessions/:id/turns.
 type runnerChatStartTurnRequest struct {
-	UserMessage      string         `json:"user_message"`
-	Attachments      []map[string]any `json:"attachments"`
-	ContinuationMode string         `json:"continuation_mode"`
-	Model            string         `json:"model"`
-	Mode             string         `json:"mode"`
-	Isolation        string         `json:"isolation"`
-	Cwd              string         `json:"cwd"`
-	MaxTurns         int            `json:"max_turns"`
-	TimeoutSeconds   int            `json:"timeout_seconds"`
-	Meta             map[string]any `json:"meta"`
-	ThinkingLevel    string         `json:"thinking_level"`
-	ApprovalToken    string         `json:"approval_token"`
-	RunnerPermission struct {
+	UserMessage       string           `json:"user_message"`
+	Attachments       []map[string]any `json:"attachments"`
+	ContinuationMode  string           `json:"continuation_mode"`
+	Model             string           `json:"model"`
+	Mode              string           `json:"mode"`
+	Isolation         string           `json:"isolation"`
+	Cwd               string           `json:"cwd"`
+	MaxTurns          int              `json:"max_turns"`
+	TimeoutSeconds    int              `json:"timeout_seconds"`
+	Meta              map[string]any   `json:"meta"`
+	ThinkingLevel     string           `json:"thinking_level"`
+	ApprovalToken     string           `json:"approval_token"`
+	ApprovalAutopilot *bool            `json:"approval_autopilot"`
+	RunnerPermission  struct {
 		RunnerID   string `json:"runner_id"`
 		Kind       string `json:"kind"`
 		Access     string `json:"access"`
@@ -57,6 +64,7 @@ type runnerChatStartTurnRequest struct {
 
 // handleRunnerChatSessions dispatches the runner-chat session/turn API:
 //
+//	GET  /internal/v1/runner-chat/sessions
 //	POST /internal/v1/runner-chat/sessions
 //	GET  /internal/v1/runner-chat/sessions/:id
 //	GET  /internal/v1/runner-chat/sessions/:id/turns
@@ -77,11 +85,14 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 	}
 	path := r.URL.Path
 	if path == "/internal/v1/runner-chat/sessions" || path == "/internal/v1/runner-chat/sessions/" {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleRunnerChatSessionsList(w, r, store)
+		case http.MethodPost:
+			s.handleRunnerChatSessionCreate(w, r)
+		default:
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
 		}
-		s.handleRunnerChatSessionCreate(w, r)
 		return
 	}
 	rel := strings.TrimPrefix(path, "/internal/v1/runner-chat/sessions/")
@@ -91,6 +102,9 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 		return
 	}
 	sessionID := parts[0]
+	if !s.requireRunnerChatSessionScope(w, r, store, sessionID) {
+		return
+	}
 	switch {
 	case len(parts) == 1:
 		if r.Method != http.MethodGet {
@@ -142,6 +156,12 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 				return
 			}
 			s.handleRunnerChatTurnAbort(w, r, store, sessionID, turnID)
+		case "approve", "reject", "cancel":
+			if r.Method != http.MethodPost {
+				writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+				return
+			}
+			s.handleRunnerChatTurnDecision(w, r, store, sessionID, turnID, tail)
 		default:
 			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		}
@@ -150,9 +170,49 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 	}
 }
 
+func (s *serviceServer) handleRunnerChatSessionsList(w http.ResponseWriter, r *http.Request, store *db.DB) {
+	filter := db.RunnerChatSessionListFilter{}
+	query := r.URL.Query()
+	if values, present := query["limit"]; present {
+		raw := strings.TrimSpace(query.Get("limit"))
+		n, err := strconv.Atoi(raw)
+		if len(values) != 1 || raw == "" || err != nil || n <= 0 || n > db.MaxRunnerChatSessionListLimit {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit", "code": "validation_failed"})
+			return
+		}
+		filter.Limit = n
+	}
+	if values, present := query["app_session_key_prefix"]; present {
+		prefix := strings.TrimSpace(query.Get("app_session_key_prefix"))
+		if len(values) != 1 ||
+			prefix == "" ||
+			len(prefix) > serviceRunnerChatAppSessionKeyPrefixMaxBytes ||
+			strings.ContainsAny(prefix, "\x00\r\n") {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid app_session_key_prefix", "code": "validation_failed"})
+			return
+		}
+		filter.AppSessionKeyPrefix = prefix
+	}
+	if namespace := serviceConnectNamespace(r); namespace != "" {
+		if filter.AppSessionKeyPrefix != "" && !strings.HasPrefix(filter.AppSessionKeyPrefix, namespace) {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid app_session_key_prefix", "code": "validation_failed"})
+			return
+		}
+		if filter.AppSessionKeyPrefix == "" {
+			filter.AppSessionKeyPrefix = namespace
+		}
+	}
+	sessions, err := store.ListRunnerChatSessions(r.Context(), filter)
+	if err != nil {
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat sessions list unavailable", err)
+		return
+	}
+	writeServiceValue(w, http.StatusOK, controlplane.BuildRunnerChatSessionListResponse(sessions))
+}
+
 func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	limitServiceRequestBody(w, r, serviceRunnerChatBodyLimit)
@@ -165,14 +225,18 @@ func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "app_session_key required"})
 		return
 	}
+	if namespace := serviceConnectNamespace(r); namespace != "" && !strings.HasPrefix(req.AppSessionKey, namespace) {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "app_session_key is outside the connected workspace", "code": serviceCodeForbidden})
+		return
+	}
 	if strings.TrimSpace(req.RunnerID) == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "runner_id required"})
 		return
 	}
-	sess, err := s.chatManager.EnsureSession(r.Context(), agentcli.StartTurnRequest{
+	sess, err := s.chatManager.EnsureSession(r.Context(), runners.StartTurnRequest{
 		AppSessionKey:    req.AppSessionKey,
 		RunnerID:         req.RunnerID,
-		ContinuationMode: agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
+		ContinuationMode: runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
 		Model:            req.Model,
 		Mode:             req.Mode,
 		Isolation:        req.Isolation,
@@ -184,6 +248,38 @@ func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *
 		return
 	}
 	writeServiceValue(w, http.StatusCreated, controlplane.BuildRunnerChatSessionResponse(sess))
+}
+
+func serviceConnectNamespace(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	identity := serviceAuthIdentityFromContext(r.Context())
+	if identity.Role != approval.RoleConnect {
+		return ""
+	}
+	return strings.TrimSpace(identity.Namespace)
+}
+
+func (s *serviceServer) requireRunnerChatSessionScope(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID string) bool {
+	namespace := serviceConnectNamespace(r)
+	if namespace == "" {
+		return true
+	}
+	session, err := store.GetRunnerChatSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, db.ErrRunnerChatSessionNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+			return false
+		}
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat session lookup failed", err)
+		return false
+	}
+	if !strings.HasPrefix(session.AppSessionKey, namespace) {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+		return false
+	}
+	return true
 }
 
 func (s *serviceServer) handleRunnerChatSessionRead(w http.ResponseWriter, r *http.Request, store *db.DB, id string) {
@@ -223,7 +319,7 @@ func (s *serviceServer) handleRunnerChatTurnsList(w http.ResponseWriter, r *http
 
 func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http.Request, sessionID string) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	limitServiceRequestBody(w, r, serviceRunnerChatBodyLimit)
@@ -237,22 +333,82 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		return
 	}
 	attachments := decodeServiceAttachments(req.Attachments)
-	if err := agent.ValidateChatAttachments(attachments); err != nil {
+	if err := turns.ValidateAttachments(attachments); err != nil {
 		writeServiceError(w, r, http.StatusBadRequest, "invalid attachments", err)
 		return
 	}
-	startReq := agentcli.StartTurnRequest{
-		ContinuationMode: agentcli.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
-		UserMessage:      req.UserMessage,
-		Attachments:      attachments,
-		Model:            req.Model,
-		Mode:             req.Mode,
-		Isolation:        req.Isolation,
-		Cwd:              req.Cwd,
-		MaxTurns:         req.MaxTurns,
-		TimeoutSeconds:   req.TimeoutSeconds,
-		Meta:             req.Meta,
-		ApprovalToken:    serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
+	store := s.control().DB
+	if store == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database unavailable"})
+		return
+	}
+	sess, err := store.GetRunnerChatSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, db.ErrRunnerChatSessionNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+			return
+		}
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat session lookup unavailable", err)
+		return
+	}
+	promptMessage := strings.TrimSpace(req.UserMessage)
+	promptMessageFinal := false
+	var compiled app.RunnerPromptCompileResult
+	if s.turnOrchestrator != nil {
+		continuation := runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
+		if continuation == "" {
+			continuation = runners.ContinuationMode(sess.ContinuationMode)
+		}
+		if strings.TrimSpace(req.Cwd) != "" {
+			if req.Meta == nil {
+				req.Meta = map[string]any{}
+			}
+			req.Meta["_cwd"] = req.Cwd
+		}
+		compileCtx, cancelCompile := context.WithTimeout(r.Context(), serviceRunnerChatPromptCompileTimeout)
+		var compileErr error
+		compiled, compileErr = s.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
+		cancelCompile()
+		if compileErr != nil {
+			if r.Context().Err() != nil {
+				writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat prompt unavailable", compileErr)
+				return
+			}
+			log.Printf("runner chat: prompt compile failed; falling back to raw user message: session=%s err=%v", sess.ID, compileErr)
+			if req.Meta == nil {
+				req.Meta = map[string]any{}
+			}
+			req.Meta["runner_prompt_compile_error"] = compileErr.Error()
+			req.Meta["runner_prompt_compile_fallback"] = true
+		} else if compileCtx.Err() == context.DeadlineExceeded {
+			log.Printf("runner chat: prompt compile timed out; falling back to raw user message: session=%s", sess.ID)
+			if req.Meta == nil {
+				req.Meta = map[string]any{}
+			}
+			req.Meta["runner_prompt_compile_error"] = "prompt compile timed out"
+			req.Meta["runner_prompt_compile_fallback"] = true
+		} else {
+			promptMessage = compiled.CompiledPrompt
+			promptMessageFinal = true
+		}
+	}
+	startReq := runners.StartTurnRequest{
+		ContinuationMode:   runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
+		UserMessage:        req.UserMessage,
+		PromptMessage:      promptMessage,
+		PromptMessageFinal: promptMessageFinal,
+		MemoryRefresh:      compiled.MemoryRefresh,
+		MemoryDebug:        compiled.MemoryDebug,
+		Attachments:        attachments,
+		Model:              req.Model,
+		Mode:               req.Mode,
+		Isolation:          req.Isolation,
+		Cwd:                req.Cwd,
+		MaxTurns:           req.MaxTurns,
+		TimeoutSeconds:     req.TimeoutSeconds,
+		Meta:               req.Meta,
+		ApprovalToken:      serviceFirstNonEmpty(req.ApprovalToken, serviceApprovalTokenFromRequest(r)),
+		ApprovalAutopilot:  runners.ResolveRunnerApprovalAutopilot(req.ApprovalAutopilot),
 	}
 	if thinking := strings.ToLower(strings.TrimSpace(req.ThinkingLevel)); thinking != "" {
 		if startReq.Meta == nil {
@@ -260,7 +416,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		}
 		startReq.Meta["runner_thinking_level"] = thinking
 	}
-	if permission, ok := agentcli.NormalizeRunnerPermissionRequest(agentcli.RunnerPermissionRequest{
+	if permission, ok := runners.NormalizeRunnerPermissionRequest(runners.RunnerPermissionRequest{
 		RunnerID:   strings.TrimSpace(req.RunnerPermission.RunnerID),
 		Kind:       strings.TrimSpace(req.RunnerPermission.Kind),
 		Access:     strings.TrimSpace(req.RunnerPermission.Access),
@@ -274,14 +430,14 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		switch {
 		case errors.As(err, &approvalErr):
 			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "code": "approval_required", "status": "approval_required", "approval_id": approvalErr.RequestID, "request_id": approvalErr.RequestID})
-		case errors.Is(err, agentcli.ErrUnsupportedNativeSession):
+		case errors.Is(err, runners.ErrUnsupportedNativeSession):
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "native continuation not supported by this runner", "code": "unsupported_native_session"})
 		case errors.Is(err, db.ErrRunnerChatSessionNotFound):
 			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
 		case errors.Is(err, db.ErrRunnerChatTurnActive):
 			writeServiceJSON(w, http.StatusConflict, map[string]any{"error": "another turn is already active for this session", "code": "runner_chat_turn_active"})
 		default:
-			writeServiceError(w, r, http.StatusBadRequest, "start runner chat turn failed", err)
+			writeRunnerChatStartError(w, r, err)
 		}
 		return
 	}
@@ -291,6 +447,41 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		"job_id":     result.JobID,
 		"status":     result.Turn.Status,
 	})
+}
+
+func writeRunnerChatStartError(w http.ResponseWriter, r *http.Request, err error) {
+	public := "start runner chat turn failed"
+	payload := serviceErrorPayload(r, public)
+	payload["code"] = serviceCodeValidationFailed
+	if detail := runnerChatStartErrorDetail(err); detail != "" {
+		payload["detail"] = detail
+	}
+	if err != nil {
+		log.Printf("service %s %s: %v", r.Method, r.URL.Path, err)
+	}
+	writeServiceJSON(w, http.StatusBadRequest, payload)
+}
+
+func runnerChatStartErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(detail)
+	for _, safe := range []string{
+		"invalid cwd:",
+		"unknown runner ",
+		"runner is disabled",
+		"is disabled by config",
+		"is not installed",
+		"is not authenticated",
+		"is not functional",
+	} {
+		if strings.Contains(lower, safe) {
+			return detail
+		}
+	}
+	return ""
 }
 
 func (s *serviceServer) handleRunnerChatTurnRead(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID string) {
@@ -386,14 +577,29 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 		}
 		return max, true
 	}
-	// Initial flush of persisted history.
-	events, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, 1000)
-	if err == nil {
-		if next, ok := flush(events); ok {
+	flushPending := func(limit int) bool {
+		for {
+			events, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, limit)
+			if err != nil {
+				return false
+			}
+			if len(events) == 0 {
+				return true
+			}
+			next, ok := flush(events)
+			if !ok {
+				return false
+			}
 			afterSeq = next
-		} else {
-			return
+			if len(events) < limit {
+				return true
+			}
 		}
+	}
+	// Initial flush of all persisted history. A reconnect to a completed turn
+	// must not silently stop after the first page of tool/content events.
+	if !flushPending(1000) {
+		return
 	}
 	if isTerminalRunnerChatStatus(turn.Status) {
 		_ = writeSSEEvent(w, "done", map[string]any{"status": turn.Status})
@@ -401,29 +607,25 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 	}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	lastKeepalive := time.Now()
+	const runnerChatStreamKeepaliveInterval = 15 * time.Second
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			batch, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, 200)
-			if err != nil {
-				_ = writeSSEEvent(w, "error", map[string]any{"error": fmt.Sprintf("%v", err)})
+			beforeSeq := afterSeq
+			if !flushPending(200) {
+				_ = writeSSEEvent(w, "error", map[string]any{"error": "runner chat events unavailable"})
 				return
 			}
-			if len(batch) > 0 {
-				next, ok := flush(batch)
-				if !ok {
-					return
-				}
-				afterSeq = next
+			if afterSeq > beforeSeq {
+				lastKeepalive = time.Now()
 			}
 			cur, err := store.GetRunnerChatTurn(r.Context(), turnID)
 			if err == nil && isTerminalRunnerChatStatus(cur.Status) {
 				// Drain any final events recorded after the last poll.
-				if tail, err := store.ListRunnerChatEvents(r.Context(), turnID, afterSeq, 200); err == nil && len(tail) > 0 {
-					_, _ = flush(tail)
-				}
+				_ = flushPending(200)
 				_ = writeSSEEvent(w, "done", map[string]any{
 					"status":               cur.Status,
 					"final_text":           cur.FinalText,
@@ -432,13 +634,24 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 				})
 				return
 			}
+			if err == nil &&
+				!isTerminalRunnerChatStatus(cur.Status) &&
+				time.Since(lastKeepalive) >= runnerChatStreamKeepaliveInterval {
+				if err := writeSSEEvent(w, "keepalive", map[string]any{
+					"status":  cur.Status,
+					"turn_id": turnID,
+				}); err != nil {
+					return
+				}
+				lastKeepalive = time.Now()
+			}
 		}
 	}
 }
 
 func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID string) {
 	if s.runnerChatWriteUnavailable() {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "agent CLI manager is disabled", "code": "agent_cli_disabled"})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
 		return
 	}
 	if _, ok := s.loadRunnerChatTurnForSession(w, r, store, sessionID, turnID); !ok {
@@ -453,6 +666,61 @@ func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http
 		return
 	}
 	writeServiceJSON(w, http.StatusAccepted, map[string]any{"status": "aborting"})
+}
+
+func (s *serviceServer) handleRunnerChatTurnDecision(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID, turnID, decision string) {
+	if s.runnerChatWriteUnavailable() {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
+		return
+	}
+	if _, ok := s.loadRunnerChatTurnForSession(w, r, store, sessionID, turnID); !ok {
+		return
+	}
+	limitServiceRequestBody(w, r, serviceRunnerChatBodyLimit)
+	var body struct {
+		Note         string `json:"note"`
+		AllowSession bool   `json:"allow_session"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeServiceJSONLoose(r.Body, &body); err != nil {
+			writeServiceError(w, r, http.StatusBadRequest, "invalid request", err)
+			return
+		}
+	}
+	actor := serviceAuthIdentityFromContext(r.Context()).Actor
+	result, err := s.chatManager.RespondToTurnApproval(r.Context(), turnID, runners.RespondToTurnApprovalOpts{
+		Decision:     decision,
+		Note:         body.Note,
+		AllowSession: body.AllowSession,
+		Actor:        actor,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, db.ErrRunnerChatTurnNotFound):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat turn not found", "code": "runner_chat_turn_not_found"})
+		case errors.Is(err, db.ErrRunnerChatSessionNotFound):
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+		default:
+			writeServiceError(w, r, http.StatusBadRequest, "approval decision failed", err)
+		}
+		return
+	}
+	response := map[string]any{
+		"status":            "ok",
+		"decision":          decision,
+		"route":             result.Route,
+		"approval_id":       result.ApprovalID,
+		"native_continued":  result.NativeContinued,
+		"fallback_to_token": result.FallbackToToken,
+		"allowlist_session": result.AllowlistSession,
+	}
+	if result.AllowlistID != 0 {
+		response["allowlist_id"] = result.AllowlistID
+	}
+	if result.Token != "" {
+		response["token"] = result.Token
+	}
+	writeServiceJSON(w, http.StatusAccepted, response)
 }
 
 func isTerminalRunnerChatStatus(status string) bool {

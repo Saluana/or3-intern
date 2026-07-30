@@ -16,18 +16,18 @@ func TestBuildServiceJobRegistryOnlyForService(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeAgentCLIManagerDisabled(t *testing.T) {
+func TestBuildRuntimeRunnerManagerAlwaysAvailable(t *testing.T) {
+	// Runner-only mode is always on; the runner manager is always built.
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = false
-	if manager := buildRuntimeAgentCLIManager(cfg, nil, nil); manager != nil {
-		t.Fatalf("expected nil agent CLI manager when disabled")
+	if manager := buildRuntimeRunnerManager(cfg, nil, nil); manager == nil {
+		t.Fatalf("expected runner manager to be built")
 	}
 }
 
 func TestBuildRuntimeCronServiceDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cron.Enabled = false
-	if svc := buildRuntimeCronService(cfg, bus.New(1), nil); svc != nil {
+	if svc := buildRuntimeCronService(cfg, bus.New(1), nil, nil); svc != nil {
 		t.Fatalf("expected nil cron service when disabled")
 	}
 }

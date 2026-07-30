@@ -92,45 +92,14 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 			expectMatch: "public ingress is enabled while access profiles are disabled",
 		},
 		{
-			name: "stdio mcp missing env allowlist",
-			mutate: func(cfg *config.Config) {
-				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-					"local": {
-						Enabled:   true,
-						Transport: "stdio",
-						Command:   "demo-mcp",
-					},
-				}
-			},
-			expectArea:  "mcp",
-			expectMatch: "uses stdio without a server childEnvAllowlist",
-		},
-		{
-			name: "http mcp insecure",
-			mutate: func(cfg *config.Config) {
-				cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-					"remote": {
-						Enabled:           true,
-						Transport:         "streamablehttp",
-						URL:               "http://127.0.0.1:8080/mcp",
-						AllowInsecureHTTP: true,
-					},
-				}
-			},
-			expectArea:  "mcp",
-			expectMatch: "uses insecure HTTP transport",
-		},
-		{
 			name: "webhook profile too permissive",
 			mutate: func(cfg *config.Config) {
 				cfg.Triggers.Webhook.Enabled = true
 				cfg.Security.Profiles.Default = "danger"
 				cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
-					MaxCapability:  "privileged",
-					AllowedTools:   []string{"exec", "run_skill_script"},
-					AllowedHosts:   []string{"*.example.com"},
-					WritablePaths:  []string{"/tmp"},
-					AllowSubagents: true,
+					MaxCapability: "privileged",
+					AllowedHosts:  []string{"*.example.com"},
+					WritablePaths: []string{"/tmp"},
 				}
 			},
 			expectArea:  "webhook",
@@ -199,20 +168,19 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 
 func TestRunDoctorCommand_PrintsWarnings(t *testing.T) {
 	cfg := safeDoctorConfig()
-	cfg.Tools.RestrictToWorkspace = false
 	cfg.Hardening.PrivilegedTools = true
 	cfg.Hardening.EnableExecShell = true
 	cfg.Triggers.Webhook.Enabled = true
 	cfg.Triggers.Webhook.Secret = ""
 	cfg.Triggers.Webhook.Addr = "0.0.0.0:8765"
 	cfg.Security.Profiles.Default = "danger"
-	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged", AllowedTools: []string{"exec"}}
+	cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{MaxCapability: "privileged"}
 	var out bytes.Buffer
 	if err := runDoctorCommand("", cfg, "", nil, strings.NewReader(""), &out, &out); err != nil {
 		t.Fatalf("runDoctorCommand: %v", err)
 	}
 	text := out.String()
-	for _, area := range []string{"filesystem", "exec", "privileged-exec", "webhook"} {
+	for _, area := range []string{"exec", "privileged-exec", "webhook"} {
 		if !strings.Contains(text, area) {
 			t.Fatalf("expected %q warning in %q", area, text)
 		}
@@ -415,7 +383,6 @@ func TestDoctorFindings_ProfileHostThreshold(t *testing.T) {
 	}
 	cfg.Security.Profiles.Profiles["safe"] = config.AccessProfileConfig{
 		MaxCapability: "safe",
-		AllowedTools:  []string{"web_fetch"},
 		AllowedHosts:  hosts,
 	}
 	findings := doctorFindings(cfg)
@@ -458,7 +425,6 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
 			MaxCapability: "guarded",
-			AllowedTools:  []string{"exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "webhook", "can reach exec shell mode via profile") {
@@ -475,7 +441,6 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "guarded"
 		cfg.Security.Profiles.Profiles["guarded"] = config.AccessProfileConfig{
 			MaxCapability: "guarded",
-			AllowedTools:  []string{"exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
@@ -492,7 +457,6 @@ func TestDoctorFindings_ExecWarningsRespectEffectiveProfiles(t *testing.T) {
 		cfg.Security.Profiles.Default = "danger"
 		cfg.Security.Profiles.Profiles["danger"] = config.AccessProfileConfig{
 			MaxCapability: "privileged",
-			AllowedTools:  []string{"exec"},
 		}
 		findings := doctorFindings(cfg)
 		if findingContains(findings, "discord", "can reach exec shell mode via profile") {
@@ -540,156 +504,11 @@ func safeDoctorConfig() config.Config {
 	cfg.Security.Profiles.Profiles = map[string]config.AccessProfileConfig{
 		"safe": {
 			MaxCapability: "safe",
-			AllowedTools:  []string{"read_file"},
 		},
 	}
 	cfg.Security.Network.Enabled = true
 	cfg.Security.Network.DefaultDeny = true
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{}
 	cfg.Provider.APIKey = "test-provider-key"
 	cfg.RuntimeProfile = config.ProfileLocalDev
 	return cfg
-}
-
-func TestRuntimeProfileFindings(t *testing.T) {
-	t.Run("no profile set emits warn", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = ""
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "runtimeProfile is not set") {
-			t.Fatalf("expected unset runtimeProfile warning, got %#v", findings)
-		}
-	})
-
-	t.Run("local-dev profile produces no findings", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileLocalDev
-		findings := runtimeProfileFindings(cfg)
-		if len(findings) != 0 {
-			t.Fatalf("expected no findings for local-dev, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile without secret store warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.SecretStore.Enabled = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "security.secretStore.enabled") {
-			t.Fatalf("expected secretStore warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile without required secret store warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.SecretStore.Required = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "security.secretStore.required") {
-			t.Fatalf("expected secretStore.required warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile without audit warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.Audit.Enabled = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "security.audit.enabled") {
-			t.Fatalf("expected audit warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile without strict audit warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.Audit.Strict = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "security.audit.strict") {
-			t.Fatalf("expected audit.strict warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile without audit verifyOnStart warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.Audit.VerifyOnStart = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "security.audit.verifyOnStart") {
-			t.Fatalf("expected audit.verifyOnStart warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile without network warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.Network.Enabled = false
-		cfg.Security.Network.DefaultDeny = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "security.network outbound policy") {
-			t.Fatalf("expected network warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted profile with default deny and network disabled does not warn", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		cfg.Security.Network.Enabled = false
-		cfg.Security.Network.DefaultDeny = true
-		findings := runtimeProfileFindings(cfg)
-		if findingContains(findings, "runtime-profile", "security.network outbound policy") {
-			t.Fatalf("expected no network warning with defaultDeny policy, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted-no-exec with exec shell enabled warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedNoExec
-		cfg.Hardening.EnableExecShell = true
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "enableExecShell should be false") {
-			t.Fatalf("expected enableExecShell warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted-no-exec with privileged tools warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedNoExec
-		cfg.Hardening.PrivilegedTools = true
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "privilegedTools should be false") {
-			t.Fatalf("expected privilegedTools warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted-remote-sandbox-only exec without sandbox warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
-		cfg.Hardening.EnableExecShell = true
-		cfg.Hardening.Sandbox.Enabled = false
-		findings := runtimeProfileFindings(cfg)
-		if !findingContains(findings, "runtime-profile", "exec requires sandbox to be enabled") {
-			t.Fatalf("expected sandbox warning, got %#v", findings)
-		}
-	})
-
-	t.Run("hosted-remote-sandbox-only exec with sandbox no warns", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedRemoteSandbox
-		cfg.Hardening.EnableExecShell = true
-		cfg.Hardening.Sandbox.Enabled = true
-		findings := runtimeProfileFindings(cfg)
-		if findingContains(findings, "runtime-profile", "exec requires sandbox") {
-			t.Fatalf("expected no sandbox warning when sandbox enabled, got %#v", findings)
-		}
-	})
-
-	t.Run("well-configured hosted profile produces no profile findings", func(t *testing.T) {
-		cfg := safeDoctorConfig()
-		cfg.RuntimeProfile = config.ProfileHostedService
-		findings := runtimeProfileFindings(cfg)
-		if len(findings) != 0 {
-			t.Fatalf("expected no findings for well-configured hosted profile, got %#v", findings)
-		}
-	})
 }

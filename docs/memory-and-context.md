@@ -12,6 +12,14 @@ The README describes the retrieval stack as:
 
 This is meant to keep retrieval precise without needing to scan full histories on every turn.
 
+## Runner-first prompts
+
+Chat, channels, and automation turns build runner prompts in OR3 before delegating
+to an external CLI. Trusted bootstrap text is separated from the user task.
+Retrieved memory and indexed doc excerpts are injected into `<or3_context>` when
+configured. Session replay for multi-turn runner chat is handled by
+`agentcli.ChatManager` using persisted `runner_chat_turns`.
+
 ## Context sources
 
 A turn can draw context from several places:
@@ -33,20 +41,9 @@ Three markdown files are especially important:
 
 `HEARTBEAT.md` is reread for each autonomous turn so edits apply without restarting `serve`.
 
-## Document index
+## Runner Context
 
-The optional document index lets the runtime retrieve relevant excerpts from local files and inject them into the prompt.
-
-Supported configuration keys include:
-
-- `docIndex.enabled`
-- `docIndex.roots`
-- `docIndex.maxFiles`
-- `docIndex.maxFileBytes`
-- `docIndex.maxChunks`
-- `docIndex.embedMaxBytes`
-- `docIndex.refreshSeconds`
-- `docIndex.retrieveLimit`
+Runner prompt assembly uses bounded memory snippets and explicit trusted context sections.
 
 Supported file types in the README include:
 

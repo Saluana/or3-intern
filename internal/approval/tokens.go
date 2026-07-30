@@ -81,23 +81,6 @@ func (b *Broker) signTokenFromRecord(req db.ApprovalRequestRecord, record db.App
 	return payloadPart + "." + signature, nil
 }
 
-func (b *Broker) issueTokenForRequest(ctx context.Context, req db.ApprovalRequestRecord, actor string) (string, error) {
-	now := b.now()
-	record, err := b.DB.CreateApprovalToken(ctx, db.ApprovalTokenRecord{ApprovalRequestID: req.ID, SubjectHash: req.SubjectHash, IssuedAt: now.UnixMilli(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).UnixMilli(), Issuer: actor})
-	if err != nil {
-		return "", err
-	}
-	claims := ApprovalTokenClaims{TokenID: record.ID, RequestID: req.ID, SubjectHash: req.SubjectHash, ExecutionHost: req.ExecutionHostID, IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Duration(b.Config.ApprovalTokenTTLSeconds) * time.Second).Unix()}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	signature := hex.EncodeToString(signToken(b.SignKey, payloadPart))
-	_ = b.audit(ctx, "approval.token_issued", map[string]any{"request_id": req.ID, "token_id": record.ID, "subject_hash": req.SubjectHash, "host_id": req.ExecutionHostID, "actor": actor, "outcome": "issued"})
-	return payloadPart + "." + signature, nil
-}
-
 func (b *Broker) parseApprovalToken(token string) (ApprovalTokenClaims, error) {
 	payloadPart, signaturePart, ok := strings.Cut(strings.TrimSpace(token), ".")
 	if !ok || payloadPart == "" || signaturePart == "" {

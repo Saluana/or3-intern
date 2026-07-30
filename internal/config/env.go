@@ -18,10 +18,7 @@ func ApplyEnvOverrides(cfg *Config) {
 		providerKey := inferProviderKey(v)
 		cfg.Provider.APIBase = v
 		cfg.ModelRouting.Chat.Primary.Provider = providerKey
-		cfg.ModelRouting.Agents.Primary.Provider = providerKey
-		cfg.ModelRouting.Subagents.Primary.Provider = providerKey
 		cfg.ModelRouting.Summarization.Primary.Provider = providerKey
-		cfg.ModelRouting.ContextManager.Primary.Provider = providerKey
 		cfg.ModelRouting.Embeddings.Primary.Provider = providerKey
 		updateProviderProfile(cfg, providerKey, func(profile *ProviderProfileConfig) { profile.APIBase = v })
 	}
@@ -32,8 +29,6 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_MODEL"); v != "" && shouldApplyEnvModelOverride(cfg) {
 		cfg.Provider.Model = v
 		cfg.ModelRouting.Chat.Primary.Model = v
-		cfg.ModelRouting.Agents.Primary.Model = v
-		cfg.ModelRouting.Subagents.Primary.Model = v
 	}
 	if v := os.Getenv("OR3_CONSOLIDATION_MODEL"); v != "" {
 		cfg.ConsolidationModel = v
@@ -70,21 +65,20 @@ func ApplyEnvOverrides(cfg *Config) {
 	applyEnvString("OR3_EMAIL_SMTP_USERNAME", &cfg.Channels.Email.SMTPUsername)
 	applyEnvString("OR3_EMAIL_SMTP_PASSWORD", &cfg.Channels.Email.SMTPPassword)
 	applyEnvString("OR3_EMAIL_FROM_ADDRESS", &cfg.Channels.Email.FromAddress)
-	applyEnvBool("OR3_SUBAGENTS_ENABLED", &cfg.Subagents.Enabled)
-	applyEnvInt("OR3_SUBAGENTS_MAX_CONCURRENT", &cfg.Subagents.MaxConcurrent)
-	applyEnvInt("OR3_SUBAGENTS_MAX_QUEUED", &cfg.Subagents.MaxQueued)
-	applyEnvInt("OR3_SUBAGENTS_TASK_TIMEOUT_SECONDS", &cfg.Subagents.TaskTimeoutSeconds)
-	applyEnvBool("OR3_AGENT_CLI_ENABLED", &cfg.AgentCLI.Enabled)
-	if v := os.Getenv("OR3_AGENT_CLI_DISABLED_RUNNERS"); v != "" {
-		cfg.AgentCLI.DisabledRunners = compactStrings(strings.Split(v, ","))
+	applyEnvString("OR3_RUNNERS_DEFAULT", &cfg.Runners.Default)
+	if v := os.Getenv("OR3_RUNNERS_DISABLED"); v != "" {
+		cfg.Runners.Disabled = compactStrings(strings.Split(v, ","))
 	}
-	applyEnvInt("OR3_AGENT_CLI_MAX_CONCURRENT", &cfg.AgentCLI.MaxConcurrent)
-	applyEnvInt("OR3_AGENT_CLI_MAX_QUEUED", &cfg.AgentCLI.MaxQueued)
-	applyEnvInt("OR3_AGENT_CLI_DEFAULT_TIMEOUT_SECONDS", &cfg.AgentCLI.DefaultTimeoutSeconds)
-	applyEnvInt("OR3_AGENT_CLI_MAX_TIMEOUT_SECONDS", &cfg.AgentCLI.MaxTimeoutSeconds)
-	applyEnvBool("OR3_AGENT_CLI_ALLOW_SANDBOX_AUTO", &cfg.AgentCLI.AllowSandboxAuto)
-	applyEnvString("OR3_AGENT_CLI_DEFAULT_MODE", &cfg.AgentCLI.DefaultMode)
-	applyEnvString("OR3_AGENT_CLI_DEFAULT_ISOLATION", &cfg.AgentCLI.DefaultIsolation)
+	applyEnvInt("OR3_RUNNERS_MAX_CONCURRENT", &cfg.Runners.MaxConcurrent)
+	applyEnvInt("OR3_RUNNERS_MAX_QUEUED", &cfg.Runners.MaxQueued)
+	applyEnvInt("OR3_RUNNERS_DEFAULT_TIMEOUT_SECONDS", &cfg.Runners.DefaultTimeoutSeconds)
+	applyEnvInt("OR3_RUNNERS_MAX_TIMEOUT_SECONDS", &cfg.Runners.MaxTimeoutSeconds)
+	applyEnvBool("OR3_RUNNERS_ALLOW_SANDBOX_AUTO", &cfg.Runners.AllowSandboxAuto)
+	applyEnvString("OR3_RUNNERS_DEFAULT_MODE", &cfg.Runners.DefaultMode)
+	applyEnvString("OR3_RUNNERS_DEFAULT_ISOLATION", &cfg.Runners.DefaultIsolation)
+	applyEnvString("OR3_RUNNERS_CODEX_HOME", &cfg.Runners.CodexHomePath)
+	applyEnvString("OR3_RUNNERS_CODEX_SHADOW_HOME", &cfg.Runners.CodexShadowHomePath)
+	applyEnvBool("OR3_FILESYSTEM_BROWSING", &cfg.FilesystemBrowsing)
 	applyEnvBool("OR3_SERVICE_ENABLED", &cfg.Service.Enabled)
 	applyEnvString("OR3_SERVICE_LISTEN", &cfg.Service.Listen)
 	applyEnvString("OR3_SERVICE_SECRET", &cfg.Service.Secret)
@@ -107,7 +101,6 @@ func ApplyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OR3_AUTH_ENFORCEMENT_MODE"); v != "" {
 		cfg.Auth.EnforcementMode = AuthEnforcementMode(v)
 	}
-	applyEnvBool("OR3_AUTH_ALLOW_PAIRED_TOKEN_FALLBACK", &cfg.Auth.AllowPairedTokenFallback)
 	applyEnvBool("OR3_AUTH_REQUIRE_PASSKEY_FOR_SENSITIVE", &cfg.Auth.RequirePasskeyForSensitive)
 	if v := os.Getenv("OR3_RUNTIME_PROFILE"); v != "" {
 		cfg.RuntimeProfile = RuntimeProfile(strings.ToLower(strings.TrimSpace(v)))
@@ -128,8 +121,6 @@ func shouldApplyEnvModelOverride(cfg *Config) bool {
 	}
 	for _, pair := range []struct{ got, want string }{
 		{cfg.ModelRouting.Chat.Primary.Model, defaults.ModelRouting.Chat.Primary.Model},
-		{cfg.ModelRouting.Agents.Primary.Model, defaults.ModelRouting.Agents.Primary.Model},
-		{cfg.ModelRouting.Subagents.Primary.Model, defaults.ModelRouting.Subagents.Primary.Model},
 	} {
 		if strings.TrimSpace(pair.got) != strings.TrimSpace(pair.want) {
 			return false
@@ -232,6 +223,22 @@ func normalizeProviderKey(key string) string {
 	key = strings.ReplaceAll(key, " ", "-")
 	key = strings.Trim(key, "_-/")
 	return key
+}
+
+func appendCompatEnvWarning(cfg *Config, message string) {
+	if cfg == nil {
+		return
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	for _, existing := range cfg.CompatEnvWarnings {
+		if existing == message {
+			return
+		}
+	}
+	cfg.CompatEnvWarnings = append(cfg.CompatEnvWarnings, message)
 }
 
 func inferProviderKey(apiBase string) string {

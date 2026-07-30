@@ -20,12 +20,10 @@ func TestRunCapabilitiesCommand_TextOutputIncludesIngressAndApprovals(t *testing
 	cfg.Security.Profiles.Default = "default"
 	cfg.Security.Profiles.Channels["slack"] = "ops"
 	cfg.Security.Profiles.Triggers["webhook"] = "default"
-	cfg.Security.Profiles.Profiles["default"] = config.AccessProfileConfig{MaxCapability: "guarded", AllowSubagents: false}
+	cfg.Security.Profiles.Profiles["default"] = config.AccessProfileConfig{MaxCapability: "guarded"}
 	cfg.Security.Profiles.Profiles["ops"] = config.AccessProfileConfig{
-		MaxCapability:  "guarded",
-		AllowedTools:   []string{"read_file", "web_fetch"},
-		AllowedHosts:   []string{"api.example.com"},
-		AllowSubagents: true,
+		MaxCapability: "guarded",
+		AllowedHosts:  []string{"api.example.com"},
 	}
 	cfg.Channels.Slack.Enabled = true
 	cfg.Channels.Slack.InboundPolicy = config.InboundPolicyPairing
@@ -43,10 +41,10 @@ func TestRunCapabilitiesCommand_TextOutputIncludesIngressAndApprovals(t *testing
 	for _, needle := range []string{
 		"runtime_profile: hosted-remote-sandbox-only",
 		"approval_broker: enabled=true",
-		"exec_available: true",
-		"shell_mode_available: true",
+		"exec_available: false",
+		"shell_mode_available: false",
 		"pairing: allowlist",
-		"- slack enabled=true inbound=pairing profile=ops max=guarded subagents=true tools=read_file,web_fetch hosts=api.example.com",
+		"- slack enabled=true inbound=pairing profile=ops max=guarded hosts=api.example.com",
 	} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected %q in output, got %q", needle, text)
@@ -62,9 +60,7 @@ func TestRunCapabilitiesCommand_JSONOutputIncludesFilteredTrigger(t *testing.T) 
 	cfg.Security.Profiles.Enabled = true
 	cfg.Security.Profiles.Triggers["file_change"] = "files"
 	cfg.Security.Profiles.Profiles["files"] = config.AccessProfileConfig{
-		MaxCapability:  "safe",
-		AllowedTools:   []string{"read_file"},
-		AllowSubagents: false,
+		MaxCapability: "safe",
 	}
 	cfg.Triggers.FileWatch.Enabled = true
 

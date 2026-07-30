@@ -1,0 +1,267 @@
+{
+  "create_session_request": {
+    "app_session_key": "or3-chat:workspace-1",
+    "runner_id": "codex",
+    "continuation_mode": "replay",
+    "model": "gpt-5.6-codex",
+    "mode": "review",
+    "isolation": "host_readonly",
+    "cwd": "/workspace",
+    "max_turns": 12,
+    "approval_autopilot": false
+  },
+  "session_response": {
+    "app_session_key": "or3-chat:workspace-1",
+    "continuation_mode": "replay",
+    "created_at": 1000,
+    "cwd": "/workspace",
+    "id": "rcs_fixture",
+    "isolation": "host_readonly",
+    "max_turns": 12,
+    "mode": "review",
+    "model": "gpt-5.6-codex",
+    "runner_id": "codex",
+    "updated_at": 2000
+  },
+  "session_list_response": {
+    "sessions": [
+      {
+        "app_session_key": "or3-chat:workspace-1",
+        "continuation_mode": "replay",
+        "created_at": 1000,
+        "cwd": "/workspace",
+        "id": "rcs_fixture",
+        "isolation": "host_readonly",
+        "max_turns": 12,
+        "mode": "review",
+        "model": "gpt-5.6-codex",
+        "runner_id": "codex",
+        "updated_at": 2000
+      }
+    ]
+  },
+  "turn_response": {
+    "assistant_message_id": 12,
+    "completed_at": 5000,
+    "continuation_mode": "replay",
+    "cwd": "/workspace",
+    "final_text": "done",
+    "id": "rct_fixture",
+    "isolation": "host_readonly",
+    "mode": "review",
+    "model": "gpt-5.6-codex",
+    "requested_at": 3000,
+    "runner_job_id": "job_fixture",
+    "runner_run_id": "rr_fixture",
+    "sequence": 1,
+    "session_id": "rcs_fixture",
+    "started_at": 4000,
+    "status": "succeeded",
+    "user_message": "inspect the repository",
+    "user_message_id": 11
+  },
+  "started_turn_response": {
+    "job_id": "job_fixture",
+    "session_id": "rcs_fixture",
+    "status": "queued",
+    "turn_id": "rct_fixture"
+  },
+  "turn_list_response": {
+    "turns": [
+      {
+        "assistant_message_id": 12,
+        "completed_at": 5000,
+        "continuation_mode": "replay",
+        "cwd": "/workspace",
+        "final_text": "done",
+        "id": "rct_fixture",
+        "isolation": "host_readonly",
+        "mode": "review",
+        "model": "gpt-5.6-codex",
+        "requested_at": 3000,
+        "runner_job_id": "job_fixture",
+        "runner_run_id": "rr_fixture",
+        "sequence": 1,
+        "session_id": "rcs_fixture",
+        "started_at": 4000,
+        "status": "succeeded",
+        "user_message": "inspect the repository",
+        "user_message_id": 11
+      }
+    ]
+  },
+  "event_response": {
+    "id": 9,
+    "job_id": "job_fixture",
+    "payload": {
+      "delta": "hello",
+      "stream_kind": "assistant_text",
+      "type": "content.delta"
+    },
+    "seq": 3,
+    "stream": "assistant",
+    "text": "hello",
+    "ts": 3000,
+    "turn_id": "rct_fixture",
+    "type": "content.delta"
+  },
+  "event_list_response": {
+    "events": [
+      {
+        "id": 9,
+        "job_id": "job_fixture",
+        "payload": {
+          "delta": "hello",
+          "stream_kind": "assistant_text",
+          "type": "content.delta"
+        },
+        "seq": 3,
+        "stream": "assistant",
+        "text": "hello",
+        "ts": 3000,
+        "turn_id": "rct_fixture",
+        "type": "content.delta"
+      }
+    ]
+  },
+  "turn_abort_response": {
+    "status": "aborting"
+  },
+  "turn_decision_response": {
+    "allowlist_session": true,
+    "approval_id": 42,
+    "decision": "approve",
+    "fallback_to_token": false,
+    "native_continued": true,
+    "route": "native",
+    "status": "ok"
+  },
+  "runner_approval_request": {
+    "allow_session": true,
+    "note": "Approved in OR3 Chat"
+  },
+  "approval_decision_request": {
+    "allowlist": false,
+    "note": "Approved in OR3 Chat"
+  },
+  "approval_deny_response": {
+    "request_id": 42,
+    "status": "denied"
+  },
+  "approval_list_response": {
+    "items": [
+      {
+        "expires_at": 9000,
+        "id": 42,
+        "preview": "write /workspace/example.ts",
+        "requested_at": 6000,
+        "status": "pending",
+        "type": "runner_permission"
+      }
+    ]
+  },
+  "pairing_approve_request": {
+    "pairing_secret": "__PAIRING_SECRET__",
+    "proposal": {
+      "capabilities": ["chat"],
+      "device_name": "OR3 Chat",
+      "requested_role": "operator"
+    },
+    "rendezvous_id": "__RENDEZVOUS_ID__",
+    "trust_level": "trusted"
+  },
+  "pairing_response": {
+    "certificate": {
+      "host_id": "host_fixture",
+      "version": 1
+    },
+    "certificate_hash": "certificate_fixture_hash",
+    "device": {
+      "capabilities": ["chat"],
+      "device_id": "device_fixture",
+      "role": "operator"
+    }
+  },
+  "artifact_response": {
+    "content": "diff --git a/example.ts b/example.ts",
+    "future_artifact_field": "preserved",
+    "id": "artifact_fixture",
+    "mime": "text/x-diff",
+    "offset": 0,
+    "read_bytes": 39,
+    "size_bytes": 39,
+    "truncated": false
+  },
+  "runner_list_response": {
+    "default_runner": "codex",
+    "future_runner_list_field": true,
+    "runners": [
+      {
+        "auth_status": "ready",
+        "chat_capabilities": {
+          "approvalDecisions": true,
+          "cancel": true,
+          "continuation_modes": ["replay", "native"],
+          "customCwd": true
+        },
+        "display_name": "Codex",
+        "future_runner_field": "preserved",
+        "id": "codex",
+        "status": "available",
+        "supports": {
+          "chat": true
+        }
+      }
+    ]
+  },
+  "readiness_response": {
+    "findings": [],
+    "future_readiness_field": "preserved",
+    "ready": false,
+    "status": "blocked",
+    "summary": {
+      "blockCount": 1,
+      "status": "blocked"
+    }
+  },
+  "health_response": {
+    "approvalBrokerAvailable": true,
+    "future_health_field": "preserved",
+    "jobRegistryAvailable": true,
+    "processId": 123,
+    "runtimeAvailable": true,
+    "startedAt": "2026-07-27T10:00:00Z",
+    "status": "ok"
+  },
+  "capabilities_response": {
+    "approvalBroker": {},
+    "approvals": {},
+    "execAvailable": true,
+    "future_capability_field": "preserved",
+    "hostId": "host_fixture",
+    "hosted": false,
+    "networkPolicy": {},
+    "runtimeProfile": "local-dev",
+    "sandboxEnabled": false,
+    "sandboxRequired": false
+  },
+  "capabilities_required": [
+    "runtimeProfile",
+    "hosted",
+    "hostId",
+    "approvalBroker",
+    "approvals",
+    "execAvailable",
+    "sandboxEnabled",
+    "sandboxRequired",
+    "networkPolicy"
+  ],
+  "health_required": [
+    "status",
+    "runtimeAvailable",
+    "jobRegistryAvailable",
+    "approvalBrokerAvailable",
+    "processId",
+    "startedAt"
+  ]
+}

@@ -10,15 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	intdoctor "or3-intern/internal/doctor"
-	"or3-intern/internal/mcp"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
-	"or3-intern/internal/scope"
 	"or3-intern/internal/security"
 )
 
@@ -39,20 +37,12 @@ const (
 var processStartedAt = time.Now().UTC()
 
 type Service struct {
-	Config          config.Config
-	Runtime         *agent.Runtime
-	Broker          *approval.Broker
-	Jobs            *agent.JobRegistry
-	SubagentManager *agent.SubagentManager
-	DB              *db.DB
-	Provider        *providers.Client
-	Audit           *security.AuditLogger
-	MCPStatus       MCPStatusProvider
-}
-
-// MCPStatusProvider exposes runtime MCP connection state to control-plane reports.
-type MCPStatusProvider interface {
-	ServerStatus() map[string]mcp.ServerStatus
+	Config   config.Config
+	Broker   *approval.Broker
+	Jobs     *jobs.Registry
+	DB       *db.DB
+	Provider *providers.Client
+	Audit    *security.AuditLogger
 }
 
 type ApprovalFilter struct {
@@ -62,12 +52,10 @@ type ApprovalFilter struct {
 }
 
 type CapabilitiesProfileSummary struct {
-	Name           string   `json:"name,omitempty"`
-	MaxCapability  string   `json:"maxCapability,omitempty"`
-	AllowedTools   []string `json:"allowedTools,omitempty"`
-	AllowedHosts   []string `json:"allowedHosts,omitempty"`
-	WritablePaths  []string `json:"writablePaths,omitempty"`
-	AllowSubagents bool     `json:"allowSubagents"`
+	Name          string   `json:"name,omitempty"`
+	MaxCapability string   `json:"maxCapability,omitempty"`
+	AllowedHosts  []string `json:"allowedHosts,omitempty"`
+	WritablePaths []string `json:"writablePaths,omitempty"`
 }
 
 type CapabilitiesIngressSummary struct {
@@ -77,27 +65,17 @@ type CapabilitiesIngressSummary struct {
 	Profile       *CapabilitiesProfileSummary `json:"effectiveProfile,omitempty"`
 }
 
-type CapabilitiesMCPServerInfo struct {
-	Name      string `json:"name"`
-	Transport string `json:"transport"`
-	ToolCount int    `json:"toolCount"`
-	Connected bool   `json:"connected"`
-}
-
 type CapabilitiesReport struct {
 	RuntimeProfile     string                       `json:"runtimeProfile"`
 	Hosted             bool                         `json:"hosted"`
 	HostID             string                       `json:"hostId"`
 	ApprovalBroker     map[string]any               `json:"approvalBroker"`
 	Approvals          map[string]string            `json:"approvals"`
-	SubagentsEnabled   bool                         `json:"subagentsEnabled"`
 	SkillExecEnabled   bool                         `json:"skillExecEnabled"`
 	ExecAvailable      bool                         `json:"execAvailable"`
 	ShellModeAvailable bool                         `json:"shellModeAvailable"`
 	SandboxEnabled     bool                         `json:"sandboxEnabled"`
 	SandboxRequired    bool                         `json:"sandboxRequired"`
-	EnabledMCPServers  []CapabilitiesMCPServerInfo  `json:"enabledMcpServers,omitempty"`
-	MCPServers         []CapabilitiesMCPServerInfo  `json:"mcpServers,omitempty"`
 	NetworkPolicy      config.NetworkPolicyConfig   `json:"networkPolicy"`
 	Channels           []CapabilitiesIngressSummary `json:"channels,omitempty"`
 	Triggers           []CapabilitiesIngressSummary `json:"triggers,omitempty"`
@@ -109,7 +87,6 @@ type HealthReport struct {
 	Status                  string `json:"status"`
 	RuntimeAvailable        bool   `json:"runtimeAvailable"`
 	JobRegistryAvailable    bool   `json:"jobRegistryAvailable"`
-	SubagentManagerEnabled  bool   `json:"subagentManagerEnabled"`
 	ApprovalBrokerAvailable bool   `json:"approvalBrokerAvailable"`
 	ProcessID               int    `json:"processId"`
 	StartedAt               string `json:"startedAt"`
@@ -127,8 +104,6 @@ type EmbeddingStatusReport struct {
 	MemoryVectorDims         int    `json:"memoryVectorDims"`
 	StoredEmbedFingerprint   string `json:"storedEmbedFingerprint,omitempty"`
 	CurrentEmbedFingerprint  string `json:"currentEmbedFingerprint,omitempty"`
-	DocIndexEnabled          bool   `json:"docIndexEnabled"`
-	DocRootsConfigured       bool   `json:"docRootsConfigured"`
 	NoteCount                int    `json:"noteCount"`
 	EmbeddedNoteCount        int    `json:"embeddedNoteCount"`
 	VectorRowCount           int    `json:"vectorRowCount"`
@@ -184,20 +159,16 @@ type ScopeLinkResult struct {
 	ScopeKey   string `json:"scopeKey"`
 }
 
-func New(cfg config.Config, rt *agent.Runtime, broker *approval.Broker, jobs *agent.JobRegistry, subagentManager *agent.SubagentManager) *Service {
-	svc := &Service{
-		Config:          cfg,
-		Runtime:         rt,
-		Broker:          broker,
-		Jobs:            jobs,
-		SubagentManager: subagentManager,
+// New builds a control-plane service from explicit runtime dependencies.
+func New(cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker, jobRegistry *jobs.Registry) *Service {
+	return &Service{
+		Config:   cfg,
+		DB:       database,
+		Provider: provider,
+		Audit:    audit,
+		Broker:   broker,
+		Jobs:     jobRegistry,
 	}
-	if rt != nil {
-		svc.DB = rt.DB
-		svc.Provider = rt.Provider
-		svc.Audit = rt.Audit
-	}
-	return svc
 }
 
 func NewLocal(cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker) *Service {
@@ -213,9 +184,8 @@ func NewLocal(cfg config.Config, database *db.DB, provider *providers.Client, au
 func (s *Service) GetHealth() HealthReport {
 	report := HealthReport{
 		Status:                  "ok",
-		RuntimeAvailable:        s != nil && s.Runtime != nil,
+		RuntimeAvailable:        s != nil && s.DB != nil,
 		JobRegistryAvailable:    s != nil && s.Jobs != nil,
-		SubagentManagerEnabled:  s != nil && s.SubagentManager != nil,
 		ApprovalBrokerAvailable: s != nil && s.Broker != nil,
 		ProcessID:               os.Getpid(),
 		StartedAt:               processStartedAt.Format(time.RFC3339Nano),
@@ -247,11 +217,7 @@ func (s *Service) GetCapabilities(channelFilter, triggerFilter string) Capabilit
 		cfg = s.Config
 		broker = s.Broker
 	}
-	var mcpStatus MCPStatusProvider
-	if s != nil {
-		mcpStatus = s.MCPStatus
-	}
-	return CollectCapabilitiesReportWithMCPStatus(cfg, broker, mcpStatus, channelFilter, triggerFilter)
+	return CollectCapabilitiesReport(cfg, broker, channelFilter, triggerFilter)
 }
 
 func (s *Service) ListApprovalRequests(ctx context.Context, filter ApprovalFilter) ([]db.ApprovalRequestRecord, error) {
@@ -398,13 +364,13 @@ func (s *Service) ExchangePairingCode(ctx context.Context, input approval.Pairin
 	return broker.ExchangePairingCode(ctx, input)
 }
 
-func (s *Service) GetJob(jobID string) (agent.JobSnapshot, error) {
+func (s *Service) GetJob(jobID string) (jobs.Snapshot, error) {
 	if s == nil || s.Jobs == nil {
-		return agent.JobSnapshot{}, ErrJobRegistryUnavailable
+		return jobs.Snapshot{}, ErrJobRegistryUnavailable
 	}
 	snapshot, ok := s.Jobs.Snapshot(strings.TrimSpace(jobID))
 	if !ok {
-		return agent.JobSnapshot{}, ErrJobNotFound
+		return jobs.Snapshot{}, ErrJobNotFound
 	}
 	return snapshot, nil
 }
@@ -442,8 +408,6 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatusReport
 		MemoryVectorDims:         dims,
 		StoredEmbedFingerprint:   storedFingerprint,
 		CurrentEmbedFingerprint:  currentFingerprint,
-		DocIndexEnabled:          s.Config.DocIndex.Enabled,
-		DocRootsConfigured:       len(s.Config.DocIndex.Roots) > 0,
 		NoteCount:                health.NoteCount,
 		EmbeddedNoteCount:        health.EmbeddedNoteCount,
 		VectorRowCount:           health.VectorRowCount,
@@ -683,9 +647,6 @@ func (s *Service) requireDB() (*db.DB, error) {
 	if s.DB != nil {
 		return s.DB, nil
 	}
-	if s.Runtime != nil && s.Runtime.DB != nil {
-		return s.Runtime.DB, nil
-	}
 	return nil, ErrDatabaseUnavailable
 }
 
@@ -696,9 +657,6 @@ func (s *Service) requireProvider() (*providers.Client, error) {
 	if s.Provider != nil {
 		return s.Provider, nil
 	}
-	if s.Runtime != nil && s.Runtime.Provider != nil {
-		return s.Runtime.Provider, nil
-	}
 	return nil, ErrProviderUnavailable
 }
 
@@ -708,9 +666,6 @@ func (s *Service) auditLogger() (*security.AuditLogger, bool) {
 	}
 	if s.Audit != nil && s.Audit.DB != nil && len(s.Audit.Key) > 0 {
 		return s.Audit, true
-	}
-	if s.Runtime != nil && s.Runtime.Audit != nil && s.Runtime.Audit.DB != nil && len(s.Runtime.Audit.Key) > 0 {
-		return s.Runtime.Audit, true
 	}
 	return nil, false
 }
@@ -752,54 +707,26 @@ func rebuildMemoryEmbeddings(ctx context.Context, database *db.DB, provider *pro
 }
 
 func rebuildDocEmbeddings(ctx context.Context, cfg config.Config, database *db.DB, provider *providers.Client, fingerprint string) (bool, []string, error) {
-	if !cfg.DocIndex.Enabled {
-		return false, []string{"doc_index_disabled"}, nil
-	}
-	if len(cfg.DocIndex.Roots) == 0 {
-		return false, []string{"doc_index_no_roots"}, nil
-	}
-	indexer := &memory.DocIndexer{
-		DB: database,
-		Config: memory.DocIndexConfig{
-			Roots:          cfg.DocIndex.Roots,
-			MaxFiles:       cfg.DocIndex.MaxFiles,
-			MaxFileBytes:   cfg.DocIndex.MaxFileBytes,
-			MaxChunks:      cfg.DocIndex.MaxChunks,
-			EmbedMaxBytes:  cfg.DocIndex.EmbedMaxBytes,
-			RefreshSeconds: cfg.DocIndex.RefreshSeconds,
-			RetrieveLimit:  cfg.DocIndex.RetrieveLimit,
-		},
-	}
-	if err := indexer.SyncRoots(ctx, scope.GlobalMemoryScope); err != nil {
-		return false, nil, err
-	}
-	return true, nil, nil
+	return false, []string{"doc_rebuild_unavailable"}, nil
 }
 
 func CollectCapabilitiesReport(cfg config.Config, broker *approval.Broker, channelFilter, triggerFilter string) CapabilitiesReport {
-	return CollectCapabilitiesReportWithMCPStatus(cfg, broker, nil, channelFilter, triggerFilter)
-}
-
-func CollectCapabilitiesReportWithMCPStatus(cfg config.Config, broker *approval.Broker, mcpStatus MCPStatusProvider, channelFilter, triggerFilter string) CapabilitiesReport {
 	spec := config.ProfileSpec(cfg.RuntimeProfile)
 	report := CapabilitiesReport{
 		RuntimeProfile:     string(cfg.RuntimeProfile),
 		Hosted:             spec.Hosted,
 		HostID:             cfg.Security.Approvals.HostID,
 		Approvals:          ApprovalModes(cfg),
-		SubagentsEnabled:   cfg.Subagents.Enabled,
-		SkillExecEnabled:   cfg.Skills.EnableExec && cfg.Hardening.PrivilegedTools && !spec.ForbidPrivilegedTools,
-		ExecAvailable:      cfg.Hardening.GuardedTools && (!spec.RequireSandboxForExec || cfg.Hardening.Sandbox.Enabled),
-		ShellModeAvailable: cfg.Hardening.GuardedTools && cfg.Hardening.PrivilegedTools && cfg.Hardening.EnableExecShell && !spec.ForbidExecShell && !spec.ForbidPrivilegedTools && (!spec.RequireSandboxForExec || cfg.Hardening.Sandbox.Enabled),
+		SkillExecEnabled:   false,
+		ExecAvailable:      false,
+		ShellModeAvailable: false,
 		SandboxEnabled:     cfg.Hardening.Sandbox.Enabled,
 		SandboxRequired:    spec.RequireSandboxForExec,
 		NetworkPolicy:      cfg.Security.Network,
 		HeartbeatEnabled:   cfg.Heartbeat.Enabled,
 		CronEnabled:        cfg.Cron.Enabled,
-		ApprovalBroker: approvalBrokerCapabilities(cfg, broker),
+		ApprovalBroker:     approvalBrokerCapabilities(cfg, broker),
 	}
-	report.MCPServers = mcpServerCapabilities(cfg, mcpStatus)
-	report.EnabledMCPServers = enabledMCPServers(report.MCPServers, cfg)
 	report.Channels = collectChannelCapabilities(cfg, channelFilter)
 	report.Triggers = collectTriggerCapabilities(cfg, triggerFilter)
 	return report
@@ -816,30 +743,11 @@ func ApprovalModes(cfg config.Config) map[string]string {
 }
 
 func approvalBrokerCapabilities(cfg config.Config, broker *approval.Broker) map[string]any {
-	moderator := map[string]any{
-		"enabled":       cfg.Security.Approvals.Moderator.Enabled && cfg.Security.Approvals.Enabled,
-		"preset":        string(cfg.Security.Approvals.Moderator.Preset),
-		"failureAction": string(cfg.Security.Approvals.Moderator.FailureAction),
-		"actions": map[string]string{
-			"low":     string(cfg.Security.Approvals.Moderator.EffectiveActions().Low),
-			"medium":  string(cfg.Security.Approvals.Moderator.EffectiveActions().Medium),
-			"high":    string(cfg.Security.Approvals.Moderator.EffectiveActions().High),
-			"extreme": string(cfg.Security.Approvals.Moderator.EffectiveActions().Extreme),
-		},
-	}
-	if broker != nil && broker.Moderator != nil {
-		moderator["model"] = broker.Moderator.ModelIdentity()
-		moderator["policyHash"] = broker.Moderator.PolicyHash()
-		moderator["available"] = true
-	} else {
-		moderator["available"] = false
-	}
 	return map[string]any{
 		"enabled":       cfg.Security.Approvals.Enabled,
 		"required":      approvalBrokerRequired(cfg),
 		"available":     broker != nil,
 		"canIssueToken": broker != nil && len(broker.SignKey) > 0,
-		"moderator":     moderator,
 	}
 }
 
@@ -928,51 +836,16 @@ func effectiveProfileSummary(cfg config.Config, name string) *CapabilitiesProfil
 	if !ok {
 		return &CapabilitiesProfileSummary{Name: name}
 	}
-	allowedTools := append([]string{}, profile.AllowedTools...)
-	sort.Strings(allowedTools)
 	allowedHosts := append([]string{}, profile.AllowedHosts...)
 	sort.Strings(allowedHosts)
 	writablePaths := append([]string{}, profile.WritablePaths...)
 	sort.Strings(writablePaths)
 	return &CapabilitiesProfileSummary{
-		Name:           name,
-		MaxCapability:  strings.TrimSpace(profile.MaxCapability),
-		AllowedTools:   allowedTools,
-		AllowedHosts:   allowedHosts,
-		WritablePaths:  writablePaths,
-		AllowSubagents: profile.AllowSubagents,
+		Name:          name,
+		MaxCapability: strings.TrimSpace(profile.MaxCapability),
+		AllowedHosts:  allowedHosts,
+		WritablePaths: writablePaths,
 	}
-}
-
-func mcpServerCapabilities(cfg config.Config, provider MCPStatusProvider) []CapabilitiesMCPServerInfo {
-	statuses := map[string]mcp.ServerStatus{}
-	if provider != nil {
-		statuses = provider.ServerStatus()
-	}
-	out := make([]CapabilitiesMCPServerInfo, 0, len(cfg.Tools.MCPServers))
-	for name, server := range cfg.Tools.MCPServers {
-		status := statuses[name]
-		out = append(out, CapabilitiesMCPServerInfo{
-			Name:      name,
-			Transport: strings.TrimSpace(server.Transport),
-			ToolCount: status.ToolCount,
-			Connected: status.Connected,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
-	})
-	return out
-}
-
-func enabledMCPServers(items []CapabilitiesMCPServerInfo, cfg config.Config) []CapabilitiesMCPServerInfo {
-	out := make([]CapabilitiesMCPServerInfo, 0, len(items))
-	for _, item := range items {
-		if cfg.Tools.MCPServers[item.Name].Enabled {
-			out = append(out, item)
-		}
-	}
-	return out
 }
 
 func hasNonEmpty(values []string) bool {
@@ -1022,7 +895,7 @@ func approvalBrokerRequired(cfg config.Config) bool {
 	return false
 }
 
-func BuildJobResponse(snapshot agent.JobSnapshot) map[string]any {
+func BuildJobResponse(snapshot jobs.Snapshot) map[string]any {
 	response := map[string]any{
 		"job_id": snapshot.ID,
 		"kind":   snapshot.Kind,
@@ -1044,74 +917,12 @@ func BuildJobResponse(snapshot agent.JobSnapshot) map[string]any {
 	return response
 }
 
-func BuildJobSnapshotResponse(snapshot agent.JobSnapshot) map[string]any {
+func BuildJobSnapshotResponse(snapshot jobs.Snapshot) map[string]any {
 	response := BuildJobResponse(snapshot)
 	response["created_at"] = snapshot.CreatedAt
 	response["updated_at"] = snapshot.UpdatedAt
 	response["events"] = snapshot.Events
 	return response
-}
-
-// BuildSubagentJobResponse converts a persisted subagent_jobs row into a
-// sanitized JSON map for the agents API. It deliberately omits raw metadata
-// JSON, approval tokens, and any internal scratch fields.
-func BuildSubagentJobResponse(job db.SubagentJob) map[string]any {
-	out := map[string]any{
-		"job_id":             job.ID,
-		"kind":               "subagent",
-		"parent_session_key": job.ParentSessionKey,
-		"child_session_key":  job.ChildSessionKey,
-		"task":               job.Task,
-		"status":             job.Status,
-		"requested_at":       formatSubagentTime(job.RequestedAt),
-		"updated_at":         formatSubagentTime(latestSubagentTimestamp(job)),
-	}
-	if preview := strings.TrimSpace(job.ResultPreview); preview != "" {
-		out["result_preview"] = preview
-	}
-	if artifact := strings.TrimSpace(job.ArtifactID); artifact != "" {
-		out["artifact_id"] = artifact
-	}
-	if errText := strings.TrimSpace(job.ErrorText); errText != "" {
-		out["error"] = errText
-	}
-	if job.StartedAt > 0 {
-		out["started_at"] = formatSubagentTime(job.StartedAt)
-	}
-	if job.FinishedAt > 0 {
-		out["finished_at"] = formatSubagentTime(job.FinishedAt)
-	}
-	if job.Attempts > 0 {
-		out["attempts"] = job.Attempts
-	}
-	return out
-}
-
-// BuildSubagentJobListResponse renders a list of persisted subagent jobs.
-func BuildSubagentJobListResponse(jobs []db.SubagentJob) map[string]any {
-	items := make([]map[string]any, 0, len(jobs))
-	for _, job := range jobs {
-		items = append(items, BuildSubagentJobResponse(job))
-	}
-	return map[string]any{"items": items}
-}
-
-func latestSubagentTimestamp(job db.SubagentJob) int64 {
-	latest := job.RequestedAt
-	if job.StartedAt > latest {
-		latest = job.StartedAt
-	}
-	if job.FinishedAt > latest {
-		latest = job.FinishedAt
-	}
-	return latest
-}
-
-func formatSubagentTime(ms int64) string {
-	if ms <= 0 {
-		return ""
-	}
-	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
 func DescribeUnavailable(err error) error {
@@ -1131,21 +942,22 @@ func DescribeUnavailable(err error) error {
 	}
 }
 
-// BuildAgentCLIRunResponse converts a persisted agent_cli_runs row into a
+// BuildRunnerRunResponse converts a persisted runner_runs row into a
 // sanitized JSON map for the agents API.
-func BuildAgentCLIRunResponse(run db.AgentCLIRun) map[string]any {
+func BuildRunnerRunResponse(run db.RunnerRun) map[string]any {
+	displayTask := displayTaskForRunnerRun(run)
 	out := map[string]any{
 		"job_id":             run.JobID,
 		"run_id":             run.ID,
-		"kind":               "agent_cli:" + run.RunnerID,
+		"kind":               "runner:" + run.RunnerID,
 		"runner_id":          run.RunnerID,
 		"parent_session_key": run.ParentSessionKey,
-		"task":               run.Task,
+		"task":               displayTask,
 		"mode":               run.Mode,
 		"isolation":          run.Isolation,
 		"status":             run.Status,
-		"requested_at":       formatAgentCLITime(run.RequestedAt),
-		"updated_at":         formatAgentCLITime(latestAgentCLITimestamp(run)),
+		"requested_at":       formatRunnerRunTime(run.RequestedAt),
+		"updated_at":         formatRunnerRunTime(latestRunnerRunTimestamp(run)),
 	}
 	if preview := strings.TrimSpace(run.StdoutPreview); preview != "" {
 		out["output_preview"] = preview
@@ -1160,10 +972,10 @@ func BuildAgentCLIRunResponse(run db.AgentCLIRun) map[string]any {
 		out["error"] = errMsg
 	}
 	if run.StartedAt > 0 {
-		out["started_at"] = formatAgentCLITime(run.StartedAt)
+		out["started_at"] = formatRunnerRunTime(run.StartedAt)
 	}
 	if run.CompletedAt > 0 {
-		out["completed_at"] = formatAgentCLITime(run.CompletedAt)
+		out["completed_at"] = formatRunnerRunTime(run.CompletedAt)
 	}
 	if run.TimeoutSeconds > 0 {
 		out["timeout_seconds"] = run.TimeoutSeconds
@@ -1177,20 +989,36 @@ func BuildAgentCLIRunResponse(run db.AgentCLIRun) map[string]any {
 	if model := strings.TrimSpace(run.Model); model != "" {
 		out["model"] = model
 	}
+	if displayTask != strings.TrimSpace(run.Task) {
+		out["execution_prompt_injected"] = true
+	}
 	return out
 }
 
-// BuildAgentCLIRunListResponse renders a list of persisted agent CLI runs.
-func BuildAgentCLIRunListResponse(runs []db.AgentCLIRun) map[string]any {
+func displayTaskForRunnerRun(run db.RunnerRun) string {
+	meta := map[string]any{}
+	if strings.TrimSpace(run.MetaJSON) != "" && strings.TrimSpace(run.MetaJSON) != "{}" {
+		_ = json.Unmarshal([]byte(run.MetaJSON), &meta)
+	}
+	for _, key := range []string{"ui_task", "runner_chat_user_message"} {
+		if value, ok := meta[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(run.Task)
+}
+
+// BuildRunnerRunListResponse renders a list of persisted runner runs.
+func BuildRunnerRunListResponse(runs []db.RunnerRun) map[string]any {
 	items := make([]map[string]any, 0, len(runs))
 	for _, run := range runs {
-		items = append(items, BuildAgentCLIRunResponse(run))
+		items = append(items, BuildRunnerRunResponse(run))
 	}
 	return map[string]any{"items": items}
 }
 
-// BuildAgentCLIEventListResponse renders a list of persisted agent CLI events.
-func BuildAgentCLIEventListResponse(events []db.AgentCLIEvent) map[string]any {
+// BuildRunnerRunEventListResponse renders a list of persisted runner run events.
+func BuildRunnerRunEventListResponse(events []db.RunnerRunEvent) map[string]any {
 	items := make([]map[string]any, 0, len(events))
 	for _, e := range events {
 		item := map[string]any{
@@ -1208,7 +1036,7 @@ func BuildAgentCLIEventListResponse(events []db.AgentCLIEvent) map[string]any {
 	return map[string]any{"events": items}
 }
 
-func latestAgentCLITimestamp(run db.AgentCLIRun) int64 {
+func latestRunnerRunTimestamp(run db.RunnerRun) int64 {
 	latest := run.RequestedAt
 	if run.StartedAt > latest {
 		latest = run.StartedAt
@@ -1219,7 +1047,7 @@ func latestAgentCLITimestamp(run db.AgentCLIRun) int64 {
 	return latest
 }
 
-func formatAgentCLITime(ms int64) string {
+func formatRunnerRunTime(ms int64) string {
 	if ms <= 0 {
 		return ""
 	}

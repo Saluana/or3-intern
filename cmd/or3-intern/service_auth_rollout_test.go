@@ -76,68 +76,6 @@ func TestServiceAuthMiddleware_AppBootstrapRequiresBearer(t *testing.T) {
 	}
 }
 
-func TestServiceAuthMiddleware_RolloutModesForLegacyPairedTokens(t *testing.T) {
-	ctx := context.Background()
-	database, cleanup := openServiceTestDB(t)
-	defer cleanup()
-	cfg := rolloutAuthTestConfig(config.AuthEnforcementOff)
-	broker := &approval.Broker{DB: database, Config: cfg.Security.Approvals}
-	_, token, err := broker.RotateDeviceToken(ctx, "device-1", approval.RoleAdmin, "Legacy App", nil)
-	if err != nil {
-		t.Fatalf("RotateDeviceToken: %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		mode       config.AuthEnforcementMode
-		path       string
-		method     string
-		wantStatus int
-		wantCode   string
-		wantWarn   string
-	}{
-		{name: "off allows sensitive paired token workflow", mode: config.AuthEnforcementOff, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusOK},
-		{name: "warn allows sensitive paired token workflow with header", mode: config.AuthEnforcementWarn, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusOK, wantWarn: auth.CodeSessionRequired},
-		{name: "enforce sensitive blocks paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/configure/security", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive keeps doctor status paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/status", method: http.MethodGet, wantStatus: http.StatusOK},
-		{name: "enforce sensitive blocks doctor skill diagnostics paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/skills/demo/diagnostics", method: http.MethodGet, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive blocks doctor apply paired token without passkey", mode: config.AuthEnforcementSensitive, path: "/internal/v1/doctor/plans/plan-1/apply", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce sensitive keeps low risk paired token workflow", mode: config.AuthEnforcementSensitive, path: "/internal/v1/turns", method: http.MethodPost, wantStatus: http.StatusOK},
-		{name: "enforce session blocks low risk paired token without session", mode: config.AuthEnforcementSession, path: "/internal/v1/turns", method: http.MethodPost, wantStatus: http.StatusUnauthorized, wantCode: auth.CodeSessionRequired},
-		{name: "enforce session allows paired token for passkey login begin", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/begin", method: http.MethodPost, wantStatus: http.StatusOK},
-		{name: "enforce session allows paired token for passkey login finish", mode: config.AuthEnforcementSession, path: "/internal/v1/auth/passkeys/login/finish", method: http.MethodPost, wantStatus: http.StatusOK},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := rolloutAuthTestConfig(tc.mode)
-			handler := serviceAuthMiddlewareWithBroker(cfg, broker, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
-			}))
-			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
-			req.Header.Set("Authorization", "Bearer "+token)
-			rec := httptest.NewRecorder()
-
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("expected status %d, got %d (%s)", tc.wantStatus, rec.Code, rec.Body.String())
-			}
-			if tc.wantWarn != "" && rec.Header().Get("X-Or3-Auth-Warning") != tc.wantWarn {
-				t.Fatalf("expected warning %q, got %q", tc.wantWarn, rec.Header().Get("X-Or3-Auth-Warning"))
-			}
-			if tc.wantCode != "" {
-				var payload map[string]any
-				if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-					t.Fatalf("decode response: %v", err)
-				}
-				if payload["code"] != tc.wantCode {
-					t.Fatalf("expected code %q, got %#v", tc.wantCode, payload)
-				}
-			}
-		})
-	}
-}
-
 func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 	ctx := context.Background()
 	database, cleanup := openServiceTestDB(t)
@@ -176,7 +114,7 @@ func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 				identity := serviceAuthIdentityFromContext(r.Context())
 				writeServiceJSON(w, http.StatusOK, map[string]any{"kind": identity.Kind})
 			}))
-			req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+			req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-rollout", nil)
 			req.Header.Set("Authorization", "Bearer "+tc.token)
 			if tc.method != "" {
 				req.Header.Set("X-Or3-Auth-Method", tc.method)
@@ -196,6 +134,91 @@ func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 				t.Fatalf("expected code %q, got %#v", tc.wantCode, payload)
 			}
 		})
+	}
+}
+
+func TestServiceConnectIdentityAllowsOnlyConnectSurface(t *testing.T) {
+	identity := serviceAuthIdentity{
+		Kind:      "paired-device",
+		Role:      approval.RoleConnect,
+		Namespace: "or3-chat:workspace-a:",
+	}
+	tests := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{http.MethodGet, "/internal/v1/capabilities", true},
+		{http.MethodGet, "/internal/v1/chat-runners", true},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions", true},
+		{http.MethodGet, "/internal/v1/runner-chat/sessions/session-a/turns/turn-a/stream", true},
+		{http.MethodGet, "/internal/v1/artifacts/artifact-a", true},
+		{http.MethodGet, "/internal/v1/files/roots", true},
+		{http.MethodPost, "/internal/v1/files/mkdir", true},
+		{http.MethodPost, "/internal/v1/files/upload", true},
+		{http.MethodGet, "/internal/v1/approvals", false},
+		{http.MethodGet, "/internal/v1/configure", false},
+		{http.MethodGet, "/internal/v1/terminal/sessions", false},
+		{http.MethodPost, "/internal/v1/artifacts", false},
+		{http.MethodGet, "/internal/v1/files/read", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if got := serviceConnectIdentityAllowsRequest(identity, req); got != tt.want {
+				t.Fatalf("serviceConnectIdentityAllowsRequest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	missingScope := identity
+	missingScope.Namespace = ""
+	if serviceConnectIdentityAllowsRequest(missingScope, httptest.NewRequest(http.MethodGet, "/internal/v1/chat-runners", nil)) {
+		t.Fatal("Connect identity without a namespace was allowed")
+	}
+}
+
+func TestServiceAuthMiddleware_ConnectTokenCarriesNamespaceAndCannotEscapeSurface(t *testing.T) {
+	ctx := context.Background()
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementSensitive)
+	broker := &approval.Broker{DB: database, Config: cfg.Security.Approvals}
+	const token = "connect-token-that-is-at-least-thirty-two-bytes-long"
+	if _, err := broker.RegisterDeviceToken(
+		ctx,
+		"or3-connect:env-a",
+		token,
+		approval.RoleConnect,
+		"Studio Mac",
+		map[string]any{"connect_namespace": "or3-chat:workspace-a:"},
+	); err != nil {
+		t.Fatalf("RegisterDeviceToken: %v", err)
+	}
+	handler := serviceAuthMiddlewareWithBroker(cfg, broker, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity := serviceAuthIdentityFromContext(r.Context())
+		writeServiceJSON(w, http.StatusOK, map[string]any{"namespace": identity.Namespace})
+	}))
+
+	allowed := httptest.NewRequest(http.MethodGet, "/internal/v1/capabilities", nil)
+	allowed.Header.Set("Authorization", "Bearer "+token)
+	allowed.Header.Set("X-Or3-Auth-Method", "paired-device")
+	allowedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(allowedRecorder, allowed)
+	if allowedRecorder.Code != http.StatusOK {
+		t.Fatalf("allowed status = %d (%s)", allowedRecorder.Code, allowedRecorder.Body.String())
+	}
+	if payload := mustDecodeJSONBody(t, allowedRecorder.Body); payload["namespace"] != "or3-chat:workspace-a:" {
+		t.Fatalf("namespace payload = %#v", payload)
+	}
+
+	forbidden := httptest.NewRequest(http.MethodGet, "/internal/v1/approvals", nil)
+	forbidden.Header.Set("Authorization", "Bearer "+token)
+	forbidden.Header.Set("X-Or3-Auth-Method", "paired-device")
+	forbiddenRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(forbiddenRecorder, forbidden)
+	if forbiddenRecorder.Code != http.StatusForbidden {
+		t.Fatalf("forbidden status = %d (%s)", forbiddenRecorder.Code, forbiddenRecorder.Body.String())
 	}
 }
 
@@ -262,7 +285,7 @@ func TestServiceAuthMiddleware_EnforcementReturnsUpgradeGuidanceErrors(t *testin
 	handler := serviceAuthMiddlewareWithBroker(cfg, nil, authSvc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/internal/v1/turns", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/jobs/job-rollout", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -307,7 +330,6 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/v1/terminal/sessions/term-1/input", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodGet, path: "/internal/v1/approvals", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/approvals/12/approve", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
-		{method: http.MethodPost, path: "/internal/v1/devices/device-1/revoke", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/configure/security", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodGet, path: "/internal/v1/doctor/status", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/doctor/run", want: serviceRouteLowRisk},
@@ -327,7 +349,6 @@ func TestServiceRouteRequirementForRequest_SensitivityMatrix(t *testing.T) {
 		{method: http.MethodGet, path: "/internal/v1/secure-connections/devices", want: serviceRouteSensitive, sessionOnly: true, stepUpOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/intents", want: serviceRouteLowRisk, sessionOnly: true},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/approve", want: serviceRouteLowRisk},
-		{method: http.MethodPost, path: "/internal/v1/secure-connections/pairing/exchange", want: serviceRouteLowRisk},
 		{method: http.MethodPost, path: "/internal/v1/secure-connections/sessions", want: serviceRouteLowRisk},
 	}
 	for _, tc := range tests {
@@ -368,7 +389,7 @@ func rolloutAuthTestConfig(mode config.AuthEnforcementMode) config.Config {
 	cfg.Auth.SessionIdleTTLSeconds = 300
 	cfg.Auth.SessionAbsoluteTTLSeconds = 3600
 	cfg.Auth.StepUpTTLSeconds = 120
-	cfg.Auth.FallbackPolicy = config.AuthFallbackPairedTokenPlusWarn
+	cfg.Auth.FallbackPolicy = config.AuthFallbackAdminRecoveryOnly
 	cfg.Auth.EnforcementMode = mode
 	cfg.Auth.RequirePasskeyForSensitive = true
 	return cfg

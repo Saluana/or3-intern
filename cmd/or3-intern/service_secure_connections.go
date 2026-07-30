@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log"
@@ -39,7 +38,7 @@ func (s *serviceServer) secureConnectionTrustStore(ctx context.Context) (*secure
 func (s *serviceServer) handleSecureConnections(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/secure-connections")
 	path = strings.Trim(path, "/")
-	if path != "pairing/approve" && path != "pairing/exchange" && path != "sessions" {
+	if path != "pairing/approve" && path != "sessions" {
 		if !requireServiceRole(w, r, approval.RoleOperator) {
 			return
 		}
@@ -70,8 +69,6 @@ func (s *serviceServer) handleSecureConnections(w http.ResponseWriter, r *http.R
 		s.handleSecureConnectionPairingIntent(w, r, store)
 	case path == "pairing/approve":
 		s.handleSecureConnectionPairingApprove(w, r, store)
-	case path == "pairing/exchange":
-		s.handleSecureConnectionPairingExchange(w, r, store)
 	case path == "sessions":
 		s.handleSecureConnectionSessions(w, r, store)
 	case path == "sessions/expire":
@@ -340,107 +337,7 @@ func (s *serviceServer) handleSecureConnectionPairingApprove(w http.ResponseWrit
 		return
 	}
 	hash, _ := secureconn.EnrollmentCertificateHash(cert)
-	response := map[string]any{"certificate": cert, "certificate_hash": hash, "device": rec}
-	if s.broker != nil && s.config.Auth.AllowPairedTokenFallback {
-		legacyDevice, token, err := s.broker.RotateDeviceToken(r.Context(), rec.DeviceID, rec.Role, rec.DisplayName, map[string]any{
-			"secure_connection": true,
-			"host_id":           rec.HostID,
-			"trust_level":       rec.TrustLevel,
-		})
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "secure compatibility token failed", err)
-			return
-		}
-		response["paired_token"] = token
-		response["paired_device"] = legacyDevice
-	}
-	writeServiceJSON(w, http.StatusCreated, response)
-}
-
-func (s *serviceServer) handleSecureConnectionPairingExchange(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {
-	if r.Method != http.MethodPost {
-		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		return
-	}
-	if s.broker == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "pairing broker unavailable"})
-		return
-	}
-	limitServiceRequestBody(w, r, servicePairingBodyLimit)
-	var body struct {
-		RendezvousID  string `json:"rendezvous_id"`
-		PairingSecret string `json:"pairing_secret"`
-		DeviceName    string `json:"device_name"`
-	}
-	if err := decodeServiceRequestBody(r.Body, &body); err != nil {
-		writeServiceRequestDecodeError(w, err)
-		return
-	}
-	rendezvousID := strings.TrimSpace(body.RendezvousID)
-	pairingSecret := strings.TrimSpace(body.PairingSecret)
-	if rendezvousID == "" || pairingSecret == "" {
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_INCOMPLETE", "This code expired. Refresh the QR on your computer.")
-		return
-	}
-	session, err := store.DB.GetSecureConnectionPairingSession(r.Context(), rendezvousID)
-	if err != nil {
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_NOT_FOUND", "This code expired. Refresh the QR on your computer.")
-		return
-	}
-	nowMS := time.Now().UTC().UnixMilli()
-	if session.HostID != store.Identity.HostID {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "pairing session belongs to another computer"})
-		return
-	}
-	if session.ExpiresAt <= nowMS {
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, secureconn.ErrorPairingExpired, "This code expired. Refresh the QR on your computer.")
-		return
-	}
-	if session.Status != secureconn.StatusCreated && session.Status != secureconn.StatusJoined && session.Status != secureconn.StatusPendingApproval {
-		writeSecurePairingFriendlyError(w, http.StatusConflict, secureconn.ErrorPairingConsumed, "This code was already used. Refresh the QR.")
-		return
-	}
-	commitment, err := secureconn.RendezvousCommitment(pairingSecret)
-	if err != nil {
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_INVALID", "This code expired. Refresh the QR on your computer.")
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(commitment), []byte(session.SecretCommitment)) != 1 {
-		writeSecurePairingFriendlyError(w, http.StatusBadRequest, "PAIRING_INVALID", "This code expired. Refresh the QR on your computer.")
-		return
-	}
-	deviceName := normalizeDeviceName(body.DeviceName)
-	ok, err := store.DB.CompareAndSwapSecureConnectionPairingStatus(r.Context(), rendezvousID, session.Status, secureconn.StatusConsumed, nowMS)
-	if err != nil {
-		writeServiceError(w, r, http.StatusBadRequest, "pairing session update failed", err)
-		return
-	}
-	if !ok {
-		writeSecurePairingFriendlyError(w, http.StatusConflict, secureconn.ErrorPairingConsumed, "This code was already used. Refresh the QR.")
-		return
-	}
-	// Also consume the relay rendezvous record to prevent relay-level replay.
-	// If the relay rendezvous is already consumed or missing, the pairing
-	// session CAS already succeeded — the exchange is still valid, but we
-	// log the mismatch for audit.
-	if _, relayErr := store.DB.ConsumeRelayRendezvous(r.Context(), rendezvousID, nowMS); relayErr != nil {
-		auditCtx := r.Context()
-		s.auditSecureConnection(auditCtx, "secure_connection.pairing_exchange_relay_consume_failed", "", "", map[string]any{
-			"rendezvous_id": rendezvousID,
-			"error":         relayErr.Error(),
-		})
-	}
-	deviceID := "secure-qr:" + secureconn.HashBase64URL([]byte(rendezvousID), []byte(deviceName))
-	device, token, err := s.broker.RotateDeviceToken(r.Context(), deviceID, session.RequestedRole, deviceName, map[string]any{
-		"secure_qr_compatibility": true,
-		"host_id":                 session.HostID,
-		"rendezvous_id":           rendezvousID,
-	})
-	if err != nil {
-		writeServiceError(w, r, http.StatusBadRequest, "pairing token creation failed", err)
-		return
-	}
-	writeServiceJSON(w, http.StatusCreated, map[string]any{"token": token, "device": device, "role": device.Role, "device_id": device.DeviceID})
+	writeServiceJSON(w, http.StatusCreated, map[string]any{"certificate": cert, "certificate_hash": hash, "device": rec})
 }
 
 func (s *serviceServer) handleSecureConnectionSessions(w http.ResponseWriter, r *http.Request, store *secureconn.TrustStore) {
@@ -588,10 +485,11 @@ func (s *serviceServer) handleSecureConnectionSessionAction(w http.ResponseWrite
 }
 
 func (s *serviceServer) auditSecureConnection(ctx context.Context, eventType, sessionID, actor string, payload map[string]any) {
-	if s == nil || s.runtime == nil || s.runtime.Audit == nil {
+	audit := s.serviceAudit()
+	if s == nil || audit == nil {
 		return
 	}
-	_ = s.runtime.Audit.Record(ctx, eventType, sessionID, actor, payload)
+	_ = audit.Record(ctx, eventType, sessionID, actor, payload)
 }
 
 func validatePairingIntentTTL(ttlSeconds int) time.Duration {

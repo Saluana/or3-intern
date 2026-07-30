@@ -14,34 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/config"
+	"or3-intern/internal/controlplane"
+	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	"or3-intern/internal/security"
-	"or3-intern/internal/tools"
 )
-
-type serviceTurnRequestFixture struct {
-	SessionKey    string         `json:"session_key"`
-	Message       string         `json:"message"`
-	AllowedTools  []string       `json:"allowed_tools"`
-	RestrictTools bool           `json:"restrict_tools"`
-	Meta          map[string]any `json:"meta"`
-	ProfileName   string         `json:"profile_name"`
-	ApprovalToken string         `json:"approval_token"`
-}
-
-type serviceSubagentRequestFixture struct {
-	ParentSessionKey string         `json:"parent_session_key"`
-	Task             string         `json:"task"`
-	AllowedTools     []string       `json:"allowed_tools"`
-	RestrictTools    bool           `json:"restrict_tools"`
-	TimeoutSeconds   int            `json:"timeout_seconds"`
-	Meta             map[string]any `json:"meta"`
-	ProfileName      string         `json:"profile_name"`
-	Channel          string         `json:"channel"`
-	ReplyTo          string         `json:"reply_to"`
-	ApprovalToken    string         `json:"approval_token"`
-}
 
 type serviceAppUsageRouteFixture struct {
 	Area   string `json:"area"`
@@ -49,166 +27,251 @@ type serviceAppUsageRouteFixture struct {
 	Path   string `json:"path"`
 }
 
+type externalAgentProtocolFixture struct {
+	CreateSessionRequest    map[string]any `json:"create_session_request"`
+	SessionResponse         map[string]any `json:"session_response"`
+	SessionListResponse     map[string]any `json:"session_list_response"`
+	TurnResponse            map[string]any `json:"turn_response"`
+	StartedTurnResponse     map[string]any `json:"started_turn_response"`
+	TurnListResponse        map[string]any `json:"turn_list_response"`
+	EventResponse           map[string]any `json:"event_response"`
+	EventListResponse       map[string]any `json:"event_list_response"`
+	TurnAbortResponse       map[string]any `json:"turn_abort_response"`
+	TurnDecisionResponse    map[string]any `json:"turn_decision_response"`
+	RunnerApprovalRequest   map[string]any `json:"runner_approval_request"`
+	ApprovalDecisionRequest map[string]any `json:"approval_decision_request"`
+	ApprovalDenyResponse    map[string]any `json:"approval_deny_response"`
+	ApprovalListResponse    map[string]any `json:"approval_list_response"`
+	PairingApproveRequest   map[string]any `json:"pairing_approve_request"`
+	PairingResponse         map[string]any `json:"pairing_response"`
+	ArtifactResponse        map[string]any `json:"artifact_response"`
+	RunnerListResponse      map[string]any `json:"runner_list_response"`
+	ReadinessResponse       map[string]any `json:"readiness_response"`
+	HealthResponse          map[string]any `json:"health_response"`
+	CapabilitiesResponse    map[string]any `json:"capabilities_response"`
+	CapabilitiesRequired    []string       `json:"capabilities_required"`
+	HealthRequired          []string       `json:"health_required"`
+}
+
 func TestOr3NetCompatibilityFixtures_RequestDecoding(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(serviceTestTool{name: "read_file"})
-	registry.Register(serviceTestTool{name: "write_file"})
+	var fixture externalAgentProtocolFixture
+	loadFixtureJSON(t, "service_contract/external-agent-protocol.json", &fixture)
 
-	t.Run("turn request", func(t *testing.T) {
-		var expected serviceTurnRequestFixture
-		loadFixtureJSON(t, "service_contract/turn-request.decoded.json", &expected)
-		body := loadFixtureString(t, "service_contract/turn-request.json")
-		actual, err := decodeServiceTurnRequest(strings.NewReader(body), registry)
+	t.Run("create runner chat session", func(t *testing.T) {
+		body, err := json.Marshal(fixture.CreateSessionRequest)
 		if err != nil {
-			t.Fatalf("decodeServiceTurnRequest: %v", err)
+			t.Fatalf("Marshal: %v", err)
 		}
-		got := serviceTurnRequestFixture{
-			SessionKey:    actual.SessionKey,
-			Message:       actual.Message,
-			AllowedTools:  actual.AllowedTools,
-			RestrictTools: actual.RestrictTools,
-			Meta:          actual.Meta,
-			ProfileName:   actual.ProfileName,
-			ApprovalToken: actual.ApprovalToken,
+		var request runnerChatCreateSessionRequest
+		if err := decodeServiceJSONLoose(strings.NewReader(string(body)), &request); err != nil {
+			t.Fatalf("decodeServiceJSONLoose: %v", err)
 		}
-		if !reflect.DeepEqual(got, expected) {
-			t.Fatalf("decoded turn request mismatch\nexpected: %#v\ngot: %#v", expected, got)
+		if request.AppSessionKey != "or3-chat:workspace-1" ||
+			request.RunnerID != "codex" ||
+			request.ContinuationMode != "replay" ||
+			request.Mode != "review" ||
+			request.Isolation != "host_readonly" ||
+			request.Cwd != "/workspace" ||
+			request.MaxTurns != 12 ||
+			request.ApprovalAutopilot == nil ||
+			*request.ApprovalAutopilot {
+			t.Fatalf("unexpected create-session decode: %#v", request)
 		}
 	})
 
-	t.Run("intern turn request fixture stays frozen", func(t *testing.T) {
-		var actual map[string]any
-		loadFixtureJSON(t, "service_contract/intern-turn-request.json", &actual)
-		if actual["session_key"] != "svc:fixture" {
-			t.Fatalf("expected canonical session_key in frozen turn request fixture, got %#v", actual)
-		}
-		if _, ok := actual["platform_session_ref"].(map[string]any); !ok {
-			t.Fatalf("expected platform_session_ref object in frozen turn request fixture, got %#v", actual)
-		}
-		meta, _ := actual["meta"].(map[string]any)
-		if meta["network_session_id"] != "sess_fixture" {
-			t.Fatalf("expected network_session_id correlation metadata in frozen turn request fixture, got %#v", actual)
+	t.Run("security-sensitive requests stay body-only", func(t *testing.T) {
+		for name, payload := range map[string]map[string]any{
+			"pairing":         fixture.PairingApproveRequest,
+			"runner approval": fixture.RunnerApprovalRequest,
+			"approval":        fixture.ApprovalDecisionRequest,
+		} {
+			if len(payload) == 0 {
+				t.Fatalf("%s fixture is empty", name)
+			}
+			for _, forbidden := range []string{"url", "query", "bearer_token"} {
+				if _, ok := payload[forbidden]; ok {
+					t.Fatalf("%s fixture must not carry %q: %#v", name, forbidden, payload)
+				}
+			}
 		}
 	})
 
-	t.Run("subagent request", func(t *testing.T) {
-		var expected serviceSubagentRequestFixture
-		loadFixtureJSON(t, "service_contract/subagent-request.decoded.json", &expected)
-		body := loadFixtureString(t, "service_contract/subagent-request.json")
-		actual, err := decodeServiceSubagentRequest(strings.NewReader(body), registry)
+	t.Run("pairing request body", func(t *testing.T) {
+		body, err := json.Marshal(fixture.PairingApproveRequest)
 		if err != nil {
-			t.Fatalf("decodeServiceSubagentRequest: %v", err)
+			t.Fatalf("Marshal: %v", err)
 		}
-		got := serviceSubagentRequestFixture{
-			ParentSessionKey: actual.ParentSessionKey,
-			Task:             actual.Task,
-			AllowedTools:     actual.AllowedTools,
-			RestrictTools:    actual.RestrictTools,
-			TimeoutSeconds:   actual.TimeoutSeconds,
-			Meta:             actual.Meta,
-			ProfileName:      actual.ProfileName,
-			Channel:          actual.Channel,
-			ReplyTo:          actual.ReplyTo,
-			ApprovalToken:    actual.ApprovalToken,
+		var request struct {
+			RendezvousID  string         `json:"rendezvous_id"`
+			PairingSecret string         `json:"pairing_secret"`
+			Proposal      map[string]any `json:"proposal"`
+			TrustLevel    string         `json:"trust_level"`
+			ExpiresAt     int64          `json:"expires_at"`
 		}
-		if !reflect.DeepEqual(got, expected) {
-			t.Fatalf("decoded subagent request mismatch\nexpected: %#v\ngot: %#v", expected, got)
+		if err := decodeServiceJSONLoose(strings.NewReader(string(body)), &request); err != nil {
+			t.Fatalf("decodeServiceJSONLoose: %v", err)
+		}
+		if request.RendezvousID != "__RENDEZVOUS_ID__" ||
+			request.PairingSecret != "__PAIRING_SECRET__" ||
+			request.TrustLevel != "trusted" ||
+			request.Proposal["device_name"] != "OR3 Chat" {
+			t.Fatalf("unexpected pairing decode: %#v", request)
 		}
 	})
 }
 
 func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
-	t.Run("turn response", func(t *testing.T) {
-		rt, cleanup := buildServiceTestRuntime(t, func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"Hello fixture\"},\"finish_reason\":\"stop\"}]}\n"))
-			_, _ = w.Write([]byte("data: [DONE]\n"))
-		})
-		defer cleanup()
-		server := &serviceServer{runtime: rt, jobs: agent.NewJobRegistry(time.Minute, 32)}
-		httpServer := newServiceTestHTTPServer(t, strings.Repeat("t", 32), server)
-		defer httpServer.Close()
+	var externalFixture externalAgentProtocolFixture
+	loadFixtureJSON(t, "service_contract/external-agent-protocol.json", &externalFixture)
 
-		body := loadFixtureString(t, "service_contract/intern-turn-request.json")
-		req := mustServiceRequest(t, httpServer, strings.Repeat("t", 32), http.MethodPost, "/internal/v1/turns", body)
-		resp, err := httpServer.Client().Do(req)
+	t.Run("runner chat session response", func(t *testing.T) {
+		session := db.RunnerChatSession{
+			ID:               "rcs_fixture",
+			AppSessionKey:    "or3-chat:workspace-1",
+			RunnerID:         "codex",
+			ContinuationMode: "replay",
+			Model:            "gpt-5.6-codex",
+			Mode:             "review",
+			Isolation:        "host_readonly",
+			Cwd:              "/workspace",
+			MaxTurns:         12,
+			CreatedAt:        1000,
+			UpdatedAt:        2000,
+		}
+		actual := controlplane.BuildRunnerChatSessionResponse(session)
+		encoded, err := json.Marshal(actual)
 		if err != nil {
-			t.Fatalf("Do: %v", err)
+			t.Fatalf("Marshal: %v", err)
 		}
-		defer resp.Body.Close()
-		var actual map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&actual); err != nil {
-			t.Fatalf("Decode: %v", err)
+		var normalized map[string]any
+		if err := json.Unmarshal(encoded, &normalized); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
 		}
-		jobID, _ := actual["job_id"].(string)
-		if jobID == "" {
-			t.Fatalf("expected job_id in turn response, got %#v", actual)
+		if !reflect.DeepEqual(normalized, externalFixture.SessionResponse) {
+			t.Fatalf("runner chat session fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.SessionResponse, normalized)
 		}
-		actual["job_id"] = "__JOB_ID__"
+		listEncoded, err := json.Marshal(controlplane.BuildRunnerChatSessionListResponse([]db.RunnerChatSession{session}))
+		if err != nil {
+			t.Fatalf("Marshal list: %v", err)
+		}
+		var listNormalized map[string]any
+		if err := json.Unmarshal(listEncoded, &listNormalized); err != nil {
+			t.Fatalf("Unmarshal list: %v", err)
+		}
+		if !reflect.DeepEqual(listNormalized, externalFixture.SessionListResponse) {
+			t.Fatalf("runner chat session list fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.SessionListResponse, listNormalized)
+		}
+	})
 
-		var expected map[string]any
-		loadFixtureJSON(t, "service_contract/turn-response.json", &expected)
-		if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("turn response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
+	t.Run("runner chat structured event response", func(t *testing.T) {
+		actual := controlplane.BuildRunnerChatEventResponse(db.RunnerChatEvent{
+			ID:          9,
+			TurnID:      "rct_fixture",
+			JobID:       "job_fixture",
+			Seq:         3,
+			TS:          3000,
+			Type:        "content.delta",
+			Stream:      "assistant",
+			Text:        "hello",
+			PayloadJSON: `{"type":"content.delta","stream_kind":"assistant_text","delta":"hello"}`,
+		})
+		encoded, err := json.Marshal(actual)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
 		}
+		var normalized map[string]any
+		if err := json.Unmarshal(encoded, &normalized); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(normalized, externalFixture.EventResponse) {
+			t.Fatalf("runner chat event fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.EventResponse, normalized)
+		}
+	})
 
-		var frozenExpected map[string]any
-		loadFixtureJSON(t, "service_contract/intern-turn-response.json", &frozenExpected)
-		if !reflect.DeepEqual(actual, frozenExpected) {
-			t.Fatalf("frozen turn response mismatch\nexpected: %#v\ngot: %#v", frozenExpected, actual)
+	t.Run("runner chat turn response", func(t *testing.T) {
+		actual := controlplane.BuildRunnerChatTurnResponse(db.RunnerChatTurn{
+			ID:                 "rct_fixture",
+			SessionID:          "rcs_fixture",
+			Sequence:           1,
+			Status:             "succeeded",
+			ContinuationMode:   "replay",
+			RequestedAt:        3000,
+			StartedAt:          4000,
+			CompletedAt:        5000,
+			UserMessage:        "inspect the repository",
+			FinalText:          "done",
+			RunnerRunID:        "rr_fixture",
+			RunnerJobID:        "job_fixture",
+			UserMessageID:      11,
+			AssistantMessageID: 12,
+			Model:              "gpt-5.6-codex",
+			Mode:               "review",
+			Isolation:          "host_readonly",
+			Cwd:                "/workspace",
+		})
+		encoded, err := json.Marshal(actual)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
 		}
+		var normalized map[string]any
+		if err := json.Unmarshal(encoded, &normalized); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(normalized, externalFixture.TurnResponse) {
+			t.Fatalf("runner chat turn fixture mismatch\nexpected: %#v\ngot: %#v", externalFixture.TurnResponse, normalized)
+		}
+	})
 
-		snapshot, ok := server.jobs.Snapshot(jobID)
-		if !ok {
-			t.Fatalf("expected stored snapshot for %s", jobID)
-		}
-		for _, event := range snapshot.Events {
-			if event.Type != "queued" && event.Type != "started" && event.Type != "completion" && event.Type != "error" {
-				continue
+	t.Run("health and capabilities required fields", func(t *testing.T) {
+		server := &serviceServer{config: config.Default(), jobs: jobs.NewRegistry(time.Minute, 32)}
+		for _, test := range []struct {
+			path     string
+			handle   serviceRouteHandler
+			required []string
+		}{
+			{path: "/internal/v1/health", handle: server.handleHealth, required: externalFixture.HealthRequired},
+			{path: "/internal/v1/capabilities", handle: server.handleCapabilities, required: externalFixture.CapabilitiesRequired},
+		} {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			test.handle(rec, req)
+			var payload map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+				t.Fatalf("Decode %s: %v", test.path, err)
 			}
-			if event.Data["request_id"] != "req_fixture" || event.Data["workspace_id"] != "ws_fixture" || event.Data["network_session_id"] != "sess_fixture" {
-				t.Fatalf("expected frozen turn fixture correlation metadata in lifecycle events, got %#v", event.Data)
+			for _, key := range test.required {
+				if _, ok := payload[key]; !ok {
+					t.Fatalf("%s response missing fixture field %q: %#v", test.path, key, payload)
+				}
 			}
 		}
 	})
 
-	t.Run("subagent response", func(t *testing.T) {
-		database, cleanup := openServiceTestDB(t)
-		defer cleanup()
-		jobs := agent.NewJobRegistry(time.Minute, 32)
-		manager := &agent.SubagentManager{DB: database, Jobs: jobs, MaxQueued: 4}
-		manager.BackgroundTools = func() *tools.Registry {
-			registry := tools.NewRegistry()
-			registry.Register(serviceTestTool{name: "read_file"})
-			return registry
+	t.Run("action response fixtures", func(t *testing.T) {
+		if externalFixture.TurnAbortResponse["status"] != "aborting" {
+			t.Fatalf("unexpected turn abort fixture: %#v", externalFixture.TurnAbortResponse)
 		}
-		server := &serviceServer{subagentManager: manager, jobs: jobs}
-		httpServer := newServiceTestHTTPServer(t, strings.Repeat("u", 32), server)
-		defer httpServer.Close()
-
-		body := loadFixtureString(t, "service_contract/subagent-request.json")
-		req := mustServiceRequest(t, httpServer, strings.Repeat("u", 32), http.MethodPost, "/internal/v1/subagents", body)
-		resp, err := httpServer.Client().Do(req)
-		if err != nil {
-			t.Fatalf("Do: %v", err)
+		if externalFixture.ApprovalDenyResponse["status"] != "denied" ||
+			externalFixture.ApprovalDenyResponse["request_id"] != float64(42) {
+			t.Fatalf("unexpected approval response fixture: %#v", externalFixture.ApprovalDenyResponse)
 		}
-		defer resp.Body.Close()
-		var actual map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&actual); err != nil {
-			t.Fatalf("Decode: %v", err)
-		}
-		actual["job_id"] = "__JOB_ID__"
-		actual["child_session_key"] = "__CHILD_SESSION_KEY__"
-
-		var expected map[string]any
-		loadFixtureJSON(t, "service_contract/subagent-response.json", &expected)
-		if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("subagent response mismatch\nexpected: %#v\ngot: %#v", expected, actual)
+		for name, response := range map[string]map[string]any{
+			"turn decision": externalFixture.TurnDecisionResponse,
+			"pairing":       externalFixture.PairingResponse,
+			"artifact":      externalFixture.ArtifactResponse,
+			"runner list":   externalFixture.RunnerListResponse,
+			"readiness":     externalFixture.ReadinessResponse,
+			"health":        externalFixture.HealthResponse,
+			"capabilities":  externalFixture.CapabilitiesResponse,
+		} {
+			if len(response) == 0 {
+				t.Fatalf("%s response fixture is empty", name)
+			}
 		}
 	})
 
 	t.Run("job stream attach", func(t *testing.T) {
-		jobs := agent.NewJobRegistry(time.Minute, 32)
+		jobs := jobs.NewRegistry(time.Minute, 32)
 		job := jobs.RegisterWithID("job_fixture", "turn")
 		jobs.Publish(job.ID, "queued", map[string]any{"status": "queued"})
 		jobs.Publish(job.ID, "started", map[string]any{"status": "running"})
@@ -233,7 +296,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 	})
 
 	t.Run("job abort", func(t *testing.T) {
-		jobs := agent.NewJobRegistry(time.Minute, 32)
+		jobs := jobs.NewRegistry(time.Minute, 32)
 		snapshot := jobs.RegisterWithID("job_fixture", "turn")
 		jobs.Complete(snapshot.ID, "completed", map[string]any{"final_text": "done"})
 		server := &serviceServer{jobs: jobs}
@@ -256,7 +319,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 	})
 
 	t.Run("health status", func(t *testing.T) {
-		server := &serviceServer{runtime: &agent.Runtime{Tools: tools.NewRegistry()}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{jobs: jobs.NewRegistry(time.Minute, 32)}
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/health", nil)
 		server.handleHealth(rec, req)
@@ -285,7 +348,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		cfg := config.Default()
 		cfg.Provider.APIBase = "http://provider.example"
 		cfg.Provider.EmbedModel = "text-embedding-3-small"
-		server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{config: cfg, database: database, jobs: jobs.NewRegistry(time.Minute, 32)}
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/embeddings/status", nil)
 		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
@@ -310,7 +373,7 @@ func TestOr3NetCompatibilityFixtures_Responses(t *testing.T) {
 		}
 		cfg := config.Default()
 		cfg.Security.Audit.Enabled = true
-		server := &serviceServer{config: cfg, runtime: &agent.Runtime{DB: database, Audit: audit}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+		server := &serviceServer{config: cfg, database: database, audit: audit, jobs: jobs.NewRegistry(time.Minute, 32)}
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/audit", nil)
 		req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Kind: "shared-secret", Actor: "service:shared-secret", Role: "admin"}))
@@ -349,7 +412,7 @@ func TestServiceRouteContracts_CurrentAppUsageRoutesStayRegistered(t *testing.T)
 
 func TestServiceRouteContracts_UnknownInternalRouteReturnsStructuredJSON(t *testing.T) {
 	secret := strings.Repeat("r", 32)
-	server := &serviceServer{config: config.Default(), runtime: &agent.Runtime{Tools: tools.NewRegistry()}, jobs: agent.NewJobRegistry(time.Minute, 32)}
+	server := &serviceServer{config: config.Default(), jobs: jobs.NewRegistry(time.Minute, 32)}
 	server.config.Service.SharedSecretRole = "operator"
 	httpServer := newServiceTestHTTPServer(t, secret, server)
 	defer httpServer.Close()
@@ -378,9 +441,8 @@ func TestServiceRouteContracts_UnknownInternalRouteReturnsStructuredJSON(t *test
 func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t *testing.T) {
 	secret := strings.Repeat("c", 32)
 	server := &serviceServer{
-		config:  config.Default(),
-		runtime: &agent.Runtime{Tools: tools.NewRegistry()},
-		jobs:    agent.NewJobRegistry(time.Minute, 32),
+		config: config.Default(),
+		jobs:   jobs.NewRegistry(time.Minute, 32),
 	}
 	server.config.Service.SharedSecretRole = "operator"
 	httpServer := newServiceTestHTTPServer(t, secret, server)
@@ -393,8 +455,6 @@ func TestServiceRouteContracts_Non2xxJSONResponsesIncludeErrorCodeAndRequestID(t
 		body       string
 		wantStatus int
 	}{
-		{name: "turns validation", method: http.MethodPost, path: "/internal/v1/turns", body: `{}`, wantStatus: http.StatusBadRequest},
-		{name: "subagents unavailable", method: http.MethodPost, path: "/internal/v1/subagents", body: `{}`, wantStatus: http.StatusServiceUnavailable},
 		{name: "jobs route missing", method: http.MethodGet, path: "/internal/v1/jobs", wantStatus: http.StatusNotFound},
 		{name: "cron method", method: http.MethodPost, path: "/internal/v1/cron", wantStatus: http.StatusMethodNotAllowed},
 		{name: "approvals unavailable", method: http.MethodGet, path: "/internal/v1/approvals", wantStatus: http.StatusServiceUnavailable},

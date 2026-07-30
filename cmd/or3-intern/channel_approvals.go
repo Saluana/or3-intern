@@ -2,25 +2,21 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"or3-intern/internal/agent"
-	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/bus"
 	rootchannels "or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/tools"
+	"or3-intern/internal/jobs"
 )
 
 type channelApprovalHandler struct {
 	Config   config.Config
-	Runtime  *agent.Runtime
-	Jobs     *agent.JobRegistry
+	Jobs     *jobs.Registry
 	Broker   *approval.Broker
 	Channels *rootchannels.Manager
 }
@@ -102,50 +98,14 @@ func (h *channelApprovalHandler) resolveApprovalCommandRequest(ctx context.Conte
 }
 
 func (h *channelApprovalHandler) resumeApprovedRequest(ctx context.Context, issued approval.IssuedApproval, actor string) {
-	if h == nil || h.Runtime == nil {
+	if h == nil {
 		return
 	}
-	serviceApp := app.NewServiceApp(h.Config, h.Runtime, h.Jobs, nil, nil)
-	finalText, err := serviceApp.ResumeApprovedRequest(ctx, app.ResumeApprovedRequest{
-		IssuedApproval: issued,
-		Capability:     tools.CapabilityGuarded,
-		Actor:          actor,
-		Role:           approval.RoleOperator,
-	})
 	requester := approval.RequesterContextFromJSON(issued.Request.RequesterContextJSON)
-	if err != nil {
-		var approvalErr *tools.ApprovalRequiredError
-		if errors.As(err, &approvalErr) && h.deliverResumeApprovalRequired(ctx, issued.Request, approvalErr) {
-			return
-		}
-		text := approvalResumeFailureMessage(err)
-		if h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
-			_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, text, approvalDeliveryMeta(requester))
-		}
-		return
+	text := "Built-in tool execution resume is no longer supported in runner-first mode. Retry the turn or use a dedicated runner."
+	if h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
+		_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, text, approvalDeliveryMeta(requester))
 	}
-	if strings.TrimSpace(finalText) != "" && h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
-		_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, finalText, approvalDeliveryMeta(requester))
-	}
-}
-
-func (h *channelApprovalHandler) deliverResumeApprovalRequired(ctx context.Context, fallbackReq db.ApprovalRequestRecord, approvalErr *tools.ApprovalRequiredError) bool {
-	if h == nil || h.Channels == nil || approvalErr == nil {
-		return false
-	}
-	req, text := approvalRequiredContinuationPrompt(ctx, h.Broker, fallbackReq, approvalErr)
-	requester := approval.RequesterContextFromJSON(req.RequesterContextJSON)
-	if !isApprovalExternalChannel(requester.Channel) {
-		return false
-	}
-	to := strings.TrimSpace(requester.ReplyTarget)
-	if to == "" {
-		to = strings.TrimSpace(requester.From)
-	}
-	if to == "" || strings.TrimSpace(text) == "" {
-		return false
-	}
-	return h.Channels.DeliverWithMeta(ctx, requester.Channel, to, text, approvalDeliveryMeta(requester)) == nil
 }
 
 func parseChannelApprovalCommand(message string) (parsedApprovalCommand, bool) {

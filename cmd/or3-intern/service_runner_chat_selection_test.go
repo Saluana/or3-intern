@@ -4,21 +4,32 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/tools"
+	"or3-intern/internal/jobs"
+	"or3-intern/internal/runners"
 )
+
+func TestRunnerChatStartErrorDetailOnlyExposesActionableFailures(t *testing.T) {
+	detail := runnerChatStartErrorDetail(errors.New("invalid cwd: cwd outside allowed directory: /tmp/project (allowed root: /workspace)"))
+	if !strings.Contains(detail, "outside allowed directory") {
+		t.Fatalf("detail = %q, want cwd validation guidance", detail)
+	}
+	if got := runnerChatStartErrorDetail(errors.New("database write failed: secret internal detail")); got != "" {
+		t.Fatalf("unexpected internal detail exposure: %q", got)
+	}
+}
 
 type runnerChatServiceFixture struct {
 	server     *serviceServer
@@ -28,20 +39,15 @@ type runnerChatServiceFixture struct {
 	cleanup    func()
 }
 
-func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.DB, agentManager *agentcli.Manager, chatManager *agentcli.ChatManager) *runnerChatServiceFixture {
+func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.DB, agentManager *runners.Manager, chatManager *runners.ChatManager) *runnerChatServiceFixture {
 	t.Helper()
 	secret := strings.Repeat("r", 32)
-	runtime := &agent.Runtime{
-		DB:      database,
-		Tools:   tools.NewRegistry(),
-		Builder: &agent.Builder{DB: database, HistoryMax: 10},
-	}
 	server := &serviceServer{
-		config:          cfg,
-		runtime:         runtime,
-		jobs:            agent.NewJobRegistry(time.Minute, 32),
-		agentCLIManager: agentManager,
-		chatManager:     chatManager,
+		config:        cfg,
+		database:      database,
+		jobs:          jobs.NewRegistry(time.Minute, 32),
+		runnerManager: agentManager,
+		chatManager:   chatManager,
 	}
 	httpServer := newServiceTestHTTPServer(t, secret, server)
 	return &runnerChatServiceFixture{
@@ -56,13 +62,11 @@ func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.D
 	}
 }
 
-func newDiscoveryRegistry() *agentcli.RunnerRegistry {
-	specs := agentcli.AllRunners()
-	return agentcli.NewRunnerRegistry(specs, []agentcli.RunnerAdapter{
-		agentcli.NewOpenCodeAdapter(),
-		agentcli.NewCodexAdapter(),
-		agentcli.NewClaudeAdapter(),
-		agentcli.NewGeminiAdapter(),
+func newDiscoveryRegistry() *runners.RunnerRegistry {
+	specs := runners.AllRunners()
+	return runners.NewRunnerRegistry(specs, []runners.RunnerAdapter{
+		runners.NewOpenCodeAdapter(),
+		runners.NewCodexAdapter(),
 	})
 }
 
@@ -116,8 +120,8 @@ func seedRunnerChatTerminalTurn(t *testing.T, database *db.DB) (db.RunnerChatSes
 	sess, err := database.CreateOrGetRunnerChatSession(ctx, db.RunnerChatSession{
 		ID:               "rcs-stream",
 		AppSessionKey:    "svc:stream",
-		RunnerID:         string(agentcli.RunnerOpenCode),
-		ContinuationMode: string(agentcli.ContinuationReplay),
+		RunnerID:         string(runners.RunnerOpenCode),
+		ContinuationMode: string(runners.ContinuationReplay),
 	})
 	if err != nil {
 		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
@@ -127,7 +131,7 @@ func seedRunnerChatTerminalTurn(t *testing.T, database *db.DB) (db.RunnerChatSes
 		SessionID:        sess.ID,
 		Status:           db.RunnerChatTurnStatusRunning,
 		UserMessage:      "tell me more",
-		ContinuationMode: string(agentcli.ContinuationReplay),
+		ContinuationMode: string(runners.ContinuationReplay),
 	})
 	if err != nil {
 		t.Fatalf("CreateRunnerChatTurn: %v", err)
@@ -241,8 +245,6 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	binDir := t.TempDir()
 	writeExecutableScript(t, binDir, "opencode", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'OpenCode 1.2.3'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"list\" ]; then\n  exit 1\nfi\nexit 0\n")
 	writeExecutableScript(t, binDir, "codex", "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  echo 'Codex 0.9.0'\n  exit 0\nfi\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nexit 0\n")
-	writeExecutableScript(t, binDir, "claude", "#!/bin/sh\necho 'Claude 9.9.9'\nexit 0\n")
-	writeExecutableScript(t, binDir, "gemini", "#!/bin/sh\nexit 1\n")
 	oldPath := os.Getenv("PATH")
 	if err := os.Setenv("PATH", binDir); err != nil {
 		t.Fatalf("Setenv PATH: %v", err)
@@ -250,11 +252,9 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	defer os.Setenv("PATH", oldPath)
 
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
-	cfg.AgentCLI.DisabledRunners = []string{string(agentcli.RunnerClaude)}
 	registry := newDiscoveryRegistry()
-	manager := &agentcli.Manager{DB: database, Cfg: cfg.AgentCLI, Registry: registry}
-	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, &agentcli.ChatManager{DB: database, Manager: manager})
+	manager := &runners.Manager{DB: database, Cfg: cfg.Runners, Registry: registry}
+	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, &runners.ChatManager{DB: database, Manager: manager})
 	defer fixture.httpServer.Close()
 
 	chatReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/chat-runners", "")
@@ -268,58 +268,72 @@ func TestServiceChatRunners_DiscoveryStatusesAndAgentRunnerContract(t *testing.T
 	}
 	chatPayload := decodeServiceResponseMap(t, chatResp)
 
-	or3Runner := findRunnerByID(t, chatPayload, string(agentcli.RunnerOR3))
-	if or3Runner["status"] != string(agentcli.RunnerStatusAvailable) || or3Runner["auth_status"] != string(agentcli.AuthReady) {
-		t.Fatalf("expected OR3 always available/ready, got %#v", or3Runner)
+	if _, ok := chatPayload["default_runner"]; !ok {
+		t.Fatalf("expected default_runner in response, got %#v", chatPayload)
 	}
-	if _, ok := or3Runner["chat_capabilities"]; !ok {
-		t.Fatalf("expected chat_capabilities decoration, got %#v", or3Runner)
+	if got := chatPayload["default_runner"]; got != string(runners.RunnerOpenCode) {
+		t.Fatalf("expected default_runner=opencode, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerOpenCode))["status"]; got != string(agentcli.RunnerStatusAuthMissing) {
+	for _, raw := range chatPayload["runners"].([]any) {
+		if item, ok := raw.(map[string]any); ok && item["id"] == "or3-intern" {
+			t.Fatalf("legacy or3-intern runner must not be chat-selectable, got %#v", chatPayload)
+		}
+	}
+	if got := findRunnerByID(t, chatPayload, string(runners.RunnerOpenCode))["status"]; got != string(runners.RunnerStatusAuthMissing) {
 		t.Fatalf("expected OpenCode auth_missing, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerCodex))["status"]; got != string(agentcli.RunnerStatusAvailable) {
+	if got := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["status"]; got != string(runners.RunnerStatusAvailable) {
 		t.Fatalf("expected Codex available, got %#v", got)
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerClaude))["status"]; got != string(agentcli.RunnerStatusDisabledByConfig) {
-		t.Fatalf("expected Claude disabled_by_config, got %#v", got)
+	for _, removed := range []string{string(runners.RunnerClaude), string(runners.RunnerGemini)} {
+		for _, raw := range chatPayload["runners"].([]any) {
+			if item, ok := raw.(map[string]any); ok && item["id"] == removed {
+				t.Fatalf("removed runner %q must not be returned, got %#v", removed, chatPayload)
+			}
+		}
 	}
-	if got := findRunnerByID(t, chatPayload, string(agentcli.RunnerGemini))["status"]; got != string(agentcli.RunnerStatusError) {
-		t.Fatalf("expected Gemini error, got %#v", got)
-	}
-	codexCaps, ok := findRunnerByID(t, chatPayload, string(agentcli.RunnerCodex))["chat_capabilities"].(map[string]any)
-	if !ok || codexCaps["chatNativeSession"] != true || codexCaps["streamToolEvents"] != true {
+	codexCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerCodex))["chat_capabilities"].(map[string]any)
+	if !ok ||
+		codexCaps["chatNativeSession"] != true ||
+		codexCaps["streamToolEvents"] != true ||
+		codexCaps["cancel"] != true ||
+		codexCaps["approvalDecisions"] != true ||
+		codexCaps["customCwd"] != true {
 		t.Fatalf("expected Codex native/tool chat capabilities to be enabled, got %#v", codexCaps)
 	}
-	openCodeCaps, ok := findRunnerByID(t, chatPayload, string(agentcli.RunnerOpenCode))["chat_capabilities"].(map[string]any)
-	if !ok || openCodeCaps["chatNativeSession"] != true {
+	openCodeCaps, ok := findRunnerByID(t, chatPayload, string(runners.RunnerOpenCode))["chat_capabilities"].(map[string]any)
+	if !ok ||
+		openCodeCaps["chatNativeSession"] != true ||
+		openCodeCaps["cancel"] != true ||
+		openCodeCaps["approvalDecisions"] != true ||
+		openCodeCaps["customCwd"] != true {
 		t.Fatalf("expected OpenCode native session capability to remain enabled, got %#v", openCodeCaps)
 	}
 
-	agentReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/agent-runners", "")
-	agentResp, err := fixture.httpServer.Client().Do(agentReq)
+	runnerReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/runner-runners", "")
+	runnerResp, err := fixture.httpServer.Client().Do(runnerReq)
 	if err != nil {
-		t.Fatalf("Do agent-runners: %v", err)
+		t.Fatalf("Do runner-runners: %v", err)
 	}
-	if agentResp.StatusCode != http.StatusOK {
-		defer agentResp.Body.Close()
-		t.Fatalf("expected 200, got %d (%s)", agentResp.StatusCode, mustReadBody(t, agentResp.Body))
+	if runnerResp.StatusCode != http.StatusOK {
+		defer runnerResp.Body.Close()
+		t.Fatalf("expected 200, got %d (%s)", runnerResp.StatusCode, mustReadBody(t, runnerResp.Body))
 	}
-	agentPayload := decodeServiceResponseMap(t, agentResp)
-	rawOpenCode := findRunnerByID(t, agentPayload, string(agentcli.RunnerOpenCode))
-	if rawOpenCode["status"] != string(agentcli.RunnerStatusAuthMissing) {
-		t.Fatalf("expected raw agent-runners status passthrough, got %#v", rawOpenCode)
+	runnerPayload := decodeServiceResponseMap(t, runnerResp)
+	rawOpenCode := findRunnerByID(t, runnerPayload, string(runners.RunnerOpenCode))
+	if rawOpenCode["status"] != string(runners.RunnerStatusAuthMissing) {
+		t.Fatalf("expected raw runner-runners status passthrough, got %#v", rawOpenCode)
 	}
 	if _, ok := rawOpenCode["chat_capabilities"]; ok {
-		t.Fatalf("expected raw agent-runners contract without chat_capabilities, got %#v", rawOpenCode)
+		t.Fatalf("expected raw runner-runners contract without chat_capabilities, got %#v", rawOpenCode)
 	}
 }
 
-func TestServiceChatRunners_HidesExternalWhenAgentCLIDisabled(t *testing.T) {
+func TestServiceChatRunners_HidesExternalWhenRunnerDisabled(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
 
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/chat-runners", "")
@@ -333,11 +347,8 @@ func TestServiceChatRunners_HidesExternalWhenAgentCLIDisabled(t *testing.T) {
 	}
 	payload := decodeServiceResponseMap(t, resp)
 	runners := payload["runners"].([]any)
-	if len(runners) != 1 {
-		t.Fatalf("expected only OR3 runner when CLI disabled, got %#v", payload)
-	}
-	if got := runners[0].(map[string]any)["id"]; got != string(agentcli.RunnerOR3) {
-		t.Fatalf("expected OR3 runner, got %#v", got)
+	if len(runners) != 0 {
+		t.Fatalf("expected no selectable runners when CLI disabled, got %#v", payload)
 	}
 }
 
@@ -345,7 +356,7 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 	t.Run("disabled manager returns 503", func(t *testing.T) {
 		database, closeDB := openServiceTestDB(t)
 		defer closeDB()
-		fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+		fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 		defer fixture.httpServer.Close()
 
 		req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodPost, "/internal/v1/runner-chat/sessions", `{"app_session_key":"svc:1","runner_id":"opencode"}`)
@@ -358,8 +369,8 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 			t.Fatalf("expected 503, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
 		}
 		payload := mustDecodeJSONBody(t, resp.Body)
-		if payload["code"] != "agent_cli_disabled" {
-			t.Fatalf("expected agent_cli_disabled, got %#v", payload)
+		if payload["code"] != "runner_disabled" {
+			t.Fatalf("expected runner_disabled, got %#v", payload)
 		}
 	})
 
@@ -367,19 +378,18 @@ func TestServiceRunnerChat_DisabledWriteAndUnsupportedNative(t *testing.T) {
 		database, closeDB := openServiceTestDB(t)
 		defer closeDB()
 		cfg := config.Default()
-		cfg.AgentCLI.Enabled = true
-		specs := agentcli.AllRunners()
+		specs := runners.AllRunners()
 		for i := range specs {
-			if specs[i].ID == agentcli.RunnerCodex {
+			if specs[i].ID == runners.RunnerCodex {
 				specs[i].Supports.Chat.ChatNativeSession = false
 				specs[i].Supports.Chat.ChatResume = false
 				specs[i].Supports.Chat.ChatSessionRefExtractable = false
 			}
 		}
-		registry := agentcli.NewRunnerRegistry(specs, []agentcli.RunnerAdapter{agentcli.NewCodexAdapter()})
-		jobs := agent.NewJobRegistry(time.Minute, 32)
-		manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
-		chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
+		registry := runners.NewRunnerRegistry(specs, []runners.RunnerAdapter{runners.NewCodexAdapter()})
+		jobs := jobs.NewRegistry(time.Minute, 32)
+		manager := &runners.Manager{DB: database, Jobs: jobs, Cfg: cfg.Runners, Registry: registry}
+		chatManager := &runners.ChatManager{DB: database, Manager: manager, Jobs: jobs}
 		fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
 		defer fixture.httpServer.Close()
 
@@ -406,11 +416,10 @@ func TestServiceRunnerChat_ActiveTurnConflictAndAbort(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
 	cfg := config.Default()
-	cfg.AgentCLI.Enabled = true
 	registry := newDiscoveryRegistry()
-	jobs := agent.NewJobRegistry(time.Minute, 32)
-	manager := &agentcli.Manager{DB: database, Jobs: jobs, Cfg: cfg.AgentCLI, Registry: registry}
-	chatManager := &agentcli.ChatManager{DB: database, Manager: manager, Jobs: jobs}
+	jobs := jobs.NewRegistry(time.Minute, 32)
+	manager := &runners.Manager{DB: database, Jobs: jobs, Cfg: cfg.Runners, Registry: registry}
+	chatManager := &runners.ChatManager{DB: database, Manager: manager, Jobs: jobs}
 	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
 	defer fixture.httpServer.Close()
 
@@ -451,7 +460,7 @@ func TestServiceRunnerChat_ActiveTurnConflictAndAbort(t *testing.T) {
 func TestServiceRunnerChat_StreamReplaysAfterSeqAndEmitsDoneSnapshot(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	sess, turn := seedRunnerChatTerminalTurn(t, database)
@@ -485,7 +494,7 @@ func TestServiceRunnerChat_StreamReplaysAfterSeqAndEmitsDoneSnapshot(t *testing.
 func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	sess, turn := seedRunnerChatTerminalTurn(t, database)
@@ -493,10 +502,14 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	if err := database.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{TurnID: turn.ID, SessionID: sess.ID, JobID: "job-stream", Seq: 4, Type: "content.delta", Text: "ok", PayloadJSON: canonical}); err != nil {
 		t.Fatalf("AppendRunnerChatEvent canonical: %v", err)
 	}
+	spaceCanonical := `{"type":"content.delta","stream_kind":"assistant_text","delta":" "}`
+	if err := database.AppendRunnerChatEvent(context.Background(), db.RunnerChatEvent{TurnID: turn.ID, SessionID: sess.ID, JobID: "job-stream", Seq: 5, Type: "content.delta", Text: " ", PayloadJSON: spaceCanonical}); err != nil {
+		t.Fatalf("AppendRunnerChatEvent whitespace canonical: %v", err)
+	}
 
 	list := mustServiceDoJSON(t, fixture, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/events?after_seq=3", sess.ID, turn.ID), "")
 	items := list["events"].([]any)
-	if len(items) != 1 {
+	if len(items) != 2 {
 		t.Fatalf("expected one canonical event, got %#v", list)
 	}
 	item := items[0].(map[string]any)
@@ -506,6 +519,14 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	payload := item["payload"].(map[string]any)
 	if payload["type"] != "content.delta" || payload["stream_kind"] != "command_output" || payload["delta"] != "ok" {
 		t.Fatalf("expected canonical payload in list response, got %#v", payload)
+	}
+	spaceItem := items[1].(map[string]any)
+	if spaceItem["text"] != " " {
+		t.Fatalf("expected whitespace text in list response, got %#v", spaceItem)
+	}
+	spacePayload := spaceItem["payload"].(map[string]any)
+	if spacePayload["delta"] != " " {
+		t.Fatalf("expected whitespace delta in list payload, got %#v", spacePayload)
 	}
 
 	path := fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/stream?after_seq=3", sess.ID, turn.ID)
@@ -523,12 +544,15 @@ func TestServiceRunnerChat_StreamAndListExposeCanonicalPayload(t *testing.T) {
 	if !strings.Contains(joined, `content.delta|{"id":4,"job_id":"job-stream","payload":{"type":"content.delta","stream_kind":"command_output","delta":"ok"}`) {
 		t.Fatalf("expected canonical payload in SSE stream, got %s", joined)
 	}
+	if !strings.Contains(joined, `content.delta|{"id":5,"job_id":"job-stream","payload":{"type":"content.delta","stream_kind":"assistant_text","delta":" "}`) {
+		t.Fatalf("expected whitespace delta in SSE stream, got %s", joined)
+	}
 }
 
 func TestServiceChatSessions_LifecyclePaginationAndForkErrors(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 	ctx := context.Background()
 
@@ -604,7 +628,7 @@ func TestServiceChatSessions_LifecyclePaginationAndForkErrors(t *testing.T) {
 func TestServiceChatSessionsListBackfillsExternalChannelMessages(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 	ctx := context.Background()
 
@@ -629,7 +653,7 @@ func TestServiceChatSessionsListBackfillsExternalChannelMessages(t *testing.T) {
 func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 	database, closeDB := openServiceTestDB(t)
 	defer closeDB()
-	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &agentcli.ChatManager{DB: database})
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
 	defer fixture.httpServer.Close()
 
 	missingReq := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, "/internal/v1/runner-chat/sessions/rcs-missing/turns/rct-missing", "")
@@ -667,7 +691,7 @@ func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 		t.Fatalf("expected replayed event list from seq 2, got %#v", events)
 	}
 	if items[0].(map[string]any)["job_id"] != "job-stream" {
-		t.Fatalf("expected agent_cli linkage in event payload, got %#v", events)
+		t.Fatalf("expected runner linkage in event payload, got %#v", events)
 	}
 
 	read := mustServiceDoJSON(t, fixture, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s", sess.ID), "")
@@ -685,5 +709,145 @@ func TestServiceRunnerChat_ReadNotFoundAndEventsValidation(t *testing.T) {
 	}
 	if _, err := json.Marshal(turnRead); err != nil {
 		t.Fatalf("expected JSON-safe turn payload: %v", err)
+	}
+}
+
+func TestServiceRunnerChat_ListSessionsOrderingFilterAndValidation(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	server := &serviceServer{
+		config:      config.Default(),
+		database:    database,
+		jobs:        jobs.NewRegistry(time.Minute, 32),
+		chatManager: &runners.ChatManager{DB: database},
+	}
+	doGet := func(path string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		server.handleRunnerChatSessions(rec, req)
+		return rec, mustDecodeJSONBody(t, rec.Body)
+	}
+
+	ctx := context.Background()
+	for _, sess := range []db.RunnerChatSession{
+		{ID: "rcs-list-old", AppSessionKey: "or3-chat:workspace-a:thread-1", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 100, UpdatedAt: 100},
+		{ID: "rcs-list-new", AppSessionKey: "or3-chat:workspace-a:thread-2", RunnerID: "opencode", ContinuationMode: "replay", CreatedAt: 200, UpdatedAt: 300},
+		{ID: "rcs-list-other", AppSessionKey: "or3-chat:workspace-b:thread-1", RunnerID: "codex", ContinuationMode: "replay", CreatedAt: 150, UpdatedAt: 200},
+	} {
+		if _, err := database.CreateOrGetRunnerChatSession(ctx, sess); err != nil {
+			t.Fatalf("CreateOrGetRunnerChatSession(%s): %v", sess.ID, err)
+		}
+	}
+
+	prefix := url.QueryEscape("or3-chat:workspace-a:")
+	listRec, listed := doGet("/internal/v1/runner-chat/sessions?app_session_key_prefix=" + prefix + "&limit=2")
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected session list success, got status=%d payload=%#v", listRec.Code, listed)
+	}
+	items, ok := listed["sessions"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected two listed sessions, got %#v", listed)
+	}
+	if items[0].(map[string]any)["id"] != "rcs-list-new" || items[1].(map[string]any)["id"] != "rcs-list-old" {
+		t.Fatalf("expected sessions ordered by updated_at desc, got %#v", listed)
+	}
+
+	limitedRec, limited := doGet("/internal/v1/runner-chat/sessions?app_session_key_prefix=" + prefix + "&limit=1")
+	if limitedRec.Code != http.StatusOK {
+		t.Fatalf("expected limited session list success, got status=%d payload=%#v", limitedRec.Code, limited)
+	}
+	limitedItems, ok := limited["sessions"].([]any)
+	if !ok || len(limitedItems) != 1 || limitedItems[0].(map[string]any)["id"] != "rcs-list-new" {
+		t.Fatalf("expected bounded session list, got %#v", limited)
+	}
+
+	for i := 1; i <= 5; i++ {
+		if _, err := database.CreateRunnerChatTurn(ctx, db.RunnerChatTurn{
+			ID:               fmt.Sprintf("rct-list-window-%d", i),
+			SessionID:        "rcs-list-new",
+			Status:           db.RunnerChatTurnStatusSucceeded,
+			UserMessage:      fmt.Sprintf("turn %d", i),
+			ContinuationMode: "replay",
+			RequestedAt:      int64(i),
+			CompletedAt:      int64(i),
+		}); err != nil {
+			t.Fatalf("CreateRunnerChatTurn(%d): %v", i, err)
+		}
+	}
+	turnRec, turnPayload := doGet("/internal/v1/runner-chat/sessions/rcs-list-new/turns?limit=2")
+	turnItems, ok := turnPayload["turns"].([]any)
+	if turnRec.Code != http.StatusOK || !ok || len(turnItems) != 2 {
+		t.Fatalf("expected bounded turn list, got status=%d payload=%#v", turnRec.Code, turnPayload)
+	}
+	if turnItems[0].(map[string]any)["sequence"] != float64(4) ||
+		turnItems[1].(map[string]any)["sequence"] != float64(5) {
+		t.Fatalf("expected newest turns in chronological order, got %#v", turnPayload)
+	}
+
+	for _, path := range []string{
+		"/internal/v1/runner-chat/sessions?limit=",
+		"/internal/v1/runner-chat/sessions?limit=0",
+		"/internal/v1/runner-chat/sessions?limit=101",
+		"/internal/v1/runner-chat/sessions?limit=invalid",
+		"/internal/v1/runner-chat/sessions?limit=1&limit=2",
+		"/internal/v1/runner-chat/sessions?app_session_key_prefix=",
+		"/internal/v1/runner-chat/sessions?app_session_key_prefix=one&app_session_key_prefix=two",
+		"/internal/v1/runner-chat/sessions?app_session_key_prefix=" + url.QueryEscape(strings.Repeat("x", serviceRunnerChatAppSessionKeyPrefixMaxBytes+1)),
+	} {
+		rec, payload := doGet(path)
+		if rec.Code != http.StatusBadRequest || payload["code"] != "validation_failed" {
+			t.Fatalf("expected validation failure for %s, got status=%d payload=%#v", path, rec.Code, payload)
+		}
+	}
+}
+
+func TestServiceRunnerChat_ApproveRejectsWithoutApproval(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	cfg := config.Default()
+	registry := newDiscoveryRegistry()
+	jobsReg := jobs.NewRegistry(time.Minute, 32)
+	manager := &runners.Manager{DB: database, Jobs: jobsReg, Cfg: cfg.Runners, Registry: registry}
+	chatManager := &runners.ChatManager{DB: database, Manager: manager, Jobs: jobsReg}
+	fixture := newRunnerChatServiceFixture(t, cfg, database, manager, chatManager)
+	defer fixture.httpServer.Close()
+
+	created := mustServiceDoJSON(t, fixture, http.MethodPost, "/internal/v1/runner-chat/sessions", `{"app_session_key":"svc:approval","runner_id":"opencode","continuation_mode":"replay"}`)
+	sessionID := created["id"].(string)
+	turn := mustServiceDoJSON(t, fixture, http.MethodPost, "/internal/v1/runner-chat/sessions/"+sessionID+"/turns", `{"user_message":"hi"}`)
+	turnID := turn["turn_id"].(string)
+	// Without a registered approval, the endpoint must respond 400 with a
+	// descriptive error code so the app can render the right UX.
+	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodPost, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/approve", sessionID, turnID), `{"note":"test","allow_session":true}`)
+	resp, err := fixture.httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do approve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing approval, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
+	}
+	body := mustDecodeJSONBody(t, resp.Body)
+	if !strings.Contains(fmt.Sprint(body["error"]), "approval decision failed") {
+		t.Fatalf("expected approval decision failure, got %#v", body)
+	}
+}
+
+func TestServiceRunnerChat_ApproveRejectsWrongMethod(t *testing.T) {
+	database, closeDB := openServiceTestDB(t)
+	defer closeDB()
+	fixture := newRunnerChatServiceFixture(t, config.Default(), database, nil, &runners.ChatManager{DB: database})
+	defer fixture.httpServer.Close()
+
+	sess, _ := seedRunnerChatTerminalTurn(t, database)
+	req := mustServiceRequest(t, fixture.httpServer, fixture.secret, http.MethodGet, fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/rct-stream/approve", sess.ID), "")
+	resp, err := fixture.httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do wrong-method: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d (%s)", resp.StatusCode, mustReadBody(t, resp.Body))
 	}
 }

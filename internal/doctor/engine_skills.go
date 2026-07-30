@@ -50,23 +50,5 @@ func skillFindings(cfg config.Config, opts Options) []Finding {
 			Summary:  "skill execution is enabled with an empty child environment allowlist",
 		})
 	}
-	if hasPublicIngress(cfg) && publicIngressCanReachSkillExec(cfg) {
-		findings = append(findings, Finding{
-			ID:       "skills.public_ingress_reachable",
-			Area:     "skills",
-			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-			Summary:  "public ingress can reach skill execution through a permissive profile",
-		})
-	}
-	if cfg.Triggers.Webhook.Enabled {
-		if _, profile, ok := resolveEffectiveProfile(cfg, "webhook", "webhook"); !ok || (profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script"))) {
-			findings = append(findings, Finding{
-				ID:       "skills.webhook_reachable",
-				Area:     "skills",
-				Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-				Summary:  "webhook can reach skill execution through a permissive profile",
-			})
-		}
-	}
 	return findings
 }

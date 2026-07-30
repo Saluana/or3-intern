@@ -3,314 +3,204 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 )
 
-func testDevicesBroker(t *testing.T) *approval.Broker {
-	t.Helper()
-	// reuse the approval broker helper from approvals_cmd_test.go
-	b := testApprovalBroker(t)
-	return b
-}
-
-// seedPairingRequest creates a pairing request and returns (id, code).
-func seedPairingRequest(t *testing.T, broker *approval.Broker) (int64, string) {
-	t.Helper()
-	req, code, err := broker.CreatePairingRequest(context.Background(), approval.PairingRequestInput{
-		Role:        approval.RoleOperator,
-		DisplayName: "test-device",
-		Origin:      "test",
-	})
-	if err != nil {
-		t.Fatalf("CreatePairingRequest: %v", err)
-	}
-	return req.ID, code
-}
-
-func TestRunDevicesCommand_NilBroker(t *testing.T) {
-	var out bytes.Buffer
-	err := runDevicesCommand(context.Background(), nil, []string{"list"}, &out, &out)
-	if err == nil {
-		t.Fatal("expected error for nil broker")
-	}
-}
-
-func TestRunDevicesCommand_NoArgs(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	err := runDevicesCommand(context.Background(), broker, nil, &out, &out)
-	if err == nil || !strings.Contains(err.Error(), "usage") {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-}
-
-func TestRunDevicesCommand_List_Empty(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"list"}, &out, &out); err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if !strings.Contains(out.String(), "No paired devices yet") || !strings.Contains(out.String(), "or3-intern pairing approve-code <code>") {
-		t.Errorf("expected pairing-focused empty state, got %q", out.String())
-	}
-}
-
-func TestRunDevicesCommand_Requests_ShowsPending(t *testing.T) {
-	broker := testDevicesBroker(t)
-	_, _ = seedPairingRequest(t, broker)
-
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"requests"}, &out, &out); err != nil {
-		t.Fatalf("requests: %v", err)
-	}
-	if !strings.Contains(out.String(), "pending") {
-		t.Errorf("expected 'pending' in requests output, got %q", out.String())
-	}
-}
-
-func TestRunDevicesCommand_Approve(t *testing.T) {
-	broker := testDevicesBroker(t)
-	id, _ := seedPairingRequest(t, broker)
-
-	var out bytes.Buffer
-	idStr := sprint64(id)
-	if err := runDevicesCommand(context.Background(), broker, []string{"approve", idStr}, &out, &out); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	if !strings.Contains(out.String(), "approved pairing request") {
-		t.Errorf("expected 'approved pairing request' in output, got %q", out.String())
-	}
-}
-
-func TestRunDevicesCommand_Approve_InvalidID(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"approve", "notanumber"}, &out, &out); err == nil {
-		t.Fatal("expected error for invalid ID")
-	}
-}
-
-func TestRunDevicesCommand_Approve_MissingID(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"approve"}, &out, &out); err == nil {
-		t.Fatal("expected error for missing ID")
-	}
-}
-
-func TestRunDevicesCommand_Deny(t *testing.T) {
-	broker := testDevicesBroker(t)
-	id, _ := seedPairingRequest(t, broker)
-
-	var out bytes.Buffer
-	idStr := sprint64(id)
-	if err := runDevicesCommand(context.Background(), broker, []string{"deny", idStr}, &out, &out); err != nil {
-		t.Fatalf("deny: %v", err)
-	}
-	if !strings.Contains(out.String(), "denied pairing request") {
-		t.Errorf("expected 'denied pairing request' in output, got %q", out.String())
-	}
-}
-
-func TestRunDevicesCommand_Deny_InvalidID(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"deny", "bad"}, &out, &out); err == nil {
-		t.Fatal("expected error for invalid ID")
-	}
-}
-
-func TestRunDevicesCommand_RevokeAndListDevice(t *testing.T) {
-	broker := testDevicesBroker(t)
-	ctx := context.Background()
-
-	// Create pairing request, approve it, then exchange for device token.
-	id, code := seedPairingRequest(t, broker)
-	if _, approveErr := broker.ApprovePairingRequest(ctx, id, "cli"); approveErr != nil {
-		t.Fatalf("ApprovePairingRequest: %v", approveErr)
-	}
-	device, _, err := broker.ExchangePairingCode(ctx, approval.PairingExchangeInput{RequestID: id, Code: code})
-	if err != nil {
-		t.Fatalf("ExchangePairingCode: %v", err)
-	}
-
-	// Confirm device shows in list before revocation.
-	var out bytes.Buffer
-	if err := runDevicesCommand(ctx, broker, []string{"list"}, &out, &out); err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if !strings.Contains(out.String(), device.DeviceID) {
-		t.Errorf("expected device %s in list, got %q", device.DeviceID, out.String())
-	}
-
-	// Revoke.
-	out.Reset()
-	if err := runDevicesCommand(ctx, broker, []string{"revoke", device.DeviceID}, &out, &out); err != nil {
-		t.Fatalf("revoke: %v", err)
-	}
-	if !strings.Contains(out.String(), "revoked device") {
-		t.Errorf("expected 'revoked device' in output, got %q", out.String())
-	}
-}
-
-func TestRunDevicesCommand_Revoke_MissingID(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"revoke"}, &out, &out); err == nil {
-		t.Fatal("expected error for missing device ID")
-	}
-}
-
-func TestRunDevicesCommand_Rotate(t *testing.T) {
-	broker := testDevicesBroker(t)
-	ctx := context.Background()
-
-	// Create, approve, and exchange pairing request to get a device.
-	id, code := seedPairingRequest(t, broker)
-	if _, err := broker.ApprovePairingRequest(ctx, id, "cli"); err != nil {
-		t.Fatalf("ApprovePairingRequest: %v", err)
-	}
-	device, _, err := broker.ExchangePairingCode(ctx, approval.PairingExchangeInput{RequestID: id, Code: code})
-	if err != nil {
-		t.Fatalf("ExchangePairingCode: %v", err)
-	}
-
-	var out bytes.Buffer
-	if err := runDevicesCommand(ctx, broker, []string{"rotate", device.DeviceID}, &out, &out); err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
-	text := out.String()
-	if !strings.Contains(text, "rotated device") {
-		t.Errorf("expected 'rotated device' in output, got %q", text)
-	}
-	if !strings.Contains(text, "token: ") {
-		t.Errorf("expected 'token: ' in output, got %q", text)
-	}
-}
-
-func TestRunDevicesCommand_Rotate_MissingID(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"rotate"}, &out, &out); err == nil {
-		t.Fatal("expected error for missing device ID")
-	}
-}
-
-func TestRunDevicesCommand_Rotate_RevokedDeviceFails(t *testing.T) {
-	broker := testDevicesBroker(t)
-	ctx := context.Background()
-
-	id, code := seedPairingRequest(t, broker)
-	if _, err := broker.ApprovePairingRequest(ctx, id, "cli"); err != nil {
-		t.Fatalf("ApprovePairingRequest: %v", err)
-	}
-	device, _, err := broker.ExchangePairingCode(ctx, approval.PairingExchangeInput{RequestID: id, Code: code})
-	if err != nil {
-		t.Fatalf("ExchangePairingCode: %v", err)
-	}
-	if err := broker.RevokeDevice(ctx, device.DeviceID, "cli"); err != nil {
-		t.Fatalf("RevokeDevice: %v", err)
-	}
-
-	var out bytes.Buffer
-	if err := runDevicesCommand(ctx, broker, []string{"rotate", device.DeviceID}, &out, &out); err == nil {
-		t.Fatal("expected revoked device rotation to fail")
-	}
-}
-
-func TestRunDevicesCommand_UnknownSubcommand(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	err := runDevicesCommand(context.Background(), broker, []string{"zap"}, &out, &out)
-	if err == nil {
-		t.Fatal("expected error for unknown subcommand")
-	}
-}
-
-func TestRunDevicesCommand_RejectsExtraArgs(t *testing.T) {
-	broker := testDevicesBroker(t)
-	var out bytes.Buffer
-	for _, args := range [][]string{{"list", "extra"}, {"approve", "1", "extra"}, {"rotate", "device-1", "extra"}} {
-		if err := runDevicesCommand(context.Background(), broker, args, &out, &out); err == nil {
-			t.Fatalf("expected args %v to fail", args)
-		}
-	}
-}
-
-// TestRunDevicesCommand_CLI_ActorStamping verifies that CLI-triggered pairing
-// actions use the "cli" actor string in audit-visible state changes.
-func TestRunDevicesCommand_CLI_ActorStamping(t *testing.T) {
-	broker := testDevicesBroker(t)
-	ctx := context.Background()
-	id, _ := seedPairingRequest(t, broker)
-
-	// Approve using the CLI command (actor = "cli").
-	var out bytes.Buffer
-	if err := runDevicesCommand(ctx, broker, []string{"approve", sprint64(id)}, &out, &out); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-
-	// Verify the pairing request records the "cli" approver.
-	reqs, err := broker.ListPairingRequests(ctx, "approved", 10)
-	if err != nil {
-		t.Fatalf("ListPairingRequests: %v", err)
-	}
-	if len(reqs) == 0 {
-		t.Fatal("expected approved pairing request")
-	}
-	if reqs[0].ApproverID != "cli" {
-		t.Errorf("expected approver 'cli', got %q", reqs[0].ApproverID)
-	}
-}
-
-// TestRunApprovalsCommand_CLI_ActorStamping verifies that CLI approval
-// resolution stamps the "cli" actor into the resolved approval request.
-func TestRunApprovalsCommand_CLI_ActorStamping(t *testing.T) {
+func TestRunDevicesCommand_CreateLifecycle(t *testing.T) {
 	broker := testApprovalBroker(t)
 	ctx := context.Background()
-
-	// Seed a pending request.
-	decision, err := broker.EvaluateExec(ctx, approval.ExecEvaluation{
-		ExecutablePath: "/bin/sh",
-		Argv:           []string{"/bin/sh", "-c", "echo actor-test"},
-		WorkingDir:     "/tmp",
-		ToolName:       "exec",
-	})
-	if err != nil || decision.RequestID == 0 {
-		t.Fatalf("EvaluateExec: %v (id=%d)", err, decision.RequestID)
-	}
-
 	var out bytes.Buffer
-	if err := runApprovalsCommand(ctx, broker, []string{"approve", sprint64(decision.RequestID)}, &out, &out); err != nil {
-		t.Fatalf("approve: %v", err)
+	var stderr bytes.Buffer
+
+	if err := runDevicesCommand(ctx, broker, []string{"create"}, &out, &stderr); err != nil {
+		t.Fatalf("devices create: %v (stderr: %s)", err, stderr.String())
+	}
+	token := outputValueAfter(out.String(), "Token (shown once):")
+	if token == "" {
+		t.Fatalf("expected token in output, got %q", out.String())
+	}
+	device, err := broker.AuthenticateDeviceToken(ctx, token, approval.RoleOperator)
+	if err != nil {
+		t.Fatalf("created token did not authenticate: %v", err)
+	}
+	if device.DeviceID != "or3-chat-local" || device.DisplayName != "OR3 Chat" {
+		t.Fatalf("unexpected created device: %#v", device)
 	}
 
-	// Confirm that the request now shows status "approved".
-	reqs, listErr := broker.ListApprovalRequests(ctx, "approved", 10)
-	if listErr != nil {
-		t.Fatalf("ListApprovalRequests: %v", listErr)
+	out.Reset()
+	if err := runDevicesCommand(ctx, broker, []string{"list"}, &out, &stderr); err != nil {
+		t.Fatalf("devices list: %v", err)
 	}
-	if len(reqs) == 0 {
-		t.Fatal("expected approved approval request")
+	if !strings.Contains(out.String(), "or3-chat-local") || strings.Contains(out.String(), token) {
+		t.Fatalf("list should identify the device without exposing its token, got %q", out.String())
 	}
-	if reqs[0].ResolverActorID != "cli" {
-		t.Errorf("expected resolver_actor_id 'cli', got %q", reqs[0].ResolverActorID)
+
+	out.Reset()
+	if err := runDevicesCommand(ctx, broker, []string{"rotate", "or3-chat-local", "--force"}, &out, &stderr); err != nil {
+		t.Fatalf("devices rotate: %v", err)
+	}
+	rotatedToken := outputValueAfter(out.String(), "Token (shown once):")
+	if rotatedToken == "" || rotatedToken == token {
+		t.Fatalf("expected a new token, got %q", out.String())
+	}
+	if _, err := broker.AuthenticateDeviceToken(ctx, token); err == nil {
+		t.Fatal("old token still authenticated after rotation")
+	}
+	if _, err := broker.AuthenticateDeviceToken(ctx, rotatedToken, approval.RoleOperator); err != nil {
+		t.Fatalf("rotated token did not authenticate: %v", err)
+	}
+
+	out.Reset()
+	if err := runDevicesCommand(ctx, broker, []string{"revoke", "or3-chat-local", "--force"}, &out, &stderr); err != nil {
+		t.Fatalf("devices revoke: %v", err)
+	}
+	if _, err := broker.AuthenticateDeviceToken(ctx, rotatedToken); err == nil {
+		t.Fatal("token still authenticated after revocation")
 	}
 }
 
-// Ensure "Now" field defaults don't break when nil (belt-and-suspenders).
-func TestRunDevicesCommand_BrokerNowDefault(t *testing.T) {
-	broker := testDevicesBroker(t)
-	broker.Now = nil // should fall back to time.Now
+func TestRunDevicesCommand_CreateRejectsExistingDevice(t *testing.T) {
+	broker := testApprovalBroker(t)
+	ctx := context.Background()
 	var out bytes.Buffer
-	if err := runDevicesCommand(context.Background(), broker, []string{"list"}, &out, &out); err != nil {
-		t.Fatalf("list with nil Now: %v", err)
+
+	if err := runDevicesCommand(ctx, broker, []string{"create", "--id", "brave"}, &out, &out); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	err := runDevicesCommand(ctx, broker, []string{"create", "--id", "brave"}, &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "devices rotate") {
+		t.Fatalf("expected rotate guidance for duplicate device, got %v", err)
 	}
 }
 
-// Compile-time check that time is imported when not used directly.
-var _ = time.Time{}
+func TestRunPairingCommand_RequestApproveExchange(t *testing.T) {
+	broker := testApprovalBroker(t)
+	broker.Config.Pairing.Mode = config.ApprovalModeAsk
+	ctx := context.Background()
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+
+	if err := runPairingCommand(ctx, broker, []string{
+		"request",
+		"--id", "brave-browser",
+		"--name", "OR3 Chat in Brave",
+		"--channel", "web",
+		"--identity", "brendon",
+	}, &out, &stderr); err != nil {
+		t.Fatalf("pairing request: %v (stderr: %s)", err, stderr.String())
+	}
+	requestID, err := strconv.ParseInt(outputLineValue(out.String(), "request_id"), 10, 64)
+	if err != nil {
+		t.Fatalf("invalid request ID output: %q", out.String())
+	}
+	code := outputLineValue(out.String(), "pairing_code")
+	if len(code) != 6 {
+		t.Fatalf("expected six-digit pairing code, got %q", code)
+	}
+
+	out.Reset()
+	if err := runPairingCommand(ctx, broker, []string{"approve-code", code}, &out, &stderr); err != nil {
+		t.Fatalf("pairing approve-code: %v", err)
+	}
+	if !strings.Contains(out.String(), fmt.Sprintf("approved %d", requestID)) {
+		t.Fatalf("unexpected approval output: %q", out.String())
+	}
+
+	out.Reset()
+	if err := runPairingCommand(ctx, broker, []string{"exchange", strconv.FormatInt(requestID, 10), code}, &out, &stderr); err != nil {
+		t.Fatalf("pairing exchange: %v", err)
+	}
+	token := outputValueAfter(out.String(), "Token (shown once):")
+	device, err := broker.AuthenticateDeviceToken(ctx, token, approval.RoleOperator)
+	if err != nil {
+		t.Fatalf("exchanged token did not authenticate: %v", err)
+	}
+	if device.DeviceID != "brave-browser" || device.Metadata["channel"] != "web" || device.Metadata["identity"] != "brendon" {
+		t.Fatalf("unexpected paired device: %#v", device)
+	}
+}
+
+func TestRunPairingCommand_Deny(t *testing.T) {
+	broker := testApprovalBroker(t)
+	broker.Config.Pairing.Mode = config.ApprovalModeAsk
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	if err := runPairingCommand(ctx, broker, []string{"request", "--id", "denied-device"}, &out, &out); err != nil {
+		t.Fatalf("pairing request: %v", err)
+	}
+	requestID := outputLineValue(out.String(), "request_id")
+	out.Reset()
+	if err := runPairingCommand(ctx, broker, []string{"deny", requestID}, &out, &out); err != nil {
+		t.Fatalf("pairing deny: %v", err)
+	}
+	if !strings.Contains(out.String(), "denied "+requestID) {
+		t.Fatalf("unexpected deny output: %q", out.String())
+	}
+}
+
+func TestRunDevicesAndPairingCommand_UsageAndValidation(t *testing.T) {
+	broker := testApprovalBroker(t)
+	var out bytes.Buffer
+	for name, run := range map[string]func() error{
+		"devices usage": func() error { return runDevicesCommand(context.Background(), broker, nil, &out, &out) },
+		"pairing usage": func() error { return runPairingCommand(context.Background(), broker, nil, &out, &out) },
+		"invalid role": func() error {
+			return runDevicesCommand(context.Background(), broker, []string{"create", "--role", "superuser"}, &out, &out)
+		},
+		"partial binding": func() error {
+			return runPairingCommand(context.Background(), broker, []string{"request", "--channel", "slack"}, &out, &out)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestPreRuntimeCommands_DispatchDevicesAndPairing(t *testing.T) {
+	broker := testApprovalBroker(t)
+	broker.Config.Pairing.Mode = config.ApprovalModeAsk
+	var out bytes.Buffer
+
+	handled, err := runPreRuntimeCommand(context.Background(), "devices", config.Config{}, broker.DB, nil, nil, broker, []string{"create", "--id", "dispatch-device"}, &out, &out)
+	if err != nil || !handled {
+		t.Fatalf("devices dispatch: handled=%v err=%v", handled, err)
+	}
+	out.Reset()
+	handled, err = runPreRuntimeCommand(context.Background(), "pairing", config.Config{}, broker.DB, nil, nil, broker, []string{"request", "--id", "dispatch-pairing"}, &out, &out)
+	if err != nil || !handled {
+		t.Fatalf("pairing dispatch: handled=%v err=%v", handled, err)
+	}
+	if !commandHandledBeforeRuntimeBootstrap("devices") || !commandHandledBeforeRuntimeBootstrap("pairing") {
+		t.Fatal("device commands should return before provider and runner bootstrap")
+	}
+}
+
+func outputLineValue(output, key string) string {
+	prefix := key + ":"
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func outputValueAfter(output, marker string) string {
+	lines := strings.Split(output, "\n")
+	for index, line := range lines {
+		if strings.TrimSpace(line) == marker && index+1 < len(lines) {
+			return strings.TrimSpace(lines[index+1])
+		}
+	}
+	return ""
+}

@@ -1,80 +1,26 @@
-# Agent runtime
+# Runner-First Execution
 
-## Shared runtime model
+External runners execute model reasoning, tool use, and workspace edits. OR3 handles orchestration, memory, channels, approvals, artifacts, secure connections, cron, and persistence.
 
-`or3-intern` uses one shared runtime model across:
+## Turn Flow
 
-- `chat`
-- `agent`
-- `serve`
-- `service`
-- channel adapters
-- autonomous triggers
-- subagent jobs
+1. Ingress arrives from CLI, service, channel, cron, heartbeat, webhook, or file-watch.
+2. `RunnerTurnOrchestrator` resolves runner, session, and trigger metadata.
+3. OR3 builds bounded trusted context and delimited user task text.
+4. `ChatManager.StartTurn` persists messages and enqueues a runner run.
+5. Runner events stream to runner event tables and mirror into messages.
+6. Memory consolidation reads persisted messages.
 
-That means turns, tool calls, memory retrieval, quotas, and session handling behave consistently no matter how a task enters the system.
+## Prompt Shape
 
-## High-level flow
+Runner prompts use explicit sections:
 
-1. A foreground or background entrypoint receives work
-2. The runtime resolves the session key and related context
-3. Prompt bootstrap files and retrieved memory are injected
-4. The model runs a turn
-5. Tool calls execute through the shared tool registry
-6. Results are persisted to SQLite-backed history and memory stores
-7. Foreground callers receive the response immediately, while background jobs stream or persist status updates
+```text
+<trusted_or3_system_instructions>...</trusted_or3_system_instructions>
+<or3_context>...</or3_context>
+<user_task>...</user_task>
+```
 
-## Foreground entrypoints
+## Cron Payloads
 
-- `chat` for local interactive use
-- `agent -m` for one-shot turns
-- `service` for authenticated HTTP callers
-
-## Background entrypoints
-
-- `serve` for external channels
-- webhook triggers
-- file-watch triggers
-- heartbeat turns
-- cron jobs
-- subagent jobs
-
-## Streaming
-
-The CLI `chat` command supports live token streaming from the provider. The internal service API can also stream job output over SSE for callers that send `Accept: text/event-stream`.
-
-## Session model
-
-Every turn runs inside a session key, such as:
-
-- `cli:default`
-- `telegram:<chat-id>`
-- `slack:<channel-id>`
-- `discord:<channel-id>`
-- `email:<address>`
-- `whatsapp:<chat-id>`
-- `heartbeat:default`
-
-Session keys are used for history isolation, memory retrieval, and optional scope linking.
-
-## Subagents
-
-Subagents are optional background jobs governed by the same runtime and hardening controls. Configuration includes:
-
-- `subagents.enabled`
-- `subagents.maxConcurrent`
-- `subagents.maxQueued`
-- `subagents.taskTimeoutSeconds`
-
-## Related documentation
-
-- [Memory and context](memory-and-context.md)
-- [Triggers and automation](triggers-and-automation.md)
-- [Internal service API reference](api-reference.md)
-- [Security and hardening](security-and-hardening.md)
-
-## Related code
-
-- `internal/agent/`
-- `cmd/or3-intern/main.go`
-- `cmd/or3-intern/service.go`
+Scheduled runner work uses `runner_run`.

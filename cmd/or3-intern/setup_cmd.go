@@ -147,7 +147,6 @@ func runSetupWithIOOptions(in io.Reader, out io.Writer, cfgPath, cwd string, opt
 	if err != nil {
 		return setupResult{}, err
 	}
-	cfg.Tools.RestrictToWorkspace = true
 	fmt.Fprintf(out, "File access will be limited to: %s\n", cfg.WorkspaceDir)
 	if !existed {
 		fmt.Fprintln(out, "\nOR3 also needs a small private place for its database, logs, and generated files.")
@@ -442,7 +441,6 @@ func applyLockedDownNoSandbox(cfg *config.Config) {
 	safetymode.Apply(cfg, safetymode.ModeLockedDown)
 	cfg.Hardening.Sandbox.Enabled = false
 	cfg.Security.Approvals.Exec.Mode = config.ApprovalModeDeny
-	cfg.Tools.RestrictToWorkspace = true
 }
 
 func sandboxToolAvailable(path string) bool {

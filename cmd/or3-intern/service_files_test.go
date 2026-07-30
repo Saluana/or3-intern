@@ -19,24 +19,24 @@ func TestServiceFileRootsUseConfiguredDirs(t *testing.T) {
 	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
 
 	roots := server.serviceFileRoots()
-	if len(roots) != 1 {
-		t.Fatalf("expected one root, got %d", len(roots))
+	byID := map[string]serviceFileRoot{}
+	for _, root := range roots {
+		byID[root.ID] = root
 	}
-	if roots[0].ID != "allowed" || !roots[0].Writable {
-		t.Fatalf("unexpected root: %+v", roots[0])
+	if root, ok := byID["allowed"]; !ok || !root.Writable {
+		t.Fatalf("expected writable allowed root, got %+v", root)
+	}
+	if _, ok := byID["home"]; !ok {
+		t.Fatal("expected home root to be present")
 	}
 }
 
-func TestServiceFileRootsExposeComputerReadOnlyWhenFullReadEnabled(t *testing.T) {
+func TestServiceFileRootsIncludesConfiguredPaths(t *testing.T) {
 	workspace := t.TempDir()
 	allowed := t.TempDir()
 	server := &serviceServer{config: config.Config{
 		WorkspaceDir: workspace,
 		AllowedDir:   allowed,
-		Tools: config.ToolsConfig{
-			RestrictToWorkspace: true,
-			AllowFullFileRead:   true,
-		},
 	}}
 
 	roots := server.serviceFileRoots()
@@ -44,11 +44,8 @@ func TestServiceFileRootsExposeComputerReadOnlyWhenFullReadEnabled(t *testing.T)
 	for _, root := range roots {
 		byID[root.ID] = root
 	}
-	if root, ok := byID["computer"]; !ok || root.Writable {
-		t.Fatalf("expected read-only computer root, got %+v", root)
-	}
-	if root, ok := byID["allowed"]; !ok || root.Writable {
-		t.Fatalf("expected allowed root to become read-only, got %+v", root)
+	if root, ok := byID["allowed"]; !ok || !root.Writable {
+		t.Fatalf("expected writable allowed root, got %+v", root)
 	}
 	if root, ok := byID["workspace"]; !ok || !root.Writable {
 		t.Fatalf("expected writable workspace root, got %+v", root)
@@ -375,7 +372,7 @@ func TestHandleFileWriteRejectsStaleRevision(t *testing.T) {
 	}
 }
 
-func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
+func TestHandleFileWriteAcceptsAllowedRoot(t *testing.T) {
 	workspace := t.TempDir()
 	allowed := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(allowed, "notes"), 0o755); err != nil {
@@ -384,10 +381,6 @@ func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
 	server := &serviceServer{config: config.Config{
 		WorkspaceDir: workspace,
 		AllowedDir:   allowed,
-		Tools: config.ToolsConfig{
-			RestrictToWorkspace: true,
-			AllowFullFileRead:   true,
-		},
 	}}
 	body, _ := json.Marshal(map[string]any{
 		"root_id": "allowed",
@@ -400,8 +393,8 @@ func TestHandleFileWriteRejectsReadonlyRoot(t *testing.T) {
 
 	server.handleFileWrite(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d (%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("expected 200/201, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -424,6 +417,42 @@ func TestHandleFileWriteRejectsUnsupportedTextFile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "payload.bin")); !os.IsNotExist(err) {
 		t.Fatalf("expected unsupported file not to be written, stat err=%v", err)
+	}
+}
+
+func TestServiceFileRootsExcludesFilesystemByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	server := &serviceServer{config: config.Config{AllowedDir: tmp}}
+
+	roots := server.serviceFileRoots()
+	for _, root := range roots {
+		if root.ID == "filesystem" {
+			t.Fatal("expected filesystem root to be excluded when FilesystemBrowsing is false")
+		}
+	}
+}
+
+func TestServiceFileRootsIncludesFilesystemWhenEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	server := &serviceServer{config: config.Config{
+		AllowedDir:         tmp,
+		FilesystemBrowsing: true,
+	}}
+
+	roots := server.serviceFileRoots()
+	byID := map[string]serviceFileRoot{}
+	for _, root := range roots {
+		byID[root.ID] = root
+	}
+	root, ok := byID["filesystem"]
+	if !ok {
+		t.Fatal("expected filesystem root when FilesystemBrowsing is true")
+	}
+	if root.Path != "/" {
+		t.Fatalf("expected filesystem root path '/', got %q", root.Path)
+	}
+	if root.Writable {
+		t.Fatal("expected filesystem root to be read-only")
 	}
 }
 

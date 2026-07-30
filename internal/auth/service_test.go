@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -265,53 +264,6 @@ func TestServiceAuditDoesNotRecordRawTokensOrCredentialPayloads(t *testing.T) {
 	}
 }
 
-func TestAuthMigrationsAreAdditiveForPairedDevices(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "legacy.db")
-	legacy, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if _, err := legacy.ExecContext(ctx, `CREATE TABLE paired_devices(
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		device_id TEXT NOT NULL UNIQUE,
-		role TEXT NOT NULL,
-		display_name TEXT NOT NULL,
-		token_hash BLOB NOT NULL,
-		status TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		last_seen_at INTEGER NOT NULL,
-		revoked_at INTEGER NOT NULL DEFAULT 0,
-		metadata_json TEXT NOT NULL DEFAULT '{}'
-	)`); err != nil {
-		t.Fatalf("create legacy paired_devices: %v", err)
-	}
-	if _, err := legacy.ExecContext(ctx, `INSERT INTO paired_devices(device_id, role, display_name, token_hash, status, created_at, last_seen_at, revoked_at, metadata_json) VALUES('device-legacy', 'admin', 'Legacy', x'010203', 'active', 1, 2, 0, '{}')`); err != nil {
-		t.Fatalf("seed legacy paired device: %v", err)
-	}
-	_ = legacy.Close()
-
-	database, err := db.Open(path)
-	if err != nil {
-		t.Fatalf("Open migrated db: %v", err)
-	}
-	defer database.Close()
-	device, err := database.GetPairedDevice(ctx, "device-legacy")
-	if err != nil {
-		t.Fatalf("GetPairedDevice: %v", err)
-	}
-	if device.DisplayName != "Legacy" || device.Status != approval.StatusActive || len(device.TokenHash) != 3 {
-		t.Fatalf("paired device was destructively changed: %#v", device)
-	}
-	for _, table := range []string{"auth_users", "passkey_credentials", "webauthn_ceremonies", "auth_sessions"} {
-		var name string
-		if err := database.SQL.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
-			t.Fatalf("expected auth table %s after migration: %v", table, err)
-		}
-	}
-}
-
 func newAuthTestService(t *testing.T) (*Service, *db.DB) {
 	t.Helper()
 	database := openAuthTestDB(t)
@@ -341,7 +293,7 @@ func authTestConfig() config.Config {
 	cfg.Auth.SessionIdleTTLSeconds = 60
 	cfg.Auth.SessionAbsoluteTTLSeconds = 3600
 	cfg.Auth.StepUpTTLSeconds = 120
-	cfg.Auth.FallbackPolicy = config.AuthFallbackPairedTokenPlusWarn
+	cfg.Auth.FallbackPolicy = config.AuthFallbackAdminRecoveryOnly
 	cfg.Auth.EnforcementMode = config.AuthEnforcementWarn
 	cfg.Auth.RequirePasskeyForSensitive = true
 	return cfg

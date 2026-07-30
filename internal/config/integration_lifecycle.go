@@ -17,16 +17,6 @@ func QuarantineInvalidOptionalIntegrations(cfg *Config) []IntegrationQuarantine 
 		return nil
 	}
 	var quarantined []IntegrationQuarantine
-	for name, server := range cfg.Tools.MCPServers {
-		if !server.Enabled {
-			continue
-		}
-		if err := validateMCPServers(map[string]MCPServerConfig{name: server}); err != nil {
-			server.Enabled = false
-			cfg.Tools.MCPServers[name] = server
-			quarantined = append(quarantined, IntegrationQuarantine{Name: "mcp:" + name, Reason: err.Error()})
-		}
-	}
 	if cfg.Triggers.Webhook.Enabled && strings.TrimSpace(cfg.Triggers.Webhook.Secret) == "" && !integrationAddrIsLoopback(cfg.Triggers.Webhook.Addr) {
 		cfg.Triggers.Webhook.Enabled = false
 		quarantined = append(quarantined, IntegrationQuarantine{Name: "webhook", Reason: "public webhook requires a secret"})

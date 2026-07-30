@@ -42,8 +42,8 @@ func TestBuildApprovalPromptRepresentativeSubjects(t *testing.T) {
 
 func TestBuildAccessDashboardViewLocalAndHostedStates(t *testing.T) {
 	local := config.Default()
-	local.Tools.RestrictToWorkspace = true
 	local.WorkspaceDir = t.TempDir()
+	local.Hardening.ExecAllowedPrograms = nil
 	local.Service.Enabled = false
 	view := BuildAccessDashboardView(local, intdoctor.Report{}, 0, 0)
 	if len(view.Sections) != 7 {
@@ -55,13 +55,12 @@ func TestBuildAccessDashboardViewLocalAndHostedStates(t *testing.T) {
 	if view.Sections[1].Name != "Commands" || view.Sections[1].Risk != "green" {
 		t.Fatalf("expected disabled command execution to be green, got %#v", view.Sections[1])
 	}
-	local.Tools.EnableExec = true
+	local.Hardening.ExecAllowedPrograms = []string{"git"}
 	view = BuildAccessDashboardView(local, intdoctor.Report{}, 0, 0)
 	if view.Sections[1].Risk != "red" {
 		t.Fatalf("expected trusted available command execution to be red, got %#v", view.Sections[1])
 	}
 	hosted := config.Default()
-	hosted.Tools.RestrictToWorkspace = false
 	hosted.Service.Enabled = true
 	hosted.Service.Secret = "secret"
 	hosted.Security.Network.Enabled = true
@@ -91,13 +90,13 @@ func TestBuildDeviceViewsFormatsLastUsed(t *testing.T) {
 func TestBuildSettingsHomeView(t *testing.T) {
 	cfg := config.Default()
 	view := BuildSettingsHomeView(cfg)
-	if len(view.Sections) != 9 {
+	if len(view.Sections) != 8 {
 		t.Fatalf("expected settings sections, got %#v", view.Sections)
 	}
 	if view.Sections[0].Title != "AI Provider" {
 		t.Fatalf("expected provider first, got %#v", view.Sections[0])
 	}
-	if view.Sections[7].Title != "Context" || view.Sections[7].Advanced || !strings.Contains(view.Sections[7].Action, "--section context") {
-		t.Fatalf("expected visible context settings section, got %#v", view.Sections[7])
+	if view.Sections[6].Title != "Context" || view.Sections[6].Advanced || !strings.Contains(view.Sections[6].Action, "--section context") {
+		t.Fatalf("expected visible context settings section, got %#v", view.Sections[6])
 	}
 }

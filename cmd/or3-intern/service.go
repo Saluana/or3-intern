@@ -13,57 +13,53 @@ import (
 	"sync"
 	"time"
 
-	"or3-intern/internal/agent"
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/app"
 	"or3-intern/internal/approval"
+	"or3-intern/internal/artifacts"
+	"or3-intern/internal/channels"
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
 	"or3-intern/internal/db"
+	"or3-intern/internal/jobs"
 	or3log "or3-intern/internal/log"
-	"or3-intern/internal/mcp"
+	"or3-intern/internal/memory"
+	"or3-intern/internal/memorysvc"
+	"or3-intern/internal/providers"
+	"or3-intern/internal/runners"
+	"or3-intern/internal/security"
 )
 
 type serviceServer struct {
-	config                config.Config
-	configPath            string
-	runtime               *agent.Runtime
-	cronSvc               *cron.Service
-	subagentManager       *agent.SubagentManager
-	agentCLIManager       *agentcli.Manager
-	chatManager           *agentcli.ChatManager
-	mcpManager            *mcp.Manager
-	mcpTestManagerFactory serviceMCPTestManagerFactory
-	jobs                  *agent.JobRegistry
-	channelDeliverer      agent.MetaDeliverer
-	broker                *approval.Broker
-	unsafeDev             bool
-	controlOnce           sync.Once
-	controlSvc            *controlplane.Service
-	appOnce               sync.Once
-	appSvc                *app.ServiceApp
-	componentsOnce        sync.Once
-	terminalManager       *serviceTerminalManager
-	terminalTicketStore   *serviceTerminalWebSocketTicketStore
-	rateLimiter           *serviceRateLimiter
-	authFailures          *serviceAuthFailureTracker
-	nonceGuard            *serviceNonceReplayGuard
-	modelCatalog          *serviceModelCatalogCache
-	secureRelayHub        *secureConnectionRelayHub
-	doctorTurnMu          sync.Mutex
-	doctorTurnOnce        sync.Once
-	doctorActiveTurns     map[string]doctorSessionTurnLease
-}
-
-type serviceDeviceResponse struct {
-	DeviceID    string `json:"device_id"`
-	DisplayName string `json:"display_name,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Status      string `json:"status,omitempty"`
-	CreatedAt   int64  `json:"created_at,omitempty"`
-	LastSeenAt  int64  `json:"last_seen_at,omitempty"`
-	RevokedAt   int64  `json:"revoked_at,omitempty"`
+	config              config.Config
+	configPath          string
+	database            *db.DB
+	audit               *security.AuditLogger
+	artifacts           *artifacts.Store
+	memRetriever        *memory.Retriever
+	docRetriever        *memory.DocRetriever
+	embedProvider       *providers.Client
+	cronSvc             *cron.Service
+	runnerManager       *runners.Manager
+	chatManager         *runners.ChatManager
+	turnOrchestrator    *app.RunnerTurnOrchestrator
+	jobs                *jobs.Registry
+	channelDeliverer    channels.MetaDeliverer
+	broker              *approval.Broker
+	unsafeDev           bool
+	controlOnce         sync.Once
+	controlSvc          *controlplane.Service
+	appOnce             sync.Once
+	appSvc              *app.ServiceApp
+	componentsOnce      sync.Once
+	terminalManager     *serviceTerminalManager
+	terminalTicketStore *serviceTerminalWebSocketTicketStore
+	rateLimiter         *serviceRateLimiter
+	authFailures        *serviceAuthFailureTracker
+	nonceGuard          *serviceNonceReplayGuard
+	modelCatalog        *serviceModelCatalogCache
+	secureRelayHub      *secureConnectionRelayHub
+	memorySvc           *memorysvc.Service
 }
 
 func (s *serviceServer) initComponents() {
@@ -119,7 +115,6 @@ type serviceModelCatalogItem struct {
 
 const (
 	serviceTurnsBodyLimit                    int64 = 1 << 20
-	serviceSubagentsBodyLimit                int64 = 1 << 20
 	servicePairingBodyLimit                  int64 = 64 << 10
 	serviceApprovalBodyLimit                 int64 = 64 << 10
 	serviceEmbeddingsBodyLimit               int64 = 64 << 10
@@ -129,7 +124,7 @@ const (
 	serviceFileTextReadLimit                 int64 = 1 << 20
 	serviceFileTextWriteLimit                int64 = 1 << 20
 	serviceTerminalBodyLimit                 int64 = 64 << 10
-	serviceAgentRunsBodyLimit                int64 = 256 << 10
+	serviceRunnerRunsBodyLimit               int64 = 256 << 10
 	serviceCronBodyLimit                     int64 = 64 << 10
 	serviceTerminalSessionTTL                      = 10 * time.Minute
 	serviceTerminalMaxSessions                     = 4
@@ -143,27 +138,27 @@ const (
 	serviceJobStreamHeartbeatInterval              = 15 * time.Second
 )
 
-func runServiceCommand(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry) error {
-	return runServiceCommandWithBroker(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, nil)
+func runServiceCommand(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry) error {
+	return runServiceCommandWithBroker(ctx, cfg, runnerManager, jobRegistry, nil)
 }
 
-func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker) error {
-	return runServiceCommandWithBrokerOptions(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, false)
+func runServiceCommandWithBroker(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry, broker *approval.Broker) error {
+	return runServiceCommandWithBrokerOptions(ctx, cfg, runnerManager, jobRegistry, broker, false)
 }
 
-func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool) error {
-	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, unsafeDev, nil)
+func runServiceCommandWithBrokerOptions(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool) error {
+	return runServiceCommandWithBrokerOptionsAndCron(ctx, cfg, runnerManager, jobRegistry, broker, unsafeDev, nil)
 }
 
-func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
-	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, unsafeDev, cronSvc, nil)
+func runServiceCommandWithBrokerOptionsAndCron(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
+	return runServiceCommandWithBrokerOptionsCronMCP(ctx, cfg, runnerManager, nil, jobRegistry, broker, unsafeDev, cronSvc)
 }
 
-func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager) error {
-	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, rt, subagentManager, agentCLIManager, jobs, broker, unsafeDev, cronSvc, mcpManager, nil)
+func runServiceCommandWithBrokerOptionsCronMCP(ctx context.Context, cfg config.Config, runnerManager *runners.Manager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service) error {
+	return runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHostDeps{}, runnerManager, nil, turnOrchestrator, jobRegistry, broker, unsafeDev, cronSvc, nil)
 }
 
-func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, rt *agent.Runtime, subagentManager *agent.SubagentManager, agentCLIManager *agentcli.Manager, jobs *agent.JobRegistry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, mcpManager *mcp.Manager, channelDeliverer agent.MetaDeliverer) error {
+func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, cfg config.Config, host serviceHostDeps, runnerManager *runners.Manager, chatManager *runners.ChatManager, turnOrchestrator *app.RunnerTurnOrchestrator, jobRegistry *jobs.Registry, broker *approval.Broker, unsafeDev bool, cronSvc *cron.Service, channelDeliverer channels.MetaDeliverer) error {
 	or3log.InstallStdlibSink()
 	if strings.TrimSpace(cfg.Service.Secret) == "" {
 		return fmt.Errorf("service secret is required")
@@ -171,20 +166,26 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	if err := validateStartupCommandWithOptions("service", cfg, unsafeDev, false); err != nil {
 		return err
 	}
-	if rt == nil {
-		return fmt.Errorf("runtime not configured")
+	if host.DB == nil {
+		return fmt.Errorf("database not configured")
 	}
-	if jobs == nil {
-		jobs = agent.NewJobRegistry(0, 0)
+	if jobRegistry == nil {
+		jobRegistry = jobs.NewRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), runtime: rt, cronSvc: cronSvc, subagentManager: subagentManager, agentCLIManager: agentCLIManager, chatManager: nil, mcpManager: mcpManager, jobs: jobs, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
-	server.registerDoctorAdminBrainTools()
-	if rt.DB != nil {
-		server.chatManager = &agentcli.ChatManager{DB: rt.DB, Manager: agentCLIManager, Jobs: jobs, Broker: broker}
-		if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
-			log.Printf("chat manager: startup reconciliation failed: %v", err)
-		}
+	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), cronSvc: cronSvc, runnerManager: runnerManager, chatManager: nil, turnOrchestrator: turnOrchestrator, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
+	server.applyHostDeps(host)
+	if db := server.serviceDB(); db != nil {
+		server.memorySvc = memorysvc.New(cfg, db, server.serviceEmbedProvider(), currentEmbedFingerprint(cfg))
 	}
+	if chatManager != nil {
+		server.chatManager = chatManager
+	} else if db := server.serviceDB(); db != nil {
+		server.chatManager = buildRuntimeChatManager(cfg, db, runnerManager, jobRegistry, broker)
+	}
+	if turnOrchestrator == nil && server.chatManager != nil {
+		turnOrchestrator = buildRunnerTurnOrchestrator(cfg, server.chatManager, server.serviceDB(), server.serviceMemRetriever(), server.serviceDocRetriever(), server.serviceEmbedProvider())
+	}
+	server.turnOrchestrator = turnOrchestrator
 	authSvc := server.app().Auth()
 	mux := newServiceMux(server)
 
@@ -196,34 +197,64 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 		IdleTimeout:       60 * time.Second,
 	}
 
-	return serveHTTPWithConfiguredTransport(ctx, httpServer, cfg)
+	return serveHTTPWithConfiguredTransport(ctx, httpServer, cfg, func() error {
+		// Claim the service socket before mutating runner state. A duplicate
+		// process must fail its bind without aborting turns owned by the live
+		// service.
+		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
+			return fmt.Errorf("runner manager start: %w", err)
+		}
+		if server.chatManager != nil {
+			if err := server.chatManager.ReconcileOnStartup(ctx); err != nil {
+				log.Printf("chat manager: startup reconciliation failed: %v", err)
+			}
+		}
+		return nil
+	})
 }
 
-func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Server, cfg config.Config) error {
+func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Server, cfg config.Config, afterBind ...func() error) error {
 	errCh := make(chan error, 1)
 	socketPath := strings.TrimSpace(cfg.Service.UnixSocket)
+	var listener net.Listener
 	if socketPath != "" {
 		if err := prepareUnixSocketPath(socketPath); err != nil {
 			return err
 		}
-		listener, err := net.Listen("unix", socketPath)
+		var err error
+		listener, err = net.Listen("unix", socketPath)
 		if err != nil {
 			return err
 		}
-		go func() {
-			log.Printf("or3-intern service listening on unix socket %s", socketPath)
-			if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-				errCh <- err
-			}
-		}()
 	} else {
-		go func() {
-			log.Printf("or3-intern service listening on %s", cfg.Service.Listen)
-			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				errCh <- err
-			}
-		}()
+		var err error
+		listener, err = net.Listen("tcp", cfg.Service.Listen)
+		if err != nil {
+			return err
+		}
 	}
+	for _, callback := range afterBind {
+		if callback == nil {
+			continue
+		}
+		if err := callback(); err != nil {
+			_ = listener.Close()
+			if socketPath != "" {
+				cleanupUnixSocketPath(socketPath)
+			}
+			return err
+		}
+	}
+	go func() {
+		if socketPath != "" {
+			log.Printf("or3-intern service listening on unix socket %s", socketPath)
+		} else {
+			log.Printf("or3-intern service listening on %s", cfg.Service.Listen)
+		}
+		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
@@ -284,216 +315,16 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 
 func (s *serviceServer) control() *controlplane.Service {
 	s.controlOnce.Do(func() {
-		s.controlSvc = controlplane.New(s.config, s.runtime, s.broker, s.jobs, s.subagentManager)
-		s.controlSvc.MCPStatus = s.mcpManager
+		s.controlSvc = controlplane.New(s.config, s.serviceDB(), s.serviceEmbedProvider(), s.serviceAudit(), s.broker, s.jobs)
 	})
 	return s.controlSvc
 }
 
 func (s *serviceServer) app() *app.ServiceApp {
 	s.appOnce.Do(func() {
-		s.appSvc = app.NewServiceAppWithAgentCLI(s.config, s.runtime, s.jobs, s.subagentManager, s.agentCLIManager, s.control())
+		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.jobs, s.runnerManager, s.turnOrchestrator, s.control())
 	})
 	return s.appSvc
-}
-
-func (s *serviceServer) handlePairing(w http.ResponseWriter, r *http.Request) {
-	appSvc := s.app()
-	if s.broker == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
-		return
-	}
-	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/pairing/")
-	if path == "requests" {
-		switch r.Method {
-		case http.MethodPost:
-			limitServiceRequestBody(w, r, servicePairingBodyLimit)
-			var body struct {
-				Role         string         `json:"role"`
-				DisplayName  string         `json:"display_name"`
-				DisplayName2 string         `json:"displayName"`
-				Origin       string         `json:"origin"`
-				Metadata     map[string]any `json:"metadata"`
-				DeviceID     string         `json:"device_id"`
-			}
-			if err := decodeServiceRequestBody(r.Body, &body); err != nil {
-				writeServiceRequestDecodeError(w, err)
-				return
-			}
-			req, code, err := appSvc.CreatePairingRequest(r.Context(), approval.PairingRequestInput{Role: body.Role, DisplayName: serviceFirstNonEmpty(body.DisplayName, body.DisplayName2), Origin: body.Origin, Metadata: body.Metadata, DeviceID: body.DeviceID})
-			if err != nil {
-				writeServiceError(w, r, http.StatusBadRequest, "pairing request failed", err)
-				return
-			}
-			writeServiceJSON(w, http.StatusAccepted, map[string]any{"id": req.ID, "device_id": req.DeviceID, "role": req.Role, "display_name": req.DisplayName, "expires_at": req.ExpiresAt, "code": code})
-		case http.MethodGet:
-			if !requireServiceRole(w, r, approval.RoleOperator) {
-				return
-			}
-			items, err := appSvc.ListPairingRequests(r.Context(), r.URL.Query().Get("status"), 100)
-			if err != nil {
-				writeServiceError(w, r, http.StatusBadGateway, "pairing list unavailable", err)
-				return
-			}
-			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
-		default:
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		}
-		return
-	}
-	if path == "exchange" {
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		if retryAfter := s.serviceAuthRetryAfter(r, "pairing"); retryAfter > 0 {
-			writeServiceAuthRateLimit(w, r, retryAfter)
-			return
-		}
-		limitServiceRequestBody(w, r, servicePairingBodyLimit)
-		var body struct {
-			RequestID int64  `json:"request_id"`
-			Code      string `json:"code"`
-		}
-		if err := decodeServiceRequestBody(r.Body, &body); err != nil {
-			writeServiceRequestDecodeError(w, err)
-			return
-		}
-		pairingScope := fmt.Sprintf("pairing:%d", body.RequestID)
-		if retryAfter := s.serviceAuthRetryAfter(r, pairingScope); retryAfter > 0 {
-			writeServiceAuthRateLimit(w, r, retryAfter)
-			return
-		}
-		device, token, err := appSvc.ExchangePairingCode(r.Context(), approval.PairingExchangeInput{RequestID: body.RequestID, Code: body.Code})
-		if err != nil {
-			s.recordServiceAuthFailure(r, "pairing")
-			s.recordServiceAuthFailure(r, pairingScope)
-			if message, ok := servicePublicPairingExchangeError(err); ok {
-				writeServiceJSON(w, http.StatusBadRequest, serviceErrorPayload(r, message))
-			} else {
-				writeServiceError(w, r, http.StatusBadRequest, "pairing exchange failed", err)
-			}
-			return
-		}
-		s.clearServiceAuthFailures(r, "pairing")
-		s.clearServiceAuthFailures(r, pairingScope)
-		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": device.DeviceID, "role": device.Role, "token": token})
-		return
-	}
-	if !strings.HasPrefix(path, "requests/") {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing route not found"})
-		return
-	}
-	if !requireServiceRole(w, r, approval.RoleOperator) {
-		return
-	}
-	parts := strings.Split(strings.TrimPrefix(path, "requests/"), "/")
-	if len(parts) != 2 {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing route not found"})
-		return
-	}
-	id, err := parseServiceInt64(parts[0])
-	if err != nil {
-		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid pairing request ID"})
-		return
-	}
-	switch parts[1] {
-	case "approve":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		req, err := appSvc.ApprovePairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor)
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "pairing approval failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"id": req.ID, "status": req.Status})
-	case "deny":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		if err := appSvc.DenyPairingRequest(r.Context(), id, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "pairing denial failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"id": id, "status": "denied"})
-	default:
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "pairing action not found"})
-	}
-}
-
-func (s *serviceServer) handleDevices(w http.ResponseWriter, r *http.Request) {
-	appSvc := s.app()
-	if s.broker == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "approval broker unavailable"})
-		return
-	}
-	if !requireServiceRole(w, r, approval.RoleOperator) {
-		return
-	}
-	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/devices")
-	if path == "" || path == "/" {
-		if r.Method != http.MethodGet {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		items, err := appSvc.ListDevices(r.Context(), 100)
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadGateway, "device list unavailable", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"items": serviceDeviceResponses(items)})
-		return
-	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" {
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device route not found"})
-		return
-	}
-	deviceID := parts[0]
-	switch parts[1] {
-	case "revoke":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		if err := appSvc.RevokeDevice(r.Context(), deviceID, serviceAuthIdentityFromContext(r.Context()).Actor); err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "device revoke failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": deviceID, "status": "revoked"})
-	case "rotate":
-		if r.Method != http.MethodPost {
-			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-			return
-		}
-		rotated, token, err := appSvc.RotateDevice(r.Context(), deviceID)
-		if err != nil {
-			writeServiceError(w, r, http.StatusBadRequest, "device rotation failed", err)
-			return
-		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"device_id": rotated.DeviceID, "token": token})
-	default:
-		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "device action not found"})
-	}
-}
-
-func serviceDeviceResponses(items []db.PairedDeviceRecord) []serviceDeviceResponse {
-	out := make([]serviceDeviceResponse, 0, len(items))
-	for _, item := range items {
-		out = append(out, serviceDeviceResponse{
-			DeviceID:    item.DeviceID,
-			DisplayName: item.DisplayName,
-			Role:        item.Role,
-			Status:      item.Status,
-			CreatedAt:   item.CreatedAt,
-			LastSeenAt:  item.LastSeenAt,
-			RevokedAt:   item.RevokedAt,
-		})
-	}
-	return out
 }
 
 func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -507,10 +338,7 @@ func (s *serviceServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 		jobID := strings.TrimSpace(parts[0])
 		snapshot, err := s.app().GetJob(jobID)
 		if err != nil {
-			if s.writePersistedSubagentJobSnapshot(w, r, jobID) {
-				return
-			}
-			if s.writePersistedAgentCLIRunSnapshot(w, r, jobID) {
+			if s.writePersistedRunnerRunSnapshot(w, r, jobID) {
 				return
 			}
 			if s.writePersistedServiceJobSnapshot(w, r, jobID) {

@@ -5,26 +5,32 @@ import (
 	"os"
 	"path/filepath"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runnercontext"
 )
 
-func prepareRuntimeStorage(cfg config.Config) error {
+func prepareRuntimeStorage(cfg *config.Config, cfgPath string) error {
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir db dir: %w", err)
 	}
 	if err := os.MkdirAll(cfg.ArtifactsDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir artifacts dir: %w", err)
 	}
-	if err := ensureFileIfMissing(cfg.SoulFile, agent.DefaultSoul); err != nil {
+	if err := ensureFileIfMissing(cfg.SoulFile, runnercontext.DefaultSoul); err != nil {
 		return fmt.Errorf("bootstrap soul file: %w", err)
 	}
-	if err := ensureFileIfMissing(cfg.AgentsFile, agent.DefaultAgentInstructions); err != nil {
+	if err := ensureFileIfMissing(cfg.AgentsFile, runnercontext.DefaultAgentInstructions); err != nil {
 		return fmt.Errorf("bootstrap agents file: %w", err)
 	}
-	if err := ensureFileIfMissing(cfg.ToolsFile, agent.DefaultToolNotes); err != nil {
+	if err := ensureFileIfMissing(cfg.ToolsFile, runnercontext.DefaultRunnerNotes); err != nil {
 		return fmt.Errorf("bootstrap tools file: %w", err)
+	}
+	if _, err := ensureMemorySkillRegistered(cfgPath, cfg); err != nil {
+		return fmt.Errorf("memory skill registration: %w", err)
 	}
 	if cfg.IdentityFile != "" {
 		_ = ensureFileIfMissing(cfg.IdentityFile, "# Identity\n")

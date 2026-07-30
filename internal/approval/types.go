@@ -1,7 +1,6 @@
 package approval
 
 import (
-	"context"
 	"time"
 
 	"or3-intern/internal/config"
@@ -22,6 +21,7 @@ const (
 
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
+	RoleConnect       = "connect"
 	RoleServiceClient = "service-client"
 	RoleWebUI         = "web-ui"
 	RoleNode          = "node"
@@ -42,58 +42,13 @@ const (
 
 const defaultPageSize = 200
 
-type ModeratorRisk string
-
-const (
-	RiskLow     ModeratorRisk = "low"
-	RiskMedium  ModeratorRisk = "medium"
-	RiskHigh    ModeratorRisk = "high"
-	RiskExtreme ModeratorRisk = "extreme"
-)
-
-type ModeratorAction string
-
-const (
-	ModeratorApprove  ModeratorAction = "approve"
-	ModeratorEscalate ModeratorAction = "escalate"
-	ModeratorDeny     ModeratorAction = "deny"
-)
-
-type ModeratorReviewInput struct {
-	RequestID      int64
-	SubjectType    SubjectType
-	SubjectHash    string
-	SubjectPreview string
-	SubjectFacts   map[string]any
-	PolicyMode     config.ApprovalMode
-	AccessProfile  string
-	Requester      RequesterContext
-	Redactions     redactionStats
-}
-
-type ModeratorReviewResult struct {
-	Risk        ModeratorRisk   `json:"risk"`
-	Action      ModeratorAction `json:"action"`
-	Reason      string          `json:"reason"`
-	Alternative string          `json:"alternative,omitempty"`
-	Confidence  float64         `json:"confidence,omitempty"`
-}
-
-type Moderator interface {
-	ReviewApproval(ctx context.Context, input ModeratorReviewInput) (ModeratorReviewResult, error)
-	ModelIdentity() string
-	PolicyHash() string
-}
-
 type Broker struct {
-	DB        *db.DB
-	Audit     *security.AuditLogger
-	Config    config.ApprovalConfig
-	HostID    string
-	SignKey   []byte
-	Now       func() time.Time
-	Moderator Moderator
-	Workspace string
+	DB      *db.DB
+	Audit   *security.AuditLogger
+	Config  config.ApprovalConfig
+	HostID  string
+	SignKey []byte
+	Now     func() time.Time
 }
 
 type Decision struct {
@@ -102,6 +57,7 @@ type Decision struct {
 	RequestID        int64
 	SubjectHash      string
 	Reason           string
+	Moderator        ModeratorDecision
 }
 
 type RequesterContext struct {
@@ -127,30 +83,6 @@ type ExecEvaluation struct {
 	ApprovalToken  string
 }
 
-type SkillEvaluation struct {
-	SkillID        string
-	Version        string
-	Origin         string
-	TrustState     string
-	ToolName       string
-	PlanID         string
-	PlanHash       string
-	ScriptHash     string
-	EnvBindingHash string
-	TimeoutSeconds int
-	AgentID        string
-	SessionID      string
-	ApprovalToken  string
-}
-
-type SecretAccessEvaluation struct {
-	SecretName    string
-	Operation     string
-	AgentID       string
-	SessionID     string
-	ApprovalToken string
-}
-
 type RunnerPermissionEvaluation struct {
 	RunnerID       string
 	PermissionKind string
@@ -159,28 +91,19 @@ type RunnerPermissionEvaluation struct {
 	AgentID        string
 	SessionID      string
 	ApprovalToken  string
+	Autopilot      bool
+	RunnerMode     string
 }
 
-type ToolQuotaEvaluation struct {
-	Scope         string
-	LimitName     string
-	ToolName      string
-	Current       int
-	Limit         int
-	AgentID       string
-	SessionID     string
-	ApprovalToken string
-}
-
-type MessageSendEvaluation struct {
-	Channel       string
-	To            string
-	Text          string
-	MediaCount    int
-	ReplyInThread bool
-	AgentID       string
-	SessionID     string
-	ApprovalToken string
+type ModeratorDecision struct {
+	Reviewed   bool
+	Status     string
+	Risk       string
+	Action     string
+	Reason     string
+	Model      string
+	PolicyHash string
+	LatencyMS  int64
 }
 
 type MessageSendSubject struct {

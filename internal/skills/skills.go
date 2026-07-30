@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"or3-intern/internal/clawhub"
-	"or3-intern/internal/skilldiag"
 
 	"gopkg.in/yaml.v3"
 )
@@ -154,28 +153,25 @@ type SkillMeta struct {
 	CommandTool            string
 	CommandArgMode         string
 
-	Metadata               SkillRuntimeMeta
-	Permissions            SkillPermissions
-	AllowedTools           []string
-	PermissionState        string
-	PermissionNotes        []string
-	Publisher              string
-	Registry               string
-	InstalledVersion       string
-	Modified               bool
-	ScanStatus             string
-	ScanFindings           []string
-	Key                    string
-	Eligible               bool
-	Disabled               bool
-	Hidden                 bool
-	Missing                []string
-	Unsupported            []string
-	ParseError             string
-	RuntimeEnv             map[string]string
-	DiagnosticAvailable    bool
-	DiagnosticManifestPath string
-	DiagnosticError        string
+	Metadata         SkillRuntimeMeta
+	Permissions      SkillPermissions
+	DeclaredTools    []string
+	PermissionState  string
+	PermissionNotes  []string
+	Publisher        string
+	Registry         string
+	InstalledVersion string
+	Modified         bool
+	ScanStatus       string
+	ScanFindings     []string
+	Key              string
+	Eligible         bool
+	Disabled         bool
+	Hidden           bool
+	Missing          []string
+	Unsupported      []string
+	ParseError       string
+	RuntimeEnv       map[string]string
 
 	sourcePriority int
 	rootOrder      int
@@ -411,7 +407,7 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	}
 	meta.Permissions = normalizeSkillPermissions(fm.Permissions)
 	declaredTools, _ := parseDeclaredTools(rawTop["tools"])
-	meta.AllowedTools = declaredTools
+	meta.DeclaredTools = declaredTools
 
 	manifest, err := loadManifest(dir)
 	if err != nil {
@@ -419,7 +415,7 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 		meta.Hidden = true
 	} else if len(manifest.Entrypoints) > 0 || len(manifest.Tools) > 0 || manifest.Permissions.Requested() || strings.TrimSpace(manifest.Summary) != "" {
 		meta.Entrypoints = manifest.Entrypoints
-		meta.AllowedTools = mergeStringLists(meta.AllowedTools, compactStrings(manifest.Tools))
+		meta.DeclaredTools = mergeStringLists(meta.DeclaredTools, compactStrings(manifest.Tools))
 		if requested := normalizeSkillPermissions(manifest.Permissions); requested.Requested() {
 			meta.Permissions = requested
 		}
@@ -447,14 +443,6 @@ func loadSkill(dir, path string, root Root, order int, opts LoadOptions) SkillMe
 	applyOriginMetadata(&meta)
 	applyEligibility(&meta, rawTop, body, entry, opts)
 	applyApprovalPolicy(&meta, opts.ApprovalPolicy)
-	if _, path, ok, err := skilldiag.LoadManifest(dir); err != nil {
-		meta.DiagnosticManifestPath = path
-		meta.DiagnosticError = err.Error()
-		meta.PermissionNotes = append(meta.PermissionNotes, "diagnostic manifest invalid: "+err.Error())
-	} else if ok {
-		meta.DiagnosticAvailable = true
-		meta.DiagnosticManifestPath = path
-	}
 	return meta
 }
 
@@ -907,7 +895,7 @@ func detectUnsupported(meta SkillMeta, rawTop map[string]any, body string, opts 
 			unsupported = append(unsupported, "requires exec tool for local binary: "+strings.Join(meta.Metadata.Requires.Bins, ", "))
 		}
 	}
-	for _, toolName := range meta.AllowedTools {
+	for _, toolName := range meta.DeclaredTools {
 		if len(opts.AvailableTools) == 0 {
 			continue
 		}
@@ -990,39 +978,6 @@ func (inv Inventory) Summary(max int) string {
 	return summarize(inv.Skills, max)
 }
 
-func (inv Inventory) ModelSummary(max int) string {
-	filtered := make([]SkillMeta, 0, len(inv.Skills))
-	for _, skill := range inv.Skills {
-		if !skill.Eligible || skill.Hidden {
-			continue
-		}
-		filtered = append(filtered, skill)
-	}
-	if len(filtered) == 0 {
-		return "(no eligible skills found)"
-	}
-	if max <= 0 {
-		max = 50
-	}
-	lines := make([]string, 0, min(len(filtered), max)+1)
-	for i, skill := range filtered {
-		if i >= max {
-			lines = append(lines, "…")
-			break
-		}
-		desc := strings.TrimSpace(skill.Description)
-		if desc == "" {
-			desc = strings.TrimSpace(skill.Summary)
-		}
-		location := strings.TrimSpace(skill.Location)
-		if location == "" {
-			location = skill.Dir
-		}
-		lines = append(lines, fmt.Sprintf("- %s | %s | %s", skill.Name, oneLine(desc, 140), location))
-	}
-	return strings.Join(lines, "\n")
-}
-
 func summarize(skills []SkillMeta, max int) string {
 	if max <= 0 {
 		max = 50
@@ -1044,61 +999,6 @@ func summarize(skills []SkillMeta, max int) string {
 		return "(no skills found)"
 	}
 	return strings.Join(lines, "\n")
-}
-
-func (inv Inventory) RunEnv() map[string]string {
-	out := map[string]string{}
-	for _, skill := range inv.Skills {
-		if !skill.Eligible {
-			continue
-		}
-		for k, v := range filteredRuntimeEnv(skill.RuntimeEnv) {
-			if _, exists := out[k]; !exists {
-				out[k] = v
-			}
-		}
-	}
-	return out
-}
-
-func (inv Inventory) RunEnvForSkill(name string) map[string]string {
-	skill, ok := inv.Get(name)
-	if !ok || !skill.Eligible {
-		return nil
-	}
-	return filteredRuntimeEnv(skill.RuntimeEnv)
-}
-
-func (inv Inventory) ResolveBundlePath(name, relPath string) (string, error) {
-	skill, ok := inv.Get(name)
-	if !ok {
-		return "", fmt.Errorf("skill not found: %s", name)
-	}
-	root, err := filepath.EvalSymlinks(skill.Dir)
-	if err != nil {
-		return "", err
-	}
-	relPath = strings.TrimSpace(relPath)
-	if relPath == "" {
-		return root, nil
-	}
-	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("bundle path must be relative")
-	}
-	full := filepath.Join(root, relPath)
-	clean := filepath.Clean(full)
-	real, err := filepath.EvalSymlinks(clean)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		real = clean
-	}
-	rel, err := filepath.Rel(root, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fs.ErrPermission
-	}
-	return real, nil
 }
 
 func LoadBody(path string, maxBytes int) (string, error) {

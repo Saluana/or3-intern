@@ -46,9 +46,6 @@ func TestPrintSetupSuccess(t *testing.T) {
 	if !strings.Contains(got, "or3-intern chat") {
 		t.Fatalf("expected chat instruction, got %q", got)
 	}
-	if !strings.Contains(got, "or3-intern pair --auto") {
-		t.Fatalf("expected pair instruction, got %q", got)
-	}
 	if !strings.Contains(got, "or3-intern health") {
 		t.Fatalf("expected health instruction, got %q", got)
 	}

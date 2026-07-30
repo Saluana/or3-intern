@@ -89,14 +89,6 @@ func publicChannelExposureFindings(cfg config.Config, opts Options, ch ChannelSn
 				Summary:  "open-access channel can reach guarded tools because no access profile applies",
 			})
 		}
-		if cfg.Skills.EnableExec && cfg.Hardening.PrivilegedTools {
-			findings = append(findings, Finding{
-				ID:       "channels.open_access_skills_without_profile",
-				Area:     ch.Name,
-				Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-				Summary:  "open-access channel can reach skill execution because no access profile applies",
-			})
-		}
 		return findings
 	}
 	if profileAllowsPrivileged(profile) {
@@ -105,30 +97,6 @@ func publicChannelExposureFindings(cfg config.Config, opts Options, ch ChannelSn
 			Area:     ch.Name,
 			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
 			Summary:  fmt.Sprintf("open-access channel resolves to profile %q with privileged capability", profileName),
-		})
-	}
-	if cfg.Hardening.GuardedTools && !profileHasMeaningfulToolRestriction(profile) {
-		findings = append(findings, Finding{
-			ID:       "channels.open_access_no_tool_boundary",
-			Area:     ch.Name,
-			Severity: SeverityWarn,
-			Summary:  fmt.Sprintf("open-access channel resolves to profile %q without a meaningful tool restriction", profileName),
-		})
-	}
-	if cfg.Hardening.EnableExecShell && cfg.Hardening.PrivilegedTools && profileCanReachExec(profile) {
-		findings = append(findings, Finding{
-			ID:       "channels.open_access_exec_shell",
-			Area:     ch.Name,
-			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-			Summary:  fmt.Sprintf("open-access channel can reach exec shell mode via profile %q", profileName),
-		})
-	}
-	if cfg.Skills.EnableExec && profileAllowsPrivileged(profile) && (profileAllowsTool(profile, "run_skill") || profileAllowsTool(profile, "run_skill_script")) {
-		findings = append(findings, Finding{
-			ID:       "channels.open_access_skill_exec",
-			Area:     ch.Name,
-			Severity: severityFor(opts.Mode, SeverityWarn, opts.Mode == ModeStartupServe),
-			Summary:  fmt.Sprintf("open-access channel can reach skill execution via profile %q", profileName),
 		})
 	}
 	return findings

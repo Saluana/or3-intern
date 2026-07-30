@@ -35,17 +35,17 @@ type Retrieved struct {
 
 // Retriever ranks vector, FTS, lexical, and recency signals into a single result set.
 type Retriever struct {
-	DB               *db.DB
-	EmbedFingerprint string
-	VectorWeight     float64
-	FTSWeight        float64
-	LexicalWeight    float64
-	RecencyWeight    float64
-	TaskWeight       float64
-	VectorScanLimit  int
-	TaskContext          string
-	LastRejected         []string
-	LastDocRetrievalErr  error
+	DB                  *db.DB
+	EmbedFingerprint    string
+	VectorWeight        float64
+	FTSWeight           float64
+	LexicalWeight       float64
+	RecencyWeight       float64
+	TaskWeight          float64
+	VectorScanLimit     int
+	TaskContext         string
+	LastRejected        []string
+	LastDocRetrievalErr error
 }
 
 var docRetrievalWarnMu sync.Mutex

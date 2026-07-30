@@ -19,28 +19,6 @@ func hardeningFindings(cfg config.Config, opts Options) []Finding {
 			FixMode:  FixModeManual,
 		})
 	}
-	if !cfg.Hardening.Quotas.Enabled {
-		findings = append(findings, Finding{
-			ID:       "quotas.disabled",
-			Area:     "quotas",
-			Severity: SeverityWarn,
-			Summary:  "tool quotas are disabled",
-			Detail:   "Per-turn safety limits are disabled.",
-			FixMode:  FixModeManual,
-		})
-	}
-	if cfg.Hardening.Quotas.MaxToolCalls <= 0 || cfg.Hardening.Quotas.MaxExecCalls <= 0 || cfg.Hardening.Quotas.MaxWebCalls <= 0 || cfg.Hardening.Quotas.MaxSubagentCalls <= 0 ||
-		cfg.Hardening.Quotas.MaxSessionToolCalls <= 0 || cfg.Hardening.Quotas.MaxSessionExecCalls <= 0 || cfg.Hardening.Quotas.MaxSessionWebCalls <= 0 || cfg.Hardening.Quotas.MaxSessionSubagentCalls <= 0 {
-		findings = append(findings, Finding{
-			ID:       "quotas.unset",
-			Area:     "quotas",
-			Severity: SeverityWarn,
-			Summary:  "one or more quota limits are unset",
-			Detail:   "Quota values should be positive when quotas are enabled.",
-			FixMode:  FixModeAutomatic,
-			FixHint:  "Restore the default hardening quotas.",
-		})
-	}
 	if cfg.Hardening.PrivilegedTools && !cfg.Hardening.Sandbox.Enabled {
 		findings = append(findings, Finding{
 			ID:       "privileged-exec.sandbox_disabled",

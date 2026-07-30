@@ -4,13 +4,12 @@ import (
 	"encoding/json"
 	"strings"
 
-	"or3-intern/internal/agentcli"
 	"or3-intern/internal/db"
+	"or3-intern/internal/runners"
 )
 
 // BuildChatRunner formats one runner's chat-discovery response item.
-// `info` is detection metadata for the runner (or zero-value for or3-intern).
-func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, defaultModel, defaultMode, defaultIsolation, defaultCwd string) map[string]any {
+func BuildChatRunner(spec runners.RunnerSpec, info runners.RunnerInfo, defaultModel, defaultMode, defaultIsolation, defaultCwd string) map[string]any {
 	id := info.ID
 	if id == "" {
 		id = string(spec.ID)
@@ -21,14 +20,8 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 	}
 	status := info.Status
 	authStatus := info.AuthStatus
-	if string(spec.ID) == string(agentcli.RunnerOR3) {
-		// or3-intern is always available.
-		if status == "" {
-			status = agentcli.RunnerStatusAvailable
-		}
-		if authStatus == "" {
-			authStatus = agentcli.AuthReady
-		}
+	if authStatus == "" {
+		authStatus = info.Runtime.AuthStatus
 	}
 	out := map[string]any{
 		"id":                id,
@@ -38,16 +31,33 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 		"supports":          spec.Supports,
 		"chat_capabilities": spec.Supports.Chat,
 	}
-	if info.Runtime.Kind != "" || len(info.Runtime.Models) > 0 || info.Runtime.DefaultModel != "" {
+	if info.Runtime.Kind != "" || len(info.Runtime.Models) > 0 || info.Runtime.DefaultModel != "" || info.Runtime.State != "" {
 		out["runtime"] = info.Runtime
 		if len(info.Runtime.Models) > 0 {
 			out["models"] = info.Runtime.Models
+		}
+		if len(info.Runtime.Providers) > 0 {
+			out["providers"] = info.Runtime.Providers
+		}
+		if len(info.Runtime.Agents) > 0 {
+			out["agents"] = info.Runtime.Agents
+		}
+		if len(info.Runtime.Skills) > 0 {
+			out["skills"] = info.Runtime.Skills
+		}
+		if len(info.Runtime.Options) > 0 {
+			out["runner_options"] = info.Runtime.Options
+		}
+		if info.Runtime.Health != nil {
+			out["native_health"] = info.Runtime.Health
 		}
 		if strings.TrimSpace(info.Runtime.DefaultModel) != "" {
 			defaultModel = info.Runtime.DefaultModel
 		}
 	}
 	if v := strings.TrimSpace(info.Version); v != "" {
+		out["version"] = v
+	} else if v := strings.TrimSpace(info.Runtime.Version); v != "" {
 		out["version"] = v
 	}
 	if v := strings.TrimSpace(info.BinaryPath); v != "" {
@@ -70,6 +80,18 @@ func BuildChatRunner(spec agentcli.RunnerSpec, info agentcli.RunnerInfo, default
 	}
 	if defaultCwd != "" {
 		out["default_cwd"] = defaultCwd
+	}
+	if next := strings.TrimSpace(info.Runtime.NextAction); next != "" {
+		out["next_action"] = next
+	}
+	if info.Runtime.FallbackReason != "" {
+		out["fallback_reason"] = info.Runtime.FallbackReason
+	}
+	if info.Runtime.Message != "" {
+		out["runtime_message"] = info.Runtime.Message
+	}
+	if authDetail := strings.TrimSpace(info.Runtime.AuthDetail); authDetail != "" {
+		out["auth_detail"] = authDetail
 	}
 	return out
 }
@@ -116,6 +138,15 @@ func BuildRunnerChatSessionResponse(s db.RunnerChatSession) map[string]any {
 	return out
 }
 
+// BuildRunnerChatSessionListResponse renders the runner-chat session listing.
+func BuildRunnerChatSessionListResponse(sessions []db.RunnerChatSession) map[string]any {
+	items := make([]map[string]any, 0, len(sessions))
+	for _, session := range sessions {
+		items = append(items, BuildRunnerChatSessionResponse(session))
+	}
+	return map[string]any{"sessions": items}
+}
+
 // BuildRunnerChatTurnResponse converts a persisted runner_chat_turns row.
 func BuildRunnerChatTurnResponse(t db.RunnerChatTurn) map[string]any {
 	out := map[string]any{
@@ -141,11 +172,11 @@ func BuildRunnerChatTurnResponse(t db.RunnerChatTurn) map[string]any {
 	if v := strings.TrimSpace(t.ErrorMessage); v != "" {
 		out["error"] = v
 	}
-	if v := strings.TrimSpace(t.AgentCLIRunID); v != "" {
-		out["agent_cli_run_id"] = v
+	if v := strings.TrimSpace(t.RunnerRunID); v != "" {
+		out["runner_run_id"] = v
 	}
-	if v := strings.TrimSpace(t.AgentCLIJobID); v != "" {
-		out["agent_cli_job_id"] = v
+	if v := strings.TrimSpace(t.RunnerJobID); v != "" {
+		out["runner_job_id"] = v
 	}
 	if t.UserMessageID > 0 {
 		out["user_message_id"] = t.UserMessageID
@@ -180,8 +211,8 @@ func BuildRunnerChatEventResponse(e db.RunnerChatEvent) map[string]any {
 	if v := strings.TrimSpace(e.Stream); v != "" {
 		out["stream"] = v
 	}
-	if v := strings.TrimSpace(e.Text); v != "" {
-		out["text"] = v
+	if e.Text != "" {
+		out["text"] = e.Text
 	}
 	if v := strings.TrimSpace(e.JobID); v != "" {
 		out["job_id"] = v
@@ -203,7 +234,7 @@ func BuildRunnerChatEventListResponse(events []db.RunnerChatEvent) map[string]an
 
 // BuildChatSessionMetaResponse converts a chat_session_meta row.
 func BuildChatSessionMetaResponse(m db.ChatSessionMeta) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"session_key":              m.SessionKey,
 		"host_id":                  m.HostID,
 		"title":                    m.Title,
@@ -226,6 +257,7 @@ func BuildChatSessionMetaResponse(m db.ChatSessionMeta) map[string]any {
 		"created_at":               m.CreatedAt,
 		"updated_at":               m.UpdatedAt,
 	}
+	return out
 }
 
 // BuildChatSessionListResponse renders the chat sessions listing.

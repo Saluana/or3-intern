@@ -12,22 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"or3-intern/internal/agent"
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/providers"
 	"or3-intern/internal/security"
 )
-
-type fakeMCPStatusProvider struct {
-	status map[string]mcp.ServerStatus
-}
-
-func (p fakeMCPStatusProvider) ServerStatus() map[string]mcp.ServerStatus {
-	return p.status
-}
 
 func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time) *approval.Broker {
 	t.Helper()
@@ -51,35 +41,52 @@ func testBroker(t *testing.T, mutate func(*config.ApprovalConfig), now time.Time
 	}
 }
 
-func TestCollectCapabilitiesReportWithMCPDetails(t *testing.T) {
-	cfg := config.Default()
-	cfg.Tools.MCPServers = map[string]config.MCPServerConfig{
-		"files": {Enabled: true, Transport: "stdio"},
-		"docs":  {Enabled: false, Transport: "streamablehttp"},
+func TestBuildRunnerRunResponseUsesDisplayTaskMetadata(t *testing.T) {
+	meta, _ := json.Marshal(map[string]any{
+		"ui_task":              "raw visible task",
+		"or3_context_injected": true,
+	})
+	resp := BuildRunnerRunResponse(db.RunnerRun{
+		ID:               "rr_1",
+		JobID:            "job_1",
+		ParentSessionKey: "sess",
+		RunnerID:         "codex",
+		Task:             "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>",
+		Mode:             "safe_edit",
+		Isolation:        "host_workspace_write",
+		Status:           db.RunnerRunStatusQueued,
+		MetaJSON:         string(meta),
+	})
+	if resp["task"] != "raw visible task" {
+		t.Fatalf("expected display task, got %#v", resp["task"])
 	}
+	if resp["execution_prompt_injected"] != true {
+		t.Fatalf("expected execution prompt marker, got %#v", resp)
+	}
+}
 
-	report := CollectCapabilitiesReportWithMCPStatus(cfg, nil, fakeMCPStatusProvider{status: map[string]mcp.ServerStatus{
-		"files": {Connected: true, ToolCount: 2},
-	}}, "", "")
-
-	if len(report.MCPServers) != 2 {
-		t.Fatalf("expected all configured MCP servers, got %#v", report.MCPServers)
-	}
-	if report.MCPServers[0].Name != "docs" || report.MCPServers[0].Transport != "streamablehttp" || report.MCPServers[0].Connected {
-		t.Fatalf("unexpected first MCP server info: %#v", report.MCPServers[0])
-	}
-	if report.MCPServers[1].Name != "files" || report.MCPServers[1].ToolCount != 2 || !report.MCPServers[1].Connected {
-		t.Fatalf("unexpected files MCP server info: %#v", report.MCPServers[1])
-	}
-	if len(report.EnabledMCPServers) != 1 || report.EnabledMCPServers[0].Name != "files" {
-		t.Fatalf("expected only enabled MCP server in enabledMcpServers, got %#v", report.EnabledMCPServers)
+func TestBuildRunnerRunResponseUsesRunnerChatUserMessage(t *testing.T) {
+	meta, _ := json.Marshal(map[string]any{
+		"runner_chat_user_message": "raw chat message",
+	})
+	resp := BuildRunnerRunResponse(db.RunnerRun{
+		ID:               "rr_2",
+		JobID:            "job_2",
+		ParentSessionKey: "sess",
+		RunnerID:         "opencode",
+		Task:             "<trusted_or3_system_instructions>\nSOUL\n</trusted_or3_system_instructions>",
+		Status:           db.RunnerRunStatusQueued,
+		MetaJSON:         string(meta),
+	})
+	if resp["task"] != "raw chat message" {
+		t.Fatalf("expected runner-chat user message, got %#v", resp["task"])
 	}
 }
 
 func TestServiceCancelApproval(t *testing.T) {
 	now := time.Unix(1_700_000_100, 0)
 	broker := testBroker(t, nil, now)
-	cp := New(config.Config{}, nil, broker, nil, nil)
+	cp := New(config.Config{}, nil, nil, nil, broker, nil)
 	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
 		ExecutablePath: "/bin/echo",
 		Argv:           []string{"hello"},
@@ -106,7 +113,7 @@ func TestServiceExpireApprovals(t *testing.T) {
 	broker := testBroker(t, func(cfg *config.ApprovalConfig) {
 		cfg.PendingTTLSeconds = 1
 	}, now)
-	cp := New(config.Config{}, nil, broker, nil, nil)
+	cp := New(config.Config{}, nil, nil, nil, broker, nil)
 	decision, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
 		ExecutablePath: "/bin/echo",
 		Argv:           []string{"hello"},
@@ -136,7 +143,7 @@ func TestServiceExpireApprovals(t *testing.T) {
 func TestServiceListApprovalRequestsFilteredByType(t *testing.T) {
 	now := time.Unix(1_700_000_100, 0)
 	broker := testBroker(t, nil, now)
-	cp := New(config.Config{}, nil, broker, nil, nil)
+	cp := New(config.Config{}, nil, nil, nil, broker, nil)
 	if _, err := broker.EvaluateExec(context.Background(), approval.ExecEvaluation{
 		ExecutablePath: "/bin/echo",
 		Argv:           []string{"hello"},
@@ -160,14 +167,14 @@ func TestServiceListApprovalRequestsFilteredByType(t *testing.T) {
 func TestServiceHealthAndReadiness(t *testing.T) {
 	cfg := config.Default()
 	cfg.Service.Secret = "secret"
-	report := New(cfg, nil, nil, nil, nil).GetHealth()
+	report := New(cfg, nil, nil, nil, nil, nil).GetHealth()
 	if report.Status != "degraded" || report.RuntimeAvailable {
 		t.Fatalf("unexpected health report: %#v", report)
 	}
 	if report.ProcessID != os.Getpid() || strings.TrimSpace(report.StartedAt) == "" {
 		t.Fatalf("expected process identity in health report, got %#v", report)
 	}
-	readiness := New(cfg, nil, nil, nil, nil).GetReadiness()
+	readiness := New(cfg, nil, nil, nil, nil, nil).GetReadiness()
 	if readiness.Status == "" || len(readiness.Findings) == 0 {
 		t.Fatalf("expected readiness findings, got %#v", readiness)
 	}
@@ -193,6 +200,19 @@ func TestBuildRunnerChatEventResponsePassesCanonicalPayload(t *testing.T) {
 	}
 	if response["type"] != "item.started" || response["text"] != "go test ./..." || response["job_id"] != "job-1" {
 		t.Fatalf("expected legacy fields preserved, got %#v", response)
+	}
+}
+
+func TestBuildRunnerChatEventResponsePreservesWhitespaceOnlyText(t *testing.T) {
+	response := BuildRunnerChatEventResponse(db.RunnerChatEvent{
+		ID:     8,
+		TurnID: "turn-1",
+		Seq:    5,
+		Type:   "text_delta",
+		Text:   " ",
+	})
+	if response["text"] != " " {
+		t.Fatalf("expected whitespace-only text delta to be preserved, got %#v", response)
 	}
 }
 
@@ -288,10 +308,9 @@ func TestServiceAuditStatusAndVerify(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	audit := &security.AuditLogger{DB: database, Key: []byte(strings.Repeat("k", 32)), Strict: true}
-	rt := &agent.Runtime{DB: database, Audit: audit}
 	cfg := config.Default()
 	cfg.Security.Audit.Enabled = true
-	cp := New(cfg, rt, nil, nil, nil)
+	cp := New(cfg, database, nil, audit, nil, nil)
 	if err := audit.Record(context.Background(), "tool.execute", "sess-1", "cli", map[string]any{"tool": "exec"}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}

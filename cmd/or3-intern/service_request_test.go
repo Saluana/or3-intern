@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDecodeServiceAgentRunRequest_Valid(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_Valid(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"runner_id": "codex",
@@ -17,7 +17,7 @@ func TestDecodeServiceAgentRunRequest_Valid(t *testing.T) {
 		"isolation": "host_workspace_write",
 		"max_turns": 5
 	}`
-	req, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	req, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,13 +50,13 @@ func TestDecodeServiceAgentRunRequest_Valid(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_Minimal(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_Minimal(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"runner_id": "opencode",
 		"task": "hello"
 	}`
-	req, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	req, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,58 +68,17 @@ func TestDecodeServiceAgentRunRequest_Minimal(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_AcceptsCamelAliasesWithWarnings(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_RejectsCamelCaseAliases(t *testing.T) {
 	body := `{
-		"parent_session_key": "session-snake",
 		"parentSessionKey": "session-camel",
 		"runnerId": "codex",
 		"task": "fix the tests",
 		"timeoutSeconds": 30,
 		"maxTurns": 4
 	}`
-	req, err := decodeServiceAgentRunRequest(strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ParentSessionKey != "session-snake" {
-		t.Fatalf("expected canonical parent_session_key to win, got %q", req.ParentSessionKey)
-	}
-	if req.RunnerID != "codex" || req.TimeoutSeconds != 30 || req.MaxTurns != 4 {
-		t.Fatalf("expected camel aliases to decode, got %#v", req)
-	}
-	if len(req.Warnings) != 1 || !strings.Contains(req.Warnings[0], "parent_session_key") {
-		t.Fatalf("expected parent_session_key conflict warning, got %#v", req.Warnings)
-	}
-}
-
-func TestDecodeServiceTurnRequest_AcceptsModelOverride(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"session_key": "svc:key",
-		"message": "hello",
-		"model": "anthropic/claude-sonnet-4-5"
-	}`), nil)
-	if err != nil {
-		t.Fatalf("decodeServiceTurnRequest: %v", err)
-	}
-	if req.Model != "anthropic/claude-sonnet-4-5" {
-		t.Fatalf("expected model override, got %q", req.Model)
-	}
-}
-
-func TestDecodeServiceTurnRequest_ConflictWarningsKeepSnakeCaseCanonical(t *testing.T) {
-	req, err := decodeServiceTurnRequest(strings.NewReader(`{
-		"session_key": "snake-session",
-		"sessionKey": "camel-session",
-		"message": "hello"
-	}`), nil)
-	if err != nil {
-		t.Fatalf("decodeServiceTurnRequest: %v", err)
-	}
-	if req.SessionKey != "snake-session" {
-		t.Fatalf("expected snake_case session_key to win, got %q", req.SessionKey)
-	}
-	if len(req.Warnings) != 1 || !strings.Contains(req.Warnings[0], "session_key") {
-		t.Fatalf("expected session_key conflict warning, got %#v", req.Warnings)
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
+	if err == nil {
+		t.Fatal("expected error for camelCase aliases")
 	}
 }
 
@@ -138,25 +97,25 @@ func TestServiceLifecyclePayloadIncludesTraceID(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_RejectsUnknownFields(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_RejectsUnknownFields(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"runner_id": "opencode",
 		"task": "hello",
 		"unknown_field": "should not be here"
 	}`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for unknown field")
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_RequiresParentSessionKey(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_RequiresParentSessionKey(t *testing.T) {
 	body := `{
 		"runner_id": "opencode",
 		"task": "hello"
 	}`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for missing parent_session_key")
 	}
@@ -165,12 +124,12 @@ func TestDecodeServiceAgentRunRequest_RequiresParentSessionKey(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_RequiresRunnerID(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_RequiresRunnerID(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"task": "hello"
 	}`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for missing runner_id")
 	}
@@ -179,12 +138,12 @@ func TestDecodeServiceAgentRunRequest_RequiresRunnerID(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_RequiresTask(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_RequiresTask(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"runner_id": "opencode"
 	}`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for missing task")
 	}
@@ -193,35 +152,35 @@ func TestDecodeServiceAgentRunRequest_RequiresTask(t *testing.T) {
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_InvalidTimeout(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_InvalidTimeout(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"runner_id": "opencode",
 		"task": "hello",
 		"timeout_seconds": "not_a_number"
 	}`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for invalid timeout_seconds")
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_InvalidMaxTurns(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_InvalidMaxTurns(t *testing.T) {
 	body := `{
 		"parent_session_key": "session-1",
 		"runner_id": "opencode",
 		"task": "hello",
 		"max_turns": "not_a_number"
 	}`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for invalid max_turns")
 	}
 }
 
-func TestDecodeServiceAgentRunRequest_TrailingData(t *testing.T) {
+func TestDecodeServiceRunnerRunRequest_TrailingData(t *testing.T) {
 	body := `{"parent_session_key": "session-1", "runner_id": "opencode", "task": "hello"} extra`
-	_, err := decodeServiceAgentRunRequest(strings.NewReader(body))
+	_, err := decodeServiceRunnerRunRequest(strings.NewReader(body))
 	if err == nil {
 		t.Fatal("expected error for trailing data")
 	}

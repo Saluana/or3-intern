@@ -6,3 +6,5 @@ or3-intern.exe
 .prompts
 .notes
 bin
+!packages/or3/bin/
+!packages/or3/bin/or3.js

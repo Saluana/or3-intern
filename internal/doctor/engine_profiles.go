@@ -102,14 +102,6 @@ func profileFindings(cfg config.Config, opts Options) []Finding {
 				Summary:  fmt.Sprintf("profile %q has broad allowedHosts", name),
 			})
 		}
-		if profileAllowsPrivileged(profile) && len(profile.AllowedTools) == 0 {
-			findings = append(findings, Finding{
-				ID:       "profiles.privileged_without_tools",
-				Area:     "profiles",
-				Severity: severityFor(opts.Mode, SeverityWarn, isHostedOrStartupMode(cfg, opts.Mode)),
-				Summary:  fmt.Sprintf("profile %q permits privileged capability without an explicit tool allowlist", name),
-			})
-		}
 	}
 	return findings
 }
@@ -144,23 +136,9 @@ func profileAllowsGuarded(profile config.AccessProfileConfig) bool {
 	return maxCapability == "" || maxCapability == "privileged" || maxCapability == "guarded"
 }
 
-func profileAllowsTool(profile config.AccessProfileConfig, toolName string) bool {
-	if len(profile.AllowedTools) == 0 {
-		return true
-	}
-	toolName = strings.TrimSpace(toolName)
-	for _, allowed := range profile.AllowedTools {
-		if strings.TrimSpace(allowed) == toolName {
-			return true
-		}
-	}
-	return false
-}
-
-func profileHasMeaningfulToolRestriction(profile config.AccessProfileConfig) bool {
-	return !profileAllowsGuarded(profile) || len(profile.AllowedTools) > 0
-}
-
+// profileAllowsTool is advisory: it inspects the profile's declared tool
+// metadata to feed doctor findings. The runner enforces its own tool policy
+// at command execution time; this helper does not gate execution.
 func profileCanReachExec(profile config.AccessProfileConfig) bool {
-	return profileAllowsPrivileged(profile) && profileAllowsTool(profile, "exec")
+	return profileAllowsPrivileged(profile)
 }

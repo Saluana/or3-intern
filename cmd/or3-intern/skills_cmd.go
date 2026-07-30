@@ -6,15 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"or3-intern/internal/clawhub"
 	"or3-intern/internal/config"
-	"or3-intern/internal/mcp"
 	"or3-intern/internal/skills"
 )
 
@@ -33,7 +30,7 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 	}
 	if deps.LoadToolNames == nil {
 		deps.LoadToolNames = func(ctx context.Context, cfg config.Config) map[string]struct{} {
-			return loadAvailableToolNamesWithManager(ctx, cfg, nil)
+			return loadAvailableToolNamesWithManager(ctx, cfg, struct{}{})
 		}
 	}
 	if deps.LoadInventory == nil {
@@ -322,6 +319,44 @@ func runSkillsCommandWithDeps(ctx context.Context, cfg config.Config, args []str
 		}
 		_, _ = fmt.Fprintf(deps.Stdout, "removed\t%s\n", match.Name)
 		return nil
+	case "install-bundled":
+		fs := flag.NewFlagSet("skills install-bundled", flag.ContinueOnError)
+		fs.SetOutput(deps.Stderr)
+		global := fs.Bool("global", false, "Install to the global skills directory (~/.agents/skills/)")
+		dir := fs.String("dir", "", "Install to a specific directory")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		targetDir := strings.TrimSpace(*dir)
+		if targetDir == "" && *global {
+			targetDir = strings.TrimSpace(cfg.Skills.Load.GlobalDir)
+		}
+		if targetDir == "" {
+			targetDir = strings.TrimSpace(cfg.Skills.Load.GlobalDir)
+		}
+		if targetDir == "" {
+			return fmt.Errorf("install directory not found. Use --global or --dir <path>")
+		}
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return fmt.Errorf("create install directory: %w", err)
+		}
+		installed, err := installBundledSkills(targetDir)
+		if err != nil {
+			return err
+		}
+		if len(installed) == 0 {
+			_, _ = fmt.Fprintln(deps.Stdout, "(no bundled skills to install)")
+			return nil
+		}
+		for _, name := range installed {
+			_, _ = fmt.Fprintf(deps.Stdout, "installed\t%s\t%s\n", name, targetDir)
+		}
+		if deps.Audit != nil {
+			if err := deps.Audit(ctx, "skill.install-bundled", map[string]any{"target": targetDir, "skills": installed}); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown skills subcommand: %s", args[0])
 	}
@@ -369,33 +404,9 @@ func makePolicySet(values []string) map[string]struct{} {
 	return out
 }
 
-func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, manager *mcp.Manager) map[string]struct{} {
-	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled, cfg.Subagents.Enabled))
-	if len(cfg.Tools.MCPServers) == 0 {
-		return toolNames
-	}
-	if manager != nil {
-		manager.SetHostPolicy(buildHostPolicy(cfg))
-		for _, name := range manager.ToolNames() {
-			toolNames[name] = struct{}{}
-		}
-		return toolNames
-	}
-	manager = mcp.NewManager(cfg.Tools.MCPServers)
-	manager.SetLogger(log.Printf)
-	manager.SetHostPolicy(buildHostPolicy(cfg))
-	if err := manager.Connect(ctx); err != nil {
-		log.Printf("mcp setup failed: %v", err)
-		return toolNames
-	}
-	defer func() {
-		if err := manager.Close(); err != nil {
-			log.Printf("mcp close failed: %v", err)
-		}
-	}()
-	for _, name := range manager.ToolNames() {
-		toolNames[name] = struct{}{}
-	}
+func loadAvailableToolNamesWithManager(ctx context.Context, cfg config.Config, _ struct{}) map[string]struct{} {
+	_ = ctx
+	toolNames := filterAdvertisedToolNames(cfg, availableToolNames(cfg.Cron.Enabled))
 	return toolNames
 }
 
@@ -403,9 +414,6 @@ func filterAdvertisedToolNames(cfg config.Config, toolNames map[string]struct{})
 	filtered := make(map[string]struct{}, len(toolNames))
 	for name := range toolNames {
 		filtered[name] = struct{}{}
-	}
-	if !shouldRegisterExecTool(cfg) {
-		delete(filtered, "exec")
 	}
 	if !cfg.Hardening.GuardedTools && !cfg.Hardening.PrivilegedTools {
 		delete(filtered, "exec")
@@ -487,18 +495,7 @@ func envMap() map[string]string {
 }
 
 func skillEnvMap(cfg config.Config) map[string]string {
-	out := envMap()
-	pathAppend := strings.TrimSpace(cfg.Tools.PathAppend)
-	if pathAppend == "" {
-		return out
-	}
-	currentPath := strings.TrimSpace(out["PATH"])
-	if currentPath == "" {
-		out["PATH"] = pathAppend
-		return out
-	}
-	out["PATH"] = currentPath + string(os.PathListSeparator) + pathAppend
-	return out
+	return envMap()
 }
 
 func resolveInstallRoot(cfg config.Config) string {
@@ -515,40 +512,9 @@ func resolveInstallRoot(cfg config.Config) string {
 	return filepath.Join(filepath.Dir(config.DefaultPath()), installDir)
 }
 
-func availableToolNames(includeCron, includeSubagents bool) map[string]struct{} {
-	names := []string{
-		"exec",
-		"read_file",
-		"search_file",
-		"read_artifact",
-		"write_file",
-		"edit_file",
-		"list_dir",
-		"web_fetch",
-		"web_fetch_markdown",
-		"web_search",
-		"memory_set_pinned",
-		"memory_add_note",
-		"memory_search",
-		"memory_recent",
-		"memory_get_pinned",
-		"send_message",
-		"read_skill",
-		"run_skill",
-		"run_skill_script",
-	}
-	if includeCron {
-		names = append(names, "cron")
-	}
-	if includeSubagents {
-		names = append(names, "spawn_subagent")
-	}
-	sort.Strings(names)
-	out := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		out[name] = struct{}{}
-	}
-	return out
+func availableToolNames(includeCron bool) map[string]struct{} {
+	_ = includeCron
+	return map[string]struct{}{}
 }
 
 func newClawHubClient(cfg config.Config) *clawhub.Client {
@@ -570,4 +536,8 @@ func printReasons(w io.Writer, label string, values []string) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(values, "; "))
+}
+
+func installBundledSkills(targetDir string) ([]string, error) {
+	return skills.InstallAllBundledSkills(targetDir)
 }

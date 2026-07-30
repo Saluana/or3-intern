@@ -73,17 +73,3 @@ func (b *Broker) audit(ctx context.Context, eventType string, payload map[string
 	}
 	return nil
 }
-
-func (b *Broker) AuditExecEvent(ctx context.Context, eventType string, subjectHash string, extra map[string]any) {
-	if b == nil {
-		return
-	}
-	payload := map[string]any{
-		"subject_hash": subjectHash,
-		"host_id":      b.hostID(),
-	}
-	for k, v := range extra {
-		payload[k] = v
-	}
-	_ = b.audit(ctx, eventType, payload)
-}

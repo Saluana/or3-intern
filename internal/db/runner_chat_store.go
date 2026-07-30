@@ -29,6 +29,11 @@ var ErrRunnerChatSessionNotFound = errors.New("runner chat session not found")
 // ErrRunnerChatTurnNotFound is returned when a turn lookup misses.
 var ErrRunnerChatTurnNotFound = errors.New("runner chat turn not found")
 
+const (
+	DefaultRunnerChatSessionListLimit = 50
+	MaxRunnerChatSessionListLimit     = 100
+)
+
 // RunnerChatSession is a row in runner_chat_sessions.
 type RunnerChatSession struct {
 	ID               string
@@ -46,6 +51,14 @@ type RunnerChatSession struct {
 	UpdatedAt        int64
 }
 
+// RunnerChatSessionListFilter bounds and optionally scopes session discovery.
+// AppSessionKeyPrefix is matched literally; SQL wildcard characters have no
+// special meaning.
+type RunnerChatSessionListFilter struct {
+	AppSessionKeyPrefix string
+	Limit               int
+}
+
 // RunnerChatTurn is a row in runner_chat_turns.
 type RunnerChatTurn struct {
 	ID                 string
@@ -55,8 +68,8 @@ type RunnerChatTurn struct {
 	UserMessage        string
 	FinalText          string
 	ErrorMessage       string
-	AgentCLIRunID      string
-	AgentCLIJobID      string
+	RunnerRunID        string
+	RunnerJobID        string
 	Model              string
 	Mode               string
 	Isolation          string
@@ -169,6 +182,42 @@ func (d *DB) GetRunnerChatSession(ctx context.Context, id string) (RunnerChatSes
 	return sess, err
 }
 
+// ListRunnerChatSessions returns the most recently updated runner-chat
+// sessions. Results are always bounded and may be scoped to a literal
+// app_session_key prefix.
+func (d *DB) ListRunnerChatSessions(ctx context.Context, filter RunnerChatSessionListFilter) ([]RunnerChatSession, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = DefaultRunnerChatSessionListLimit
+	} else if filter.Limit > MaxRunnerChatSessionListLimit {
+		filter.Limit = MaxRunnerChatSessionListLimit
+	}
+	prefix := filter.AppSessionKeyPrefix
+	q := `SELECT id, app_session_key, runner_id, continuation_mode, native_session_ref,
+			model, mode, isolation, cwd, max_turns, meta_json, created_at, updated_at
+		FROM runner_chat_sessions`
+	args := make([]any, 0, 3)
+	if prefix != "" {
+		q += ` WHERE substr(app_session_key, 1, length(?))=?`
+		args = append(args, prefix, prefix)
+	}
+	q += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
+	args = append(args, filter.Limit)
+	rows, err := d.SQL.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]RunnerChatSession, 0, filter.Limit)
+	for rows.Next() {
+		sess, err := scanRunnerChatSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
 // UpdateRunnerChatSessionNativeRef updates the native session reference and
 // bumps updated_at.
 func (d *DB) UpdateRunnerChatSessionNativeRef(ctx context.Context, id, ref string) error {
@@ -177,6 +226,27 @@ func (d *DB) UpdateRunnerChatSessionNativeRef(ctx context.Context, id, ref strin
 		`UPDATE runner_chat_sessions SET native_session_ref=?, updated_at=? WHERE id=?`,
 		ref, now, id)
 	return err
+}
+
+// UpdateRunnerChatSessionCwd moves a runner chat session to a new working
+// directory. Native runner references are directory-scoped, so changing the
+// directory intentionally clears the reference and forces a clean native
+// session while retaining OR3's durable chat history.
+func (d *DB) UpdateRunnerChatSessionCwd(ctx context.Context, id, cwd string) (RunnerChatSession, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunnerChatSession{}, errors.New("runner chat session id required")
+	}
+	result, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_chat_sessions SET cwd=?, native_session_ref='', updated_at=? WHERE id=?`,
+		strings.TrimSpace(cwd), NowMS(), id)
+	if err != nil {
+		return RunnerChatSession{}, err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return RunnerChatSession{}, ErrRunnerChatSessionNotFound
+	}
+	return d.GetRunnerChatSession(ctx, id)
 }
 
 // CreateRunnerChatTurn inserts a new turn for a session. Returns
@@ -219,11 +289,11 @@ func (d *DB) CreateRunnerChatTurn(ctx context.Context, turn RunnerChatTurn) (Run
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO runner_chat_turns(
 			id, session_id, sequence, status, user_message, final_text, error_message,
-			agent_cli_run_id, agent_cli_job_id, model, mode, isolation, cwd, continuation_mode,
+			runner_run_id, runner_job_id, model, mode, isolation, cwd, continuation_mode,
 			user_message_id, assistant_message_id, requested_at, started_at, completed_at, meta_json
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		turn.ID, turn.SessionID, turn.Sequence, turn.Status, turn.UserMessage, turn.FinalText, turn.ErrorMessage,
-		turn.AgentCLIRunID, turn.AgentCLIJobID, turn.Model, turn.Mode, turn.Isolation, turn.Cwd, turn.ContinuationMode,
+		turn.RunnerRunID, turn.RunnerJobID, turn.Model, turn.Mode, turn.Isolation, turn.Cwd, turn.ContinuationMode,
 		turn.UserMessageID, turn.AssistantMessageID, turn.RequestedAt, turn.StartedAt, turn.CompletedAt, turn.MetaJSON,
 	)
 	if err != nil {
@@ -271,11 +341,16 @@ func (d *DB) GetActiveRunnerChatTurn(ctx context.Context, sessionID string) (Run
 // ListRunnerChatTurns returns the most recent turns for a session in
 // chronological (ascending sequence) order. limit <= 0 means no limit.
 func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit int) ([]RunnerChatTurn, error) {
-	q := runnerChatTurnSelectSQL + ` WHERE session_id=? ORDER BY sequence ASC`
+	q := runnerChatTurnSelectSQL + ` WHERE session_id=?`
 	args := []any{sessionID}
 	if limit > 0 {
-		q += ` LIMIT ?`
+		// Select newest first so LIMIT keeps the current tail of a long
+		// session. Results are reversed below to retain the API's
+		// chronological response order.
+		q += ` ORDER BY sequence DESC LIMIT ?`
 		args = append(args, limit)
+	} else {
+		q += ` ORDER BY sequence ASC`
 	}
 	rows, err := d.SQL.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -290,14 +365,22 @@ func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit in
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if limit > 0 {
+		for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
+			out[left], out[right] = out[right], out[left]
+		}
+	}
+	return out, nil
 }
 
 // MarkRunnerChatTurnStarted transitions a queued turn to running.
 func (d *DB) MarkRunnerChatTurnStarted(ctx context.Context, id string, runID, jobID string) error {
 	now := NowMS()
 	_, err := d.SQL.ExecContext(ctx,
-		`UPDATE runner_chat_turns SET status='running', started_at=?, agent_cli_run_id=?, agent_cli_job_id=?
+		`UPDATE runner_chat_turns SET status='running', started_at=?, runner_run_id=?, runner_job_id=?
 		 WHERE id=? AND status='queued'`,
 		now, runID, jobID, id)
 	return err
@@ -319,10 +402,32 @@ func (d *DB) FinalizeRunnerChatTurn(ctx context.Context, id string, in RunnerCha
 	return err
 }
 
+// MarkRunnerChatTurnApprovalResumed transitions an approval_required turn
+// back to running so the manager can resume the underlying runner run
+// with a freshly-issued approval token.
+func (d *DB) MarkRunnerChatTurnApprovalResumed(ctx context.Context, id string, resumedAt int64) error {
+	if resumedAt == 0 {
+		resumedAt = NowMS()
+	}
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_chat_turns SET status=?, started_at=COALESCE(NULLIF(started_at,0),?), completed_at=0
+		 WHERE id=? AND status=?`,
+		RunnerChatTurnStatusRunning, resumedAt, id, RunnerChatTurnStatusApprovalRequired)
+	return err
+}
+
 // SetRunnerChatTurnUserMessageID sets the persisted user message ID for a turn.
 func (d *DB) SetRunnerChatTurnUserMessageID(ctx context.Context, id string, messageID int64) error {
 	_, err := d.SQL.ExecContext(ctx,
 		`UPDATE runner_chat_turns SET user_message_id=? WHERE id=?`, messageID, id)
+	return err
+}
+
+// SetRunnerChatTurnAssistantMessageID binds the durable in-progress assistant
+// placeholder to a turn before runner events begin streaming.
+func (d *DB) SetRunnerChatTurnAssistantMessageID(ctx context.Context, id string, messageID int64) error {
+	_, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_chat_turns SET assistant_message_id=? WHERE id=?`, messageID, id)
 	return err
 }
 
@@ -398,7 +503,7 @@ func (d *DB) ReconcileRunnerChatTurnsOnStartup(ctx context.Context) (int, error)
 }
 
 const runnerChatTurnSelectSQL = `SELECT id, session_id, sequence, status, user_message, final_text, error_message,
-		agent_cli_run_id, agent_cli_job_id, model, mode, isolation, cwd, continuation_mode,
+		runner_run_id, runner_job_id, model, mode, isolation, cwd, continuation_mode,
 		user_message_id, assistant_message_id, requested_at, started_at, completed_at, meta_json
 	FROM runner_chat_turns`
 
@@ -420,7 +525,7 @@ func scanRunnerChatTurn(row rowScanner) (RunnerChatTurn, error) {
 	var t RunnerChatTurn
 	err := row.Scan(
 		&t.ID, &t.SessionID, &t.Sequence, &t.Status, &t.UserMessage, &t.FinalText, &t.ErrorMessage,
-		&t.AgentCLIRunID, &t.AgentCLIJobID, &t.Model, &t.Mode, &t.Isolation, &t.Cwd, &t.ContinuationMode,
+		&t.RunnerRunID, &t.RunnerJobID, &t.Model, &t.Mode, &t.Isolation, &t.Cwd, &t.ContinuationMode,
 		&t.UserMessageID, &t.AssistantMessageID, &t.RequestedAt, &t.StartedAt, &t.CompletedAt, &t.MetaJSON,
 	)
 	return t, err

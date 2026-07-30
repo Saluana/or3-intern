@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
@@ -27,12 +26,9 @@ func validateProviderRouting(cfg Config) error {
 		}
 	}
 	roles := map[string]ModelRoleConfig{
-		"chat":           cfg.ModelRouting.Chat,
-		"agents":         cfg.ModelRouting.Agents,
-		"subagents":      cfg.ModelRouting.Subagents,
-		"summarization":  cfg.ModelRouting.Summarization,
-		"contextManager": cfg.ModelRouting.ContextManager,
-		"embeddings":     cfg.ModelRouting.Embeddings,
+		"chat":          cfg.ModelRouting.Chat,
+		"summarization": cfg.ModelRouting.Summarization,
+		"embeddings":    cfg.ModelRouting.Embeddings,
 	}
 	for roleName, role := range roles {
 		if err := validateModelRef(cfg, roleName, "primary", role.Primary); err != nil {
@@ -157,66 +153,6 @@ func requiresChannelAllowlist(policy InboundPolicy, openAccess bool, hasAllowlis
 	}
 }
 
-func validateMCPServers(servers map[string]MCPServerConfig) error {
-	for name, server := range servers {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			return errors.New("tools.mcpServers contains an empty server name")
-		}
-		if !server.Enabled {
-			continue
-		}
-		switch server.Transport {
-		case "stdio":
-			if server.Command == "" {
-				return errors.New("tools.mcpServers." + name + ": stdio transport requires command")
-			}
-		case "sse", "streamablehttp":
-			if err := validateMCPHTTPURL(name, server); err != nil {
-				return err
-			}
-		default:
-			return errors.New("tools.mcpServers." + name + ": unsupported transport " + strconv.Quote(server.Transport))
-		}
-	}
-	return nil
-}
-
-// ValidateMCPServers validates an MCP server map before persisting user edits.
-func ValidateMCPServers(servers map[string]MCPServerConfig) error {
-	return validateMCPServers(servers)
-}
-
-func validateMCPHTTPURL(name string, server MCPServerConfig) error {
-	if server.URL == "" {
-		return errors.New("tools.mcpServers." + name + ": transport " + strconv.Quote(server.Transport) + " requires url")
-	}
-	u, err := url.Parse(server.URL)
-	if err != nil {
-		return errors.New("tools.mcpServers." + name + ": invalid url")
-	}
-	if u.User != nil {
-		return errors.New("tools.mcpServers." + name + ": url must not embed credentials")
-	}
-	if u.Host == "" {
-		return errors.New("tools.mcpServers." + name + ": url must include host")
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return nil
-	case "http":
-		if !server.AllowInsecureHTTP {
-			return errors.New("tools.mcpServers." + name + ": insecure http requires allowInsecureHttp=true")
-		}
-		if !isLoopbackHost(u.Hostname()) {
-			return errors.New("tools.mcpServers." + name + ": insecure http is limited to localhost or loopback hosts")
-		}
-		return nil
-	default:
-		return errors.New("tools.mcpServers." + name + ": url scheme must be https or http")
-	}
-}
-
 func validateAccessProfiles(cfg AccessProfilesConfig) error {
 	if !cfg.Enabled {
 		return nil
@@ -301,39 +237,6 @@ func validateApprovals(cfg ApprovalConfig) error {
 			return errors.New("security.approvals." + name + ": unsupported mode")
 		}
 	}
-	return validateApprovalModerator(cfg.Moderator)
-}
-
-func validateApprovalModerator(cfg ApprovalModeratorConfig) error {
-	if !cfg.Enabled {
-		return nil
-	}
-	if preset := normalizeApprovalModeratorPreset(cfg.Preset); preset == "" && strings.TrimSpace(string(cfg.Preset)) != "" {
-		return errors.New("security.approvals.moderator.preset: unsupported preset")
-	}
-	for name, action := range map[string]ApprovalModeratorAction{
-		"actions.low": cfg.Actions.Low, "actions.medium": cfg.Actions.Medium,
-		"actions.high": cfg.Actions.High, "actions.extreme": cfg.Actions.Extreme,
-	} {
-		if !isValidApprovalModeratorAction(action) {
-			return errors.New("security.approvals.moderator." + name + ": unsupported action")
-		}
-	}
-	if !isValidApprovalModeratorAction(cfg.FailureAction) {
-		return errors.New("security.approvals.moderator.failureAction: unsupported action")
-	}
-	if cfg.FailureAction == ApprovalModeratorActionApprove {
-		return errors.New("security.approvals.moderator.failureAction: approve is not allowed")
-	}
-	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 120 {
-		return errors.New("security.approvals.moderator.timeoutSeconds: must be between 1 and 120")
-	}
-	if cfg.MaxPromptChars < 1000 || cfg.MaxPromptChars > 64000 {
-		return errors.New("security.approvals.moderator.maxPromptChars: must be between 1000 and 64000")
-	}
-	if cfg.MaxSubjectChars < 500 || cfg.MaxSubjectChars > 32000 {
-		return errors.New("security.approvals.moderator.maxSubjectChars: must be between 500 and 32000")
-	}
 	return nil
 }
 
@@ -354,10 +257,6 @@ func normalizeAuthEnforcementMode(mode AuthEnforcementMode) AuthEnforcementMode 
 
 func normalizeAuthFallbackPolicy(policy string) string {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
-	case AuthFallbackPairedTokenOnly:
-		return AuthFallbackPairedTokenOnly
-	case AuthFallbackPairedTokenPlusWarn:
-		return AuthFallbackPairedTokenPlusWarn
 	case AuthFallbackAdminRecoveryOnly:
 		return AuthFallbackAdminRecoveryOnly
 	default:
@@ -379,7 +278,7 @@ func validateAuthConfig(cfg AuthConfig) error {
 		return errors.New("auth.stepUpTtlSeconds must be greater than zero")
 	}
 	if normalizeAuthFallbackPolicy(cfg.FallbackPolicy) == "" {
-		return errors.New("auth.fallbackPolicy must be paired-token-only, paired-token-plus-warning, or admin-recovery-only")
+		return errors.New("auth.fallbackPolicy must be admin-recovery-only")
 	}
 	if normalizeAuthEnforcementMode(cfg.EnforcementMode) == "" {
 		return errors.New("auth.enforcementMode must be off, warn, enforce-sensitive, or enforce-session")
@@ -493,14 +392,6 @@ func ValidateProfile(cfg Config) error {
 			return errors.New("hosted profiles require security.network policy to be configured")
 		}
 	}
-	if spec.Hosted && hasRemoteHTTPMCPServers(cfg.Tools.MCPServers) {
-		if !cfg.Security.Network.Enabled || !cfg.Security.Network.DefaultDeny {
-			return errors.New("hosted profiles require deny-by-default security.network for remote MCP HTTP")
-		}
-		if networkAllowlistTooBroad(cfg.Security.Network.AllowedHosts) {
-			return errors.New("hosted profiles require a narrow security.network.allowedHosts for remote MCP HTTP")
-		}
-	}
 	if spec.RequireStrictAudit {
 		if !cfg.Security.Audit.Strict {
 			return errors.New("profile requires security.audit.strict")
@@ -516,21 +407,6 @@ func ValidateProfile(cfg Config) error {
 			return errors.New("profile requires security.secretStore.required")
 		}
 	}
-	if spec.ForbidExecShell {
-		if cfg.Hardening.EnableExecShell {
-			return errors.New("hosted-no-exec profile does not allow enableExecShell")
-		}
-	}
-	if spec.ForbidPrivilegedTools {
-		if cfg.Hardening.PrivilegedTools {
-			return errors.New("hosted-no-exec profile does not allow privilegedTools")
-		}
-	}
-	if spec.RequireSandboxForExec {
-		if cfg.Hardening.EnableExecShell && !cfg.Hardening.Sandbox.Enabled {
-			return errors.New("hosted-remote-sandbox-only profile requires sandbox for exec")
-		}
-	}
 	return nil
 }
 
@@ -541,19 +417,6 @@ func IsHostedProfile(p RuntimeProfile) bool {
 		return true
 	}
 	return false
-}
-
-func normalizeQuotaExceededAction(action QuotaExceededAction, fallback QuotaExceededAction) QuotaExceededAction {
-	normalized := QuotaExceededAction(strings.ToLower(strings.TrimSpace(string(action))))
-	if normalized == "" {
-		return fallback
-	}
-	switch normalized {
-	case QuotaExceededActionAsk, QuotaExceededActionFail:
-		return normalized
-	default:
-		return fallback
-	}
 }
 
 func compactStrings(values []string) []string {
@@ -577,32 +440,23 @@ func compactStrings(values []string) []string {
 	return out
 }
 
+func supportedRunnerIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "opencode", "codex":
+			out = append(out, strings.ToLower(strings.TrimSpace(value)))
+		}
+	}
+	return compactStrings(out)
+}
+
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
-}
-
-func hasRemoteHTTPMCPServers(servers map[string]MCPServerConfig) bool {
-	for _, server := range servers {
-		if !server.Enabled {
-			continue
-		}
-		transport := strings.ToLower(strings.TrimSpace(server.Transport))
-		if transport != "sse" && transport != "streamablehttp" {
-			continue
-		}
-		u, err := url.Parse(strings.TrimSpace(server.URL))
-		if err != nil {
-			return true
-		}
-		if u.Hostname() == "" || !isLoopbackHost(u.Hostname()) {
-			return true
-		}
-	}
-	return false
 }
 
 func networkAllowlistTooBroad(hosts []string) bool {
@@ -624,40 +478,57 @@ func networkAllowlistTooBroad(hosts []string) bool {
 	return false
 }
 
-func validateAgentCLIConfig(cfg AgentCLIConfig) error {
+func validateRunnersConfig(cfg RunnersConfig) error {
+	defaultRunner := strings.ToLower(strings.TrimSpace(cfg.Default))
+	if defaultRunner == "" {
+		return errors.New("runners.default is required")
+	}
+	switch defaultRunner {
+	case "opencode", "codex":
+	default:
+		return fmt.Errorf("runners.default must be opencode or codex (got %q)", cfg.Default)
+	}
+	for _, disabled := range cfg.Disabled {
+		if strings.EqualFold(strings.TrimSpace(disabled), defaultRunner) {
+			return fmt.Errorf("runners.default %q is listed in runners.disabledRunners", cfg.Default)
+		}
+	}
 	mode := strings.TrimSpace(cfg.DefaultMode)
 	switch mode {
 	case "review", "safe_edit", "sandbox_auto":
 	default:
-		return errors.New("agentCLI.defaultMode must be review, safe_edit, or sandbox_auto")
+		return errors.New("runners.defaultMode must be review, safe_edit, or sandbox_auto")
 	}
 	iso := strings.TrimSpace(cfg.DefaultIsolation)
 	switch iso {
 	case "host_readonly", "host_workspace_write", "sandbox_workspace_write", "sandbox_dangerous":
 	default:
-		return errors.New("agentCLI.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
+		return errors.New("runners.defaultIsolation must be host_readonly, host_workspace_write, sandbox_workspace_write, or sandbox_dangerous")
 	}
 	if mode == "sandbox_auto" && iso != "sandbox_dangerous" {
-		return errors.New("agentCLI.defaultMode=sandbox_auto requires agentCLI.defaultIsolation=sandbox_dangerous")
+		return errors.New("runners.defaultMode=sandbox_auto requires runners.defaultIsolation=sandbox_dangerous")
 	}
 	for runner, runtimeMode := range cfg.RuntimeMode {
 		switch strings.TrimSpace(runtimeMode) {
 		case "", "auto", "native", "cli":
 		default:
-			return fmt.Errorf("agentCLI.runtimeMode[%s] must be auto, native, or cli", runner)
+			return fmt.Errorf("runners.runtimeMode[%s] must be auto, native, or cli", runner)
 		}
 	}
 	for runner, endpoint := range cfg.NativeServerURLs {
 		u, err := url.Parse(strings.TrimSpace(endpoint))
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must be an absolute loopback http URL", runner)
+			return fmt.Errorf("runners.nativeServerUrls[%s] must be an absolute loopback http URL", runner)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must use http or https", runner)
+			return fmt.Errorf("runners.nativeServerUrls[%s] must use http or https", runner)
 		}
 		if !isLoopbackHost(u.Hostname()) {
-			return fmt.Errorf("agentCLI.nativeServerUrls[%s] must point at loopback", runner)
+			return fmt.Errorf("runners.nativeServerUrls[%s] must point at loopback", runner)
 		}
+	}
+	if strings.TrimSpace(cfg.CodexShadowHomePath) != "" && strings.TrimSpace(cfg.CodexHomePath) == "" {
+		return errors.New("runners.codexShadowHomePath requires runners.codexHomePath")
 	}
 	return nil
 }

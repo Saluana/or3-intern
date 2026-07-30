@@ -58,6 +58,42 @@ func (b *Broker) RotateDeviceToken(ctx context.Context, deviceID, role, displayN
 	return device, rawToken, nil
 }
 
+// RegisterDeviceToken stores only a hash of a credential provisioned by a
+// trusted enrollment flow. The raw token is never persisted by the broker.
+func (b *Broker) RegisterDeviceToken(ctx context.Context, deviceID, rawToken, role, displayName string, metadata map[string]any) (db.PairedDeviceRecord, error) {
+	if b == nil || b.DB == nil {
+		return db.PairedDeviceRecord{}, fmt.Errorf("approval broker unavailable")
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	rawToken = strings.TrimSpace(rawToken)
+	role = normalizeRole(role)
+	if deviceID == "" {
+		return db.PairedDeviceRecord{}, fmt.Errorf("device id required")
+	}
+	if len(rawToken) < 32 {
+		return db.PairedDeviceRecord{}, fmt.Errorf("device token is too short")
+	}
+	if role == "" {
+		return db.PairedDeviceRecord{}, fmt.Errorf("device role is invalid")
+	}
+	nowMS := b.now().UnixMilli()
+	device, err := b.DB.UpsertPairedDevice(ctx, db.PairedDeviceRecord{
+		DeviceID:    deviceID,
+		Role:        role,
+		DisplayName: strings.TrimSpace(displayName),
+		TokenHash:   hashBytes(rawToken),
+		Status:      StatusActive,
+		CreatedAt:   nowMS,
+		LastSeenAt:  nowMS,
+		Metadata:    cloneMap(metadata),
+	})
+	if err != nil {
+		return db.PairedDeviceRecord{}, err
+	}
+	_ = b.audit(ctx, "device.registered", map[string]any{"device_id": device.DeviceID, "role": device.Role, "host_id": b.hostID(), "outcome": "registered"})
+	return device, nil
+}
+
 func (b *Broker) RotatePairedDeviceToken(ctx context.Context, deviceID string) (db.PairedDeviceRecord, string, error) {
 	device, err := b.DB.GetPairedDevice(ctx, deviceID)
 	if err != nil {

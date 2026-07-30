@@ -24,7 +24,7 @@ func applyRuntimeConfigDefaults(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	if cfg.Tools.RestrictToWorkspace && strings.TrimSpace(cfg.WorkspaceDir) == "" {
+	if strings.TrimSpace(cfg.WorkspaceDir) == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			cfg.WorkspaceDir = cwd
 		}

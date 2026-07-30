@@ -186,42 +186,6 @@ func (s *serviceServer) handleApprovals(w http.ResponseWriter, r *http.Request) 
 		if sessionKey := strings.TrimSpace(issued.Request.RequesterSessionID); sessionKey != "" {
 			response["session_key"] = sessionKey
 		}
-		warnings := make([]map[string]any, 0, 2)
-		if s.broker != nil && s.broker.DB != nil {
-			plans, err := approvalSkillRunPlanLookup(r.Context(), s.broker.DB, id, 20)
-			if err != nil {
-				warnings = append(warnings, map[string]any{
-					"code":    "plan_lookup_failed",
-					"message": approvalPlanLookupWarning(err),
-				})
-			} else {
-				if len(plans) == 1 {
-					response["plan_id"] = plans[0].ID
-				}
-				if len(plans) > 0 {
-					ids := make([]string, 0, len(plans))
-					for _, plan := range plans {
-						if strings.TrimSpace(plan.ID) == "" {
-							continue
-						}
-						ids = append(ids, strings.TrimSpace(plan.ID))
-					}
-					response["plan_ids"] = ids
-				}
-			}
-		}
-		resumeJobID, err := s.startApprovedResumeJob(r.Context(), issued, serviceAuthIdentityFromContext(r.Context()))
-		if err != nil {
-			warnings = append(warnings, map[string]any{
-				"code":    "resume_start_failed",
-				"message": approvalResumeWarning(err),
-			})
-		} else if strings.TrimSpace(resumeJobID) != "" {
-			response["resume_job_id"] = resumeJobID
-		}
-		if len(warnings) > 0 {
-			response["warnings"] = warnings
-		}
 		writeServiceJSON(w, http.StatusOK, response)
 	case "deny":
 		if r.Method != http.MethodPost {

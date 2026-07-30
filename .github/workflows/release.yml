@@ -80,7 +80,7 @@ jobs:
 
   npm:
     needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && vars.NPM_PUBLISH_FROM_CI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

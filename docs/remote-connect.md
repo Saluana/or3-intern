@@ -3,7 +3,7 @@
 Connect this computer to an OR3 Cloud account:
 
 ```bash
-npx or3 connect
+npx @or3/connect
 ```
 
 No access token, VPN, Cloudflare account, or QR scan is required. The command
@@ -15,11 +15,11 @@ Local/offline use remains account-free.
 ## Commands
 
 ```bash
-npx or3 connect
-npx or3 connect status
-npx or3 connect doctor
-npx or3 connect disconnect
-npx or3 connect uninstall
+npx @or3/connect
+npx @or3/connect status
+npx @or3/connect doctor
+npx @or3/connect disconnect
+npx @or3/connect uninstall
 ```
 
 Useful setup flags:
@@ -47,7 +47,7 @@ leaving the local OR3 workspace and agent configuration untouched.
 Run:
 
 ```bash
-npx or3 connect doctor
+npx @or3/connect doctor
 ```
 
 It checks saved state, the tunnel client, and authenticated remote health

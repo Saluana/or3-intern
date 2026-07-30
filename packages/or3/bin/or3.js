@@ -43,8 +43,16 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
     const stdout = options.stdout ?? process.stdout;
     const stderr = options.stderr ?? process.stderr;
     const command = args[0] || 'connect';
-    if (command !== 'connect') {
-        stderr.write('Usage: npx or3 connect [status|doctor|disconnect|uninstall] [options]\n');
+    const managementCommands = new Set(['status', 'doctor', 'disconnect', 'uninstall']);
+    let forwardedArgs;
+    if (command === 'connect') {
+        forwardedArgs = args.length > 0 ? args : ['connect'];
+    } else if (command.startsWith('-')) {
+        forwardedArgs = ['connect', ...args];
+    } else if (managementCommands.has(command)) {
+        forwardedArgs = ['connect', ...args];
+    } else {
+        stderr.write('Usage: npx @or3/connect [status|doctor|disconnect|uninstall] [options]\n');
         return 2;
     }
 
@@ -60,7 +68,9 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
         stdout,
     };
     const intern = await ensureIntern(sharedOptions);
-    const subcommand = args[1] && !args[1].startsWith('-') ? args[1] : 'setup';
+    const subcommand = forwardedArgs[1] && !forwardedArgs[1].startsWith('-')
+        ? forwardedArgs[1]
+        : 'setup';
     let cloudflared = process.env.OR3_CONNECT_CLOUDFLARED_BIN?.trim();
     if (!cloudflared && (subcommand === 'setup' || subcommand === 'doctor' || subcommand === 'run')) {
         cloudflared = await ensureCloudflared(sharedOptions);
@@ -76,7 +86,7 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
     return await spawnAndWait(
         options.spawnImpl ?? spawn,
         intern,
-        args,
+        forwardedArgs,
         {
             stdio: options.childStdio ?? 'inherit',
             env: childEnvironment,

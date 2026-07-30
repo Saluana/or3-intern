@@ -25,7 +25,7 @@ test('installed npm bin symlink invokes the bootstrap', async (t) => {
 
     const link = join(directory, 'or3');
     await symlink(new URL('../bin/or3.js', import.meta.url), link);
-    const result = spawnSync(link, ['connect', 'status'], {
+    const result = spawnSync(link, ['status'], {
         encoding: 'utf8',
         env: {
             ...process.env,
@@ -59,7 +59,7 @@ test('all cached management commands start offline without a shell PATH install'
     };
     const output = { write() {} };
     for (const subcommand of ['status', 'doctor', 'disconnect', 'uninstall']) {
-        const code = await runCLI(['connect', subcommand], {
+        const code = await runCLI([subcommand], {
             installDir,
             fetchImpl: async () => {
                 fetches++;

@@ -281,7 +281,7 @@ func resumeRemoteConnectionSetup(
 	state.Stage = normalizedConnectSetupStage(state)
 	if state.Stage == connectSetupStageOnline || state.TerminalOnly {
 		fmt.Fprintf(stdout, "This computer is already connected as %s.\n", state.EnvironmentName)
-		fmt.Fprintln(stdout, "Run `npx or3 connect status` for details or `npx or3 connect disconnect` to replace it.")
+		fmt.Fprintln(stdout, "Run `npx @or3/connect status` for details or `npx @or3/connect disconnect` to replace it.")
 		return nil
 	}
 	fmt.Fprintf(stdout, "Repairing the incomplete connection for %s.\n", state.EnvironmentName)
@@ -355,7 +355,7 @@ func finishRemoteConnectionSetup(
 		case connectSetupStageInstalled:
 			if err := operations.verifyOnline(ctx, state); err != nil {
 				return fmt.Errorf(
-					"background service is installed, but remote access is not online yet: %w; run `npx or3 connect` to retry or `npx or3 connect doctor` for details",
+					"background service is installed, but remote access is not online yet: %w; run `npx @or3/connect` to retry or `npx @or3/connect doctor` for details",
 					err,
 				)
 			}
@@ -461,7 +461,7 @@ func connectSetupErrorWithRollback(primary, rollback error) error {
 		return primary
 	}
 	return fmt.Errorf(
-		"%w; automatic rollback is incomplete: %v. Run `npx or3 connect` to resume from the saved checkpoint",
+		"%w; automatic rollback is incomplete: %v. Run `npx @or3/connect` to resume from the saved checkpoint",
 		primary,
 		rollback,
 	)
@@ -484,14 +484,14 @@ func waitForDeviceCredential(ctx context.Context, client *remoteconnect.Client, 
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return remoteconnect.DeviceCredential{}, fmt.Errorf("sign-in timed out; run `npx or3 connect` to try again")
+				return remoteconnect.DeviceCredential{}, fmt.Errorf("sign-in timed out; run `npx @or3/connect` to try again")
 			}
 			return remoteconnect.DeviceCredential{}, ctx.Err()
 		case <-timer.C:
 			result, err := client.Poll(ctx, authorization.DeviceCode, host)
 			if err != nil {
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					return remoteconnect.DeviceCredential{}, fmt.Errorf("sign-in timed out; run `npx or3 connect` to try again")
+					return remoteconnect.DeviceCredential{}, fmt.Errorf("sign-in timed out; run `npx @or3/connect` to try again")
 				}
 				if ctx.Err() != nil {
 					return remoteconnect.DeviceCredential{}, ctx.Err()
@@ -516,7 +516,7 @@ func waitForDeviceCredential(ctx context.Context, client *remoteconnect.Client, 
 			case "denied":
 				return remoteconnect.DeviceCredential{}, fmt.Errorf("connection was denied in the browser")
 			case "expired":
-				return remoteconnect.DeviceCredential{}, fmt.Errorf("the sign-in link expired; run `npx or3 connect` to try again")
+				return remoteconnect.DeviceCredential{}, fmt.Errorf("the sign-in link expired; run `npx @or3/connect` to try again")
 			default:
 				return remoteconnect.DeviceCredential{}, fmt.Errorf("OR3 Cloud returned an unknown sign-in state")
 			}
@@ -948,7 +948,7 @@ func printRemoteConnectionStatus(stateDir string, stdout io.Writer) error {
 	state, err := remoteconnect.LoadState(stateDir)
 	if os.IsNotExist(err) {
 		fmt.Fprintln(stdout, "Remote access is not connected.")
-		fmt.Fprintln(stdout, "Run `npx or3 connect` to connect this computer to OR3 Cloud.")
+		fmt.Fprintln(stdout, "Run `npx @or3/connect` to connect this computer to OR3 Cloud.")
 		return nil
 	}
 	if err != nil {
@@ -973,7 +973,7 @@ func printRemoteConnectionStatus(stateDir string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "Status:   %s\n", status)
 	fmt.Fprintf(stdout, "Cloud:    %s\n", state.CloudURL)
 	if !state.TerminalOnly && stage != connectSetupStageOnline {
-		fmt.Fprintln(stdout, "Next:     run `npx or3 connect` to resume safely")
+		fmt.Fprintln(stdout, "Next:     run `npx @or3/connect` to resume safely")
 	}
 	return nil
 }
@@ -981,9 +981,9 @@ func printRemoteConnectionStatus(stateDir string, stdout io.Writer) error {
 func printConnectManagementCommands(stdout io.Writer) {
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Manage this connection:")
-	fmt.Fprintln(stdout, "  npx or3 connect status")
-	fmt.Fprintln(stdout, "  npx or3 connect doctor")
-	fmt.Fprintln(stdout, "  npx or3 connect disconnect")
+	fmt.Fprintln(stdout, "  npx @or3/connect status")
+	fmt.Fprintln(stdout, "  npx @or3/connect doctor")
+	fmt.Fprintln(stdout, "  npx @or3/connect disconnect")
 }
 
 func doctorRemoteConnection(ctx context.Context, stateDir string, stdout io.Writer) error {

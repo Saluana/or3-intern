@@ -74,7 +74,7 @@ var rootHelpSections = []struct {
 
 var helpTopics = map[string]helpCommand{
 	"connect": {
-		Usage:   "npx or3 connect [status|doctor|disconnect|uninstall] [options]",
+		Usage:   "npx @or3/connect [status|doctor|disconnect|uninstall] [options]",
 		Summary: "Connect this computer securely to OR3 Cloud.",
 		Description: []string{
 			"Opens a browser sign-in, confirms a matching code, and installs a small background service so this computer stays reachable after logout or restart.",
@@ -94,7 +94,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--no-browser", Description: "Print the sign-in link without opening it"},
 			{Name: "--cloud-url <url>", Description: "Use a self-hosted or staging OR3 Cloud endpoint"},
 		},
-		Examples: []string{"npx or3 connect", "npx or3 connect --name \"Studio Mac\"", "npx or3 connect status", "npx or3 connect disconnect"},
+		Examples: []string{"npx @or3/connect", "npx @or3/connect --name \"Studio Mac\"", "npx @or3/connect status", "npx @or3/connect disconnect"},
 	},
 	"configure": {
 		Usage:   "or3-intern configure [--section provider|storage|runtime|context|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",

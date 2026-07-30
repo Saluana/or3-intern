@@ -949,7 +949,7 @@ func TestConnectStatusExplainsIncompleteCheckpoint(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Mode:     background service") ||
 		!strings.Contains(output, "Status:   setup incomplete (authorized)") ||
-		!strings.Contains(output, "run `npx or3 connect` to resume safely") {
+		!strings.Contains(output, "run `npx @or3/connect` to resume safely") {
 		t.Fatalf("incomplete status did not explain repair: %s", output)
 	}
 }
@@ -959,7 +959,7 @@ func TestConnectHelpIsDiscoverable(t *testing.T) {
 	if err := printHelpTopic(&output, []string{"connect"}); err != nil {
 		t.Fatalf("printHelpTopic: %v", err)
 	}
-	if !strings.Contains(output.String(), "npx or3 connect") {
+	if !strings.Contains(output.String(), "npx @or3/connect") {
 		t.Fatalf("connect help missing: %s", output.String())
 	}
 }
@@ -981,9 +981,9 @@ func TestConnectSuccessPrintsNpxManagementCommands(t *testing.T) {
 		t.Fatalf("finishRemoteConnectionSetup: %v", err)
 	}
 	for _, command := range []string{
-		"npx or3 connect status",
-		"npx or3 connect doctor",
-		"npx or3 connect disconnect",
+		"npx @or3/connect status",
+		"npx @or3/connect doctor",
+		"npx @or3/connect disconnect",
 	} {
 		if !strings.Contains(output.String(), command) {
 			t.Fatalf("success output omitted %q: %s", command, output.String())

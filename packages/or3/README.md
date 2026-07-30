@@ -3,13 +3,13 @@
 Connect a macOS or Linux computer to OR3 Cloud:
 
 ```sh
-npx or3 connect
+npx @or3/connect
 ```
 
 With Bun:
 
 ```sh
-bunx or3 connect
+bunx @or3/connect
 ```
 
 The bootstrap downloads checksum-verified `or3-intern` and `cloudflared`
@@ -20,9 +20,9 @@ shared lock. A valid cached install continues to work offline.
 Manage the connection from any fresh terminal:
 
 ```sh
-npx or3 connect status
-npx or3 connect doctor
-npx or3 connect disconnect
+npx @or3/connect status
+npx @or3/connect doctor
+npx @or3/connect disconnect
 ```
 
 The bootstrap never asks for an API token or puts tunnel credentials in process

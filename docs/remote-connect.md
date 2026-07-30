@@ -15,11 +15,11 @@ Local/offline use remains account-free.
 ## Commands
 
 ```bash
-or3-intern connect
-or3-intern connect status
-or3-intern connect doctor
-or3-intern connect disconnect
-or3-intern connect uninstall
+npx or3 connect
+npx or3 connect status
+npx or3 connect doctor
+npx or3 connect disconnect
+npx or3 connect uninstall
 ```
 
 Useful setup flags:
@@ -47,8 +47,10 @@ leaving the local OR3 workspace and agent configuration untouched.
 Run:
 
 ```bash
-or3-intern connect doctor
+npx or3 connect doctor
 ```
 
 It checks saved state, the tunnel client, and authenticated remote health
-without printing credentials. Logs are stored beside the connection state.
+without printing credentials. On macOS, recent service diagnostics are
+size-rotated, owner-only, redacted, and shown in bounded form when a check
+fails.

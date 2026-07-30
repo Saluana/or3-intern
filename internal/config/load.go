@@ -23,6 +23,18 @@ func Load(path string) (Config, error) {
 	return normalizeAndValidateConfig(cfg)
 }
 
+// LoadPersisted reads and validates config.json without applying environment
+// overlays. Callers that intend to save a small config patch must use this
+// function so environment-only secrets are never copied into the file.
+func LoadPersisted(path string) (Config, error) {
+	path = resolveConfigPath(path)
+	cfg, err := readConfigFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	return normalizeAndValidateConfig(cfg)
+}
+
 type normalizeOptions struct {
 	QuarantineOptionalIntegrations bool
 }

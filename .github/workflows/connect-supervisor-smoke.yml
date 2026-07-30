@@ -1,0 +1,59 @@
+name: Connect supervisor smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_macos_launchdaemon:
+        description: Run the privileged system LaunchDaemon smoke on a disposable labeled self-hosted macOS runner
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  linux-systemd:
+    name: Linux systemd sandbox and runner smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify disposable systemd host privileges
+        run: |
+          systemctl list-units --no-pager --no-legend >/dev/null
+          sudo -n true
+      - name: Build the exact supervised binary
+        run: go build -o "$RUNNER_TEMP/or3-intern-supervisor-smoke" ./cmd/or3-intern
+      - name: Exercise the real hardened systemd unit
+        env:
+          OR3_CONNECT_SYSTEMD_SMOKE: "1"
+          OR3_CONNECT_SMOKE_BINARY: ${{ runner.temp }}/or3-intern-supervisor-smoke
+        run: go test -v ./internal/connect -run '^TestConnectSupervisorServiceSmoke$' -count=1
+
+  macos-launchdaemon:
+    name: macOS system LaunchDaemon and runner smoke
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_macos_launchdaemon }}
+    runs-on: [self-hosted, macOS, or3-launchdaemon-smoke]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify disposable LaunchDaemon host privileges
+        run: |
+          launchctl print system >/dev/null
+          sudo -n true
+      - name: Build the exact supervised binary
+        run: go build -o "$RUNNER_TEMP/or3-intern-supervisor-smoke" ./cmd/or3-intern
+      - name: Exercise the real system LaunchDaemon
+        env:
+          OR3_CONNECT_LAUNCHD_SMOKE: "1"
+          OR3_CONNECT_SMOKE_BINARY: ${{ runner.temp }}/or3-intern-supervisor-smoke
+        run: go test -v ./internal/connect -run '^TestConnectSupervisorServiceSmoke$' -count=1

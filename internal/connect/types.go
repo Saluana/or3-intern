@@ -6,7 +6,7 @@ const (
 	DefaultCloudURL     = "https://or3.chat"
 	DefaultPollInterval = 3 * time.Second
 	DefaultTimeout      = 10 * time.Minute
-	StateVersion        = 1
+	StateVersion        = 2
 )
 
 type DeviceAuthorization struct {
@@ -19,14 +19,21 @@ type DeviceAuthorization struct {
 }
 
 type TunnelCredential struct {
-	Token    string `json:"token"`
-	Hostname string `json:"hostname"`
+	// Token is retained only to read credentials issued by pre-local-config
+	// OR3 deployments. New connections use the tunnel-scoped fields below.
+	Token        string `json:"token,omitempty"`
+	AccountTag   string `json:"accountTag,omitempty"`
+	TunnelID     string `json:"tunnelId,omitempty"`
+	TunnelSecret string `json:"tunnelSecret,omitempty"`
+	Hostname     string `json:"hostname"`
 }
 
 type DeviceCredential struct {
 	AccountID       string           `json:"accountId"`
+	WorkspaceID     string           `json:"workspaceId"`
 	EnvironmentID   string           `json:"environmentId"`
 	EnvironmentName string           `json:"environmentName"`
+	Namespace       string           `json:"namespace"`
 	ControlToken    string           `json:"controlToken"`
 	Tunnel          TunnelCredential `json:"tunnel"`
 }
@@ -39,18 +46,32 @@ type DeviceTokenResponse struct {
 }
 
 type State struct {
-	Version         int       `json:"version"`
-	CloudURL        string    `json:"cloudUrl"`
-	AccountID       string    `json:"accountId"`
-	EnvironmentID   string    `json:"environmentId"`
-	EnvironmentName string    `json:"environmentName"`
-	Hostname        string    `json:"hostname"`
-	ControlToken    string    `json:"controlToken"`
-	TunnelTokenFile string    `json:"tunnelTokenFile"`
-	CloudflaredPath string    `json:"cloudflaredPath"`
-	ConfigPath      string    `json:"configPath"`
-	Installed       bool      `json:"installed"`
-	ConnectedAt     time.Time `json:"connectedAt"`
+	Version               int                    `json:"version"`
+	CloudURL              string                 `json:"cloudUrl"`
+	AccountID             string                 `json:"accountId"`
+	WorkspaceID           string                 `json:"workspaceId"`
+	Namespace             string                 `json:"namespace,omitempty"`
+	EnvironmentID         string                 `json:"environmentId"`
+	EnvironmentName       string                 `json:"environmentName"`
+	Hostname              string                 `json:"hostname"`
+	ControlToken          string                 `json:"controlToken"`
+	TunnelTokenFile       string                 `json:"tunnelTokenFile"`
+	TunnelConfigFile      string                 `json:"tunnelConfigFile,omitempty"`
+	TunnelCredentialsFile string                 `json:"tunnelCredentialsFile,omitempty"`
+	CloudflaredPath       string                 `json:"cloudflaredPath"`
+	ConfigPath            string                 `json:"configPath"`
+	PreviousService       *ServiceConfigSnapshot `json:"previousService,omitempty"`
+	AppliedService        *ServiceConfigSnapshot `json:"appliedService,omitempty"`
+	Stage                 string                 `json:"stage,omitempty"`
+	TerminalOnly          bool                   `json:"terminalOnly,omitempty"`
+	Installed             bool                   `json:"installed"`
+	ConnectedAt           time.Time              `json:"connectedAt"`
+}
+
+type ServiceConfigSnapshot struct {
+	Enabled               bool     `json:"enabled"`
+	Listen                string   `json:"listen"`
+	TrustedBrowserOrigins []string `json:"trustedBrowserOrigins,omitempty"`
 }
 
 type HostMetadata struct {

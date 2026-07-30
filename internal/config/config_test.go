@@ -1653,3 +1653,38 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("expected context block written by Save(Default()) to be treated as configured")
 	}
 }
+
+func TestLoadPersistedDoesNotApplyEnvironmentSecrets(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.Provider.APIKey = ""
+	cfg.Channels.Slack.BotToken = ""
+	cfg.Service.Secret = ""
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	t.Setenv("OR3_API_KEY", "environment-provider-secret")
+	t.Setenv("OR3_SLACK_BOT_TOKEN", "environment-slack-secret")
+	t.Setenv("OR3_SERVICE_SECRET", "environment-service-secret")
+
+	runtimeConfig, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if runtimeConfig.Provider.APIKey != "environment-provider-secret" ||
+		runtimeConfig.Channels.Slack.BotToken != "environment-slack-secret" ||
+		runtimeConfig.Service.Secret != "environment-service-secret" {
+		t.Fatal("runtime environment overrides were not applied")
+	}
+
+	persistedConfig, err := LoadPersisted(path)
+	if err != nil {
+		t.Fatalf("LoadPersisted: %v", err)
+	}
+	if persistedConfig.Provider.APIKey != "" ||
+		persistedConfig.Channels.Slack.BotToken != "" ||
+		persistedConfig.Service.Secret != "" {
+		t.Fatalf("LoadPersisted copied environment-only secrets: %#v", persistedConfig)
+	}
+}

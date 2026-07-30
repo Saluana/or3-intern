@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"or3-intern/internal/app"
+	"or3-intern/internal/approval"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/db"
 	"or3-intern/internal/runners"
@@ -101,6 +102,9 @@ func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.
 		return
 	}
 	sessionID := parts[0]
+	if !s.requireRunnerChatSessionScope(w, r, store, sessionID) {
+		return
+	}
 	switch {
 	case len(parts) == 1:
 		if r.Method != http.MethodGet {
@@ -189,6 +193,15 @@ func (s *serviceServer) handleRunnerChatSessionsList(w http.ResponseWriter, r *h
 		}
 		filter.AppSessionKeyPrefix = prefix
 	}
+	if namespace := serviceConnectNamespace(r); namespace != "" {
+		if filter.AppSessionKeyPrefix != "" && !strings.HasPrefix(filter.AppSessionKeyPrefix, namespace) {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid app_session_key_prefix", "code": "validation_failed"})
+			return
+		}
+		if filter.AppSessionKeyPrefix == "" {
+			filter.AppSessionKeyPrefix = namespace
+		}
+	}
 	sessions, err := store.ListRunnerChatSessions(r.Context(), filter)
 	if err != nil {
 		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat sessions list unavailable", err)
@@ -212,6 +225,10 @@ func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "app_session_key required"})
 		return
 	}
+	if namespace := serviceConnectNamespace(r); namespace != "" && !strings.HasPrefix(req.AppSessionKey, namespace) {
+		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "app_session_key is outside the connected workspace", "code": serviceCodeForbidden})
+		return
+	}
 	if strings.TrimSpace(req.RunnerID) == "" {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "runner_id required"})
 		return
@@ -231,6 +248,38 @@ func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *
 		return
 	}
 	writeServiceValue(w, http.StatusCreated, controlplane.BuildRunnerChatSessionResponse(sess))
+}
+
+func serviceConnectNamespace(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	identity := serviceAuthIdentityFromContext(r.Context())
+	if identity.Role != approval.RoleConnect {
+		return ""
+	}
+	return strings.TrimSpace(identity.Namespace)
+}
+
+func (s *serviceServer) requireRunnerChatSessionScope(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID string) bool {
+	namespace := serviceConnectNamespace(r)
+	if namespace == "" {
+		return true
+	}
+	session, err := store.GetRunnerChatSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, db.ErrRunnerChatSessionNotFound) {
+			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+			return false
+		}
+		writeServiceError(w, r, http.StatusServiceUnavailable, "runner chat session lookup failed", err)
+		return false
+	}
+	if !strings.HasPrefix(session.AppSessionKey, namespace) {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat session not found", "code": "runner_chat_session_not_found"})
+		return false
+	}
+	return true
 }
 
 func (s *serviceServer) handleRunnerChatSessionRead(w http.ResponseWriter, r *http.Request, store *db.DB, id string) {

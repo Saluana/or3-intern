@@ -14,6 +14,7 @@ import (
 
 func TestClientDeviceAuthorizationFlow(t *testing.T) {
 	var pollHost HostMetadata
+	var revokedScope map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/connect/device/start":
@@ -39,8 +40,10 @@ func TestClientDeviceAuthorizationFlow(t *testing.T) {
 				Status: "approved",
 				Credential: &DeviceCredential{
 					AccountID:       "acct-1",
+					WorkspaceID:     "workspace-1",
 					EnvironmentID:   "env-1",
 					EnvironmentName: "Studio Mac",
+					Namespace:       "or3-chat:workspace-1:",
 					ControlToken:    "control-secret",
 					Tunnel: TunnelCredential{
 						Token:    "tunnel-secret",
@@ -48,6 +51,14 @@ func TestClientDeviceAuthorizationFlow(t *testing.T) {
 					},
 				},
 			})
+		case "/api/connect/environments/revoke":
+			if r.Header.Get("Authorization") != "Bearer control-secret" {
+				t.Fatalf("unexpected revoke authorization: %q", r.Header.Get("Authorization"))
+			}
+			if err := json.NewDecoder(r.Body).Decode(&revokedScope); err != nil {
+				t.Fatalf("decode revoke scope: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"revoked": true})
 		default:
 			http.NotFound(w, r)
 		}
@@ -73,22 +84,119 @@ func TestClientDeviceAuthorizationFlow(t *testing.T) {
 	if pollHost.Name != "Studio Mac" {
 		t.Fatalf("host metadata was not sent: %#v", pollHost)
 	}
+	if err := client.Revoke(context.Background(), State{
+		AccountID:     "acct-1",
+		WorkspaceID:   "workspace-1",
+		EnvironmentID: "env-1",
+		ControlToken:  "control-secret",
+	}); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if revokedScope["accountId"] != "acct-1" || revokedScope["workspaceId"] != "workspace-1" {
+		t.Fatalf("unexpected revoke scope: %#v", revokedScope)
+	}
 }
 
-func TestSaveStateUsesOwnerOnlyFilesAndNeverEmbedsTunnelToken(t *testing.T) {
+func TestValidateCloudURLRequiresHTTPSExceptExactLoopback(t *testing.T) {
+	for _, valid := range []string{
+		"https://or3.example",
+		"https://or3.example:8443/",
+		"http://localhost:3000",
+		"http://127.0.0.1:3000",
+		"http://[::1]:3000",
+	} {
+		if _, err := ValidateCloudURL(valid); err != nil {
+			t.Fatalf("ValidateCloudURL(%q): %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{
+		"http://or3.example",
+		"http://localhost.example:3000",
+		"https://user:secret@or3.example",
+		"https://or3.example/base",
+		"https://or3.example?token=secret",
+		"https://or3.example/#fragment",
+		"file:///tmp/or3",
+	} {
+		if _, err := ValidateCloudURL(invalid); err == nil {
+			t.Fatalf("ValidateCloudURL(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}
+
+func TestClientRejectsCrossOriginRedirect(t *testing.T) {
+	receiverCalled := false
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiverCalled = true
+		http.Error(w, "must not receive enrollment body", http.StatusBadRequest)
+	}))
+	defer receiver.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, receiver.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	_, err := NewClient(redirector.URL).Start(context.Background(), HostMetadata{Name: "Mac"})
+	if err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
+		t.Fatalf("Start error = %v, want cross-origin redirect rejection", err)
+	}
+	if receiverCalled {
+		t.Fatal("cross-origin receiver saw the enrollment request")
+	}
+}
+
+func TestClientRejectsMismatchedVerificationOrigins(t *testing.T) {
+	for _, field := range []string{"verification", "complete"} {
+		t.Run(field, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				verification := serverURL(r) + "/connect"
+				complete := verification + "?code=BLUE-MOON"
+				if field == "verification" {
+					verification = "https://evil.example/connect"
+				} else {
+					complete = "https://evil.example/connect?code=BLUE-MOON"
+				}
+				_ = json.NewEncoder(w).Encode(DeviceAuthorization{
+					DeviceCode:              "device-secret",
+					UserCode:                "BLUE-MOON",
+					VerificationURI:         verification,
+					VerificationURIComplete: complete,
+				})
+			}))
+			defer server.Close()
+			if _, err := NewClient(server.URL).Start(context.Background(), HostMetadata{Name: "Mac"}); err == nil {
+				t.Fatal("mismatched verification origin unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestSaveStateWritesOwnerOnlyLocallyManagedTunnelFiles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "connect")
 	state := State{
 		CloudURL:        "https://or3.chat",
+		AccountID:       "acct-1",
+		WorkspaceID:     "workspace-1",
+		Namespace:       "or3-chat:workspace-1:",
 		EnvironmentID:   "env-1",
 		EnvironmentName: "Studio Mac",
 		Hostname:        "studio.example.test",
 		ControlToken:    "control-secret",
 		ConnectedAt:     time.Now().UTC(),
 	}
-	if err := SaveState(dir, state, "tunnel-secret"); err != nil {
+	if err := SaveState(dir, state, TunnelCredential{
+		AccountTag:   "account-tag",
+		TunnelID:     "11111111-2222-3333-4444-555555555555",
+		TunnelSecret: "base64-tunnel-secret",
+		Hostname:     "studio.example.test",
+	}); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
-	for _, path := range []string{StatePath(dir), TunnelTokenPath(dir)} {
+	for _, path := range []string{
+		StatePath(dir),
+		TunnelConfigPath(dir),
+		TunnelCredentialsPath(dir),
+	} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("stat %s: %v", path, err)
@@ -98,18 +206,29 @@ func TestSaveStateUsesOwnerOnlyFilesAndNeverEmbedsTunnelToken(t *testing.T) {
 		}
 	}
 	stateBody, _ := os.ReadFile(StatePath(dir))
-	if strings.Contains(string(stateBody), "tunnel-secret") {
-		t.Fatal("state file must not contain the tunnel token")
+	if strings.Contains(string(stateBody), "base64-tunnel-secret") {
+		t.Fatal("state file must not contain the tunnel secret")
 	}
 	loaded, err := LoadState(dir)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
-	if loaded.TunnelTokenFile != TunnelTokenPath(dir) {
-		t.Fatalf("unexpected token path %q", loaded.TunnelTokenFile)
+	if loaded.TunnelConfigFile != TunnelConfigPath(dir) {
+		t.Fatalf("unexpected config path %q", loaded.TunnelConfigFile)
 	}
-	loaded.Installed = true
-	if err := UpdateState(dir, loaded); err != nil {
+	if loaded.TunnelCredentialsFile != TunnelCredentialsPath(dir) {
+		t.Fatalf("unexpected credential path %q", loaded.TunnelCredentialsFile)
+	}
+	if loaded.AccountID != "acct-1" || loaded.WorkspaceID != "workspace-1" {
+		t.Fatalf("state scope was not preserved: %#v", loaded)
+	}
+	if loaded.Namespace != "or3-chat:workspace-1:" {
+		t.Fatalf("state namespace was not preserved: %#v", loaded)
+	}
+	// Exercise the setup caller's pre-SaveState value. UpdateState must recover
+	// the durable local credential paths rather than looking for a legacy token.
+	state.Installed = true
+	if err := UpdateState(dir, state); err != nil {
 		t.Fatalf("UpdateState: %v", err)
 	}
 	updated, err := LoadState(dir)
@@ -119,9 +238,20 @@ func TestSaveStateUsesOwnerOnlyFilesAndNeverEmbedsTunnelToken(t *testing.T) {
 	if !updated.Installed {
 		t.Fatal("updated state did not persist installation status")
 	}
-	tokenBody, _ := os.ReadFile(TunnelTokenPath(dir))
-	if string(tokenBody) != "tunnel-secret\n" {
+	credentialBody, _ := os.ReadFile(TunnelCredentialsPath(dir))
+	if !strings.Contains(string(credentialBody), `"TunnelSecret": "base64-tunnel-secret"`) {
 		t.Fatal("updating state must not replace the tunnel credential")
+	}
+	configBody, _ := os.ReadFile(TunnelConfigPath(dir))
+	configText := string(configBody)
+	for _, expected := range []string{
+		`service: http://127.0.0.1:9100`,
+		`httpHostHeader: 127.0.0.1`,
+		`service: http_status:404`,
+	} {
+		if !strings.Contains(configText, expected) {
+			t.Fatalf("local tunnel configuration missing %q", expected)
+		}
 	}
 }
 
@@ -136,23 +266,48 @@ func TestRenderServiceRunsAsInvokingUserAndUsesTokenFile(t *testing.T) {
 		StateDir:   "/Users/brendon/.or3-intern/connect",
 		StdoutPath: "/tmp/or3-connect.log",
 		StderrPath: "/tmp/or3-connect-error.log",
+		Path:       "/opt/homebrew/bin:/usr/bin:/bin",
+		Home:       "/Users/brendon",
+		TempDir:    "/tmp",
+		WritablePaths: []string{
+			"/Users/brendon/workspace",
+			"/Users/brendon/.or3-intern",
+		},
 	}
 	launchd, err := RenderService(spec, "darwin")
 	if err != nil {
 		t.Fatalf("RenderService(darwin): %v", err)
 	}
-	for _, expected := range []string{"<key>UserName</key><string>brendon</string>", "<string>connect</string>", "<string>run</string>"} {
+	for _, expected := range []string{"<key>UserName</key><string>brendon</string>", "<string>connect</string>", "<string>run</string>", "<key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>"} {
 		if !strings.Contains(launchd, expected) {
 			t.Fatalf("launchd service missing %q", expected)
 		}
+	}
+	if strings.Contains(launchd, "StandardOutPath") || strings.Contains(launchd, "StandardErrorPath") {
+		t.Fatalf("launchd service must not write unbounded supervisor logs: %s", launchd)
+	}
+	if !strings.Contains(launchd, "<key>OR3_CONNECT_MANAGED_LOGS</key><string>1</string>") {
+		t.Fatalf("launchd service did not enable bounded managed logs: %s", launchd)
 	}
 	systemd, err := RenderService(spec, "linux")
 	if err != nil {
 		t.Fatalf("RenderService(linux): %v", err)
 	}
-	for _, expected := range []string{"User=brendon", "NoNewPrivileges=true", "connect run"} {
+	for _, expected := range []string{"User=brendon", "NoNewPrivileges=true", "connect run", `Environment="PATH=/opt/homebrew/bin:/usr/bin:/bin"`, `"/Users/brendon/workspace"`} {
 		if !strings.Contains(systemd, expected) {
 			t.Fatalf("systemd service missing %q", expected)
+		}
+	}
+}
+
+func TestServiceExecutablePathDropsRelativeAndEmptyEntries(t *testing.T) {
+	got := serviceExecutablePath("relative:/custom/bin::/usr/bin", "/Users/example")
+	if strings.Contains(got, "relative") || strings.Contains(got, "::") {
+		t.Fatalf("unsafe PATH entry survived: %q", got)
+	}
+	for _, expected := range []string{"/custom/bin", "/usr/bin", "/Users/example/.local/bin", "/opt/homebrew/bin"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("controlled PATH missing %q: %q", expected, got)
 		}
 	}
 }

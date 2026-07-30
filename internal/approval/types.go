@@ -21,6 +21,7 @@ const (
 
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
+	RoleConnect       = "connect"
 	RoleServiceClient = "service-client"
 	RoleWebUI         = "web-ui"
 	RoleNode          = "node"

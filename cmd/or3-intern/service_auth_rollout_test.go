@@ -137,6 +137,91 @@ func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 	}
 }
 
+func TestServiceConnectIdentityAllowsOnlyConnectSurface(t *testing.T) {
+	identity := serviceAuthIdentity{
+		Kind:      "paired-device",
+		Role:      approval.RoleConnect,
+		Namespace: "or3-chat:workspace-a:",
+	}
+	tests := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{http.MethodGet, "/internal/v1/capabilities", true},
+		{http.MethodGet, "/internal/v1/chat-runners", true},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions", true},
+		{http.MethodGet, "/internal/v1/runner-chat/sessions/session-a/turns/turn-a/stream", true},
+		{http.MethodGet, "/internal/v1/artifacts/artifact-a", true},
+		{http.MethodGet, "/internal/v1/files/roots", true},
+		{http.MethodPost, "/internal/v1/files/mkdir", true},
+		{http.MethodPost, "/internal/v1/files/upload", true},
+		{http.MethodGet, "/internal/v1/approvals", false},
+		{http.MethodGet, "/internal/v1/configure", false},
+		{http.MethodGet, "/internal/v1/terminal/sessions", false},
+		{http.MethodPost, "/internal/v1/artifacts", false},
+		{http.MethodGet, "/internal/v1/files/read", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if got := serviceConnectIdentityAllowsRequest(identity, req); got != tt.want {
+				t.Fatalf("serviceConnectIdentityAllowsRequest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	missingScope := identity
+	missingScope.Namespace = ""
+	if serviceConnectIdentityAllowsRequest(missingScope, httptest.NewRequest(http.MethodGet, "/internal/v1/chat-runners", nil)) {
+		t.Fatal("Connect identity without a namespace was allowed")
+	}
+}
+
+func TestServiceAuthMiddleware_ConnectTokenCarriesNamespaceAndCannotEscapeSurface(t *testing.T) {
+	ctx := context.Background()
+	database, cleanup := openServiceTestDB(t)
+	defer cleanup()
+	cfg := rolloutAuthTestConfig(config.AuthEnforcementSensitive)
+	broker := &approval.Broker{DB: database, Config: cfg.Security.Approvals}
+	const token = "connect-token-that-is-at-least-thirty-two-bytes-long"
+	if _, err := broker.RegisterDeviceToken(
+		ctx,
+		"or3-connect:env-a",
+		token,
+		approval.RoleConnect,
+		"Studio Mac",
+		map[string]any{"connect_namespace": "or3-chat:workspace-a:"},
+	); err != nil {
+		t.Fatalf("RegisterDeviceToken: %v", err)
+	}
+	handler := serviceAuthMiddlewareWithBroker(cfg, broker, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity := serviceAuthIdentityFromContext(r.Context())
+		writeServiceJSON(w, http.StatusOK, map[string]any{"namespace": identity.Namespace})
+	}))
+
+	allowed := httptest.NewRequest(http.MethodGet, "/internal/v1/capabilities", nil)
+	allowed.Header.Set("Authorization", "Bearer "+token)
+	allowed.Header.Set("X-Or3-Auth-Method", "paired-device")
+	allowedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(allowedRecorder, allowed)
+	if allowedRecorder.Code != http.StatusOK {
+		t.Fatalf("allowed status = %d (%s)", allowedRecorder.Code, allowedRecorder.Body.String())
+	}
+	if payload := mustDecodeJSONBody(t, allowedRecorder.Body); payload["namespace"] != "or3-chat:workspace-a:" {
+		t.Fatalf("namespace payload = %#v", payload)
+	}
+
+	forbidden := httptest.NewRequest(http.MethodGet, "/internal/v1/approvals", nil)
+	forbidden.Header.Set("Authorization", "Bearer "+token)
+	forbidden.Header.Set("X-Or3-Auth-Method", "paired-device")
+	forbiddenRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(forbiddenRecorder, forbidden)
+	if forbiddenRecorder.Code != http.StatusForbidden {
+		t.Fatalf("forbidden status = %d (%s)", forbiddenRecorder.Code, forbiddenRecorder.Body.String())
+	}
+}
+
 func TestServiceAuthMiddleware_SecureConnectionsRejectsSharedSecretWithoutSession(t *testing.T) {
 	cfg := rolloutAuthTestConfig(config.AuthEnforcementSensitive)
 	cfg.Service.Secret = strings.Repeat("m", 32)

@@ -240,6 +240,37 @@ func TestBroker_PairingAndApprovalTokenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBroker_RegisterDeviceTokenStoresHashAndAuthenticatesConnectRole(t *testing.T) {
+	broker, cleanup := newTestBroker(t, nil)
+	defer cleanup()
+
+	const rawToken = "connect-token-that-is-at-least-thirty-two-bytes-long"
+	device, err := broker.RegisterDeviceToken(
+		context.Background(),
+		"or3-connect:env-1",
+		rawToken,
+		RoleConnect,
+		"Studio Mac",
+		map[string]any{"connect_namespace": "or3-chat:workspace-a:"},
+	)
+	if err != nil {
+		t.Fatalf("RegisterDeviceToken: %v", err)
+	}
+	if device.Role != RoleConnect {
+		t.Fatalf("role = %q, want %q", device.Role, RoleConnect)
+	}
+	if string(device.TokenHash) == rawToken {
+		t.Fatal("raw device token was stored instead of its hash")
+	}
+	authenticated, err := broker.AuthenticateDeviceToken(context.Background(), rawToken, RoleConnect)
+	if err != nil {
+		t.Fatalf("AuthenticateDeviceToken: %v", err)
+	}
+	if authenticated.Metadata["connect_namespace"] != "or3-chat:workspace-a:" {
+		t.Fatalf("connect namespace = %#v", authenticated.Metadata["connect_namespace"])
+	}
+}
+
 func TestBroker_VerifyApprovalTokenRejectsMismatchTamperAndRevoked(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	broker, cleanup := newTestBroker(t, func(cfg *config.ApprovalConfig) {

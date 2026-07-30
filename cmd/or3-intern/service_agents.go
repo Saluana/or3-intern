@@ -111,6 +111,10 @@ func (s *serviceServer) handleArtifacts(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "session_key is required"})
 		return
 	}
+	if namespace := serviceConnectNamespace(r); namespace != "" && !strings.HasPrefix(sessionKey, namespace) {
+		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "artifact not found"})
+		return
+	}
 	const defaultMaxBytes int64 = 200_000
 	const hardCapBytes int64 = 2_000_000
 	maxBytes := defaultMaxBytes

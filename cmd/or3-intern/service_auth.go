@@ -54,6 +54,7 @@ type serviceAuthIdentity struct {
 	Actor     string
 	Role      string
 	Device    string
+	Namespace string
 	User      string
 	Session   string
 	StepUpAt  int64
@@ -144,11 +145,47 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 			return
 		}
 		server.clearServiceAuthFailures(r, "auth")
+		if identity.Role == approval.RoleConnect {
+			if !serviceConnectIdentityAllowsRequest(identity, r) {
+				writeServiceJSON(w, http.StatusForbidden, addServiceRequestID(map[string]any{"error": "forbidden", "code": serviceCodeForbidden}, r))
+				return
+			}
+			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
+			return
+		}
 		if serviceWriteAuthChallengeIfNeeded(cfg, authSvc, w, r, requirement, identity, nil) {
 			return
 		}
 		next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
 	})
+}
+
+func serviceConnectIdentityAllowsRequest(identity serviceAuthIdentity, r *http.Request) bool {
+	if identity.Role != approval.RoleConnect {
+		return true
+	}
+	if identity.Kind != "paired-device" || strings.TrimSpace(identity.Namespace) == "" || r == nil || r.URL == nil {
+		return false
+	}
+	path := strings.TrimRight(r.URL.Path, "/")
+	switch {
+	case r.Method == http.MethodGet && path == "/internal/v1/capabilities":
+		return true
+	case r.Method == http.MethodGet && path == "/internal/v1/chat-runners":
+		return true
+	case path == "/internal/v1/runner-chat/sessions" || strings.HasPrefix(path, "/internal/v1/runner-chat/sessions/"):
+		return true
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/internal/v1/artifacts/"):
+		return true
+	case path == "/internal/v1/files/roots" && r.Method == http.MethodGet:
+		return true
+	case path == "/internal/v1/files/mkdir" && r.Method == http.MethodPost:
+		return true
+	case path == "/internal/v1/files/upload" && r.Method == http.MethodPost:
+		return true
+	default:
+		return false
+	}
 }
 
 func authenticateTerminalWebSocketTicketRequest(server *serviceServer, r *http.Request, now time.Time) (serviceAuthIdentity, bool) {
@@ -580,7 +617,14 @@ func authenticateServiceRequest(cfg config.Config, broker *approval.Broker, auth
 	if (requestedMethod == "" || requestedMethod == "paired-device") && broker != nil {
 		device, err := broker.AuthenticateDeviceToken(ctx, token)
 		if err == nil {
-			return serviceAuthIdentity{Kind: "paired-device", Actor: "device:" + device.DeviceID, Role: device.Role, Device: device.DeviceID}, nil
+			namespace, _ := device.Metadata["connect_namespace"].(string)
+			return serviceAuthIdentity{
+				Kind:      "paired-device",
+				Actor:     "device:" + device.DeviceID,
+				Role:      device.Role,
+				Device:    device.DeviceID,
+				Namespace: strings.TrimSpace(namespace),
+			}, nil
 		}
 		if requestedMethod == "paired-device" {
 			return serviceAuthIdentity{}, fmt.Errorf("invalid paired-device token")
@@ -975,6 +1019,8 @@ func serviceRoleRank(role string) int {
 	case approval.RoleAdmin:
 		return 4
 	case approval.RoleOperator:
+		return 3
+	case approval.RoleConnect:
 		return 3
 	case approval.RoleServiceClient, approval.RoleWebUI, approval.RoleNode:
 		return 2

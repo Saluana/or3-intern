@@ -11,18 +11,24 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"or3-intern/internal/config"
 )
 
 type ServiceSpec struct {
-	Label      string
-	User       string
-	Group      string
-	WorkingDir string
-	Binary     string
-	ConfigPath string
-	StateDir   string
-	StdoutPath string
-	StderrPath string
+	Label         string
+	User          string
+	Group         string
+	WorkingDir    string
+	Binary        string
+	ConfigPath    string
+	StateDir      string
+	StdoutPath    string
+	StderrPath    string
+	Path          string
+	Home          string
+	TempDir       string
+	WritablePaths []string
 }
 
 func CurrentServiceSpec(configPath, stateDir string) (ServiceSpec, error) {
@@ -42,17 +48,95 @@ func CurrentServiceSpec(configPath, stateDir string) (ServiceSpec, error) {
 	if parsed, err := user.LookupGroupId(current.Gid); err == nil {
 		group = parsed.Name
 	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return ServiceSpec{}, fmt.Errorf("load service configuration: %w", err)
+	}
+	writablePaths, err := serviceWritablePaths(stateDir, cfg)
+	if err != nil {
+		return ServiceSpec{}, err
+	}
 	return ServiceSpec{
-		Label:      "chat.or3.connect",
-		User:       current.Username,
-		Group:      group,
-		WorkingDir: filepath.Dir(configPath),
-		Binary:     binary,
-		ConfigPath: configPath,
-		StateDir:   stateDir,
-		StdoutPath: filepath.Join(stateDir, "connect.log"),
-		StderrPath: filepath.Join(stateDir, "connect-error.log"),
+		Label:         "chat.or3.connect",
+		User:          current.Username,
+		Group:         group,
+		WorkingDir:    filepath.Dir(configPath),
+		Binary:        binary,
+		ConfigPath:    configPath,
+		StateDir:      stateDir,
+		StdoutPath:    filepath.Join(stateDir, "connect.log"),
+		StderrPath:    filepath.Join(stateDir, "connect-error.log"),
+		Path:          serviceExecutablePath(os.Getenv("PATH"), current.HomeDir),
+		Home:          current.HomeDir,
+		TempDir:       os.TempDir(),
+		WritablePaths: writablePaths,
 	}, nil
+}
+
+func serviceWritablePaths(stateDir string, cfg config.Config) ([]string, error) {
+	candidates := []string{
+		stateDir,
+		cfg.WorkspaceDir,
+		cfg.AllowedDir,
+		filepath.Dir(cfg.DBPath),
+		cfg.ArtifactsDir,
+	}
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == "." {
+			continue
+		}
+		absolute, err := filepath.Abs(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("resolve service writable path %q: %w", candidate, err)
+		}
+		absolute = filepath.Clean(absolute)
+		if absolute == string(filepath.Separator) {
+			return nil, fmt.Errorf("refusing broad service writable path %q", candidate)
+		}
+		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+			absolute = filepath.Clean(resolved)
+		}
+		if _, exists := seen[absolute]; exists {
+			continue
+		}
+		seen[absolute] = struct{}{}
+		paths = append(paths, absolute)
+	}
+	return paths, nil
+}
+
+func serviceExecutablePath(currentPath, home string) string {
+	candidates := []string{
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+		"/opt/homebrew/bin",
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, "bin"),
+		filepath.Join(home, ".bun", "bin"),
+		filepath.Join(home, ".npm-global", "bin"),
+	}
+	candidates = append(strings.Split(currentPath, string(os.PathListSeparator)), candidates...)
+	seen := map[string]struct{}{}
+	safe := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || !filepath.IsAbs(candidate) {
+			continue
+		}
+		candidate = filepath.Clean(candidate)
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		safe = append(safe, candidate)
+	}
+	return strings.Join(safe, string(os.PathListSeparator))
 }
 
 func RenderService(spec ServiceSpec, platform string) (string, error) {
@@ -196,11 +280,16 @@ const launchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>{{xml .StateDir}}</string>
   </array>
   <key>WorkingDirectory</key><string>{{xml .WorkingDir}}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{{xml .Path}}</string>
+    <key>HOME</key><string>{{xml .Home}}</string>
+    <key>TMPDIR</key><string>{{xml .TempDir}}</string>
+    <key>OR3_CONNECT_MANAGED_LOGS</key><string>1</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>{{xml .StdoutPath}}</string>
-  <key>StandardErrorPath</key><string>{{xml .StderrPath}}</string>
 </dict>
 </plist>
 `
@@ -218,10 +307,13 @@ WorkingDirectory={{q .WorkingDir}}
 ExecStart={{q .Binary}} --config {{q .ConfigPath}} connect run --state-dir {{q .StateDir}}
 Restart=always
 RestartSec=3
+Environment="PATH={{.Path}}"
+Environment="HOME={{.Home}}"
+Environment="TMPDIR={{.TempDir}}"
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths={{q .StateDir}} {{q .WorkingDir}}
+ReadWritePaths={{range .WritablePaths}}{{q .}} {{end}}
 
 [Install]
 WantedBy=multi-user.target

@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, realpathSync } from 'node:fs';
 import {
     chmod,
     lstat,
@@ -630,8 +630,17 @@ function safeMessage(error) {
     return error instanceof Error ? error.message : 'setup failed';
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';
-const modulePath = resolve(fileURLToPath(import.meta.url));
+function canonicalExecutablePath(path) {
+    if (!path) return '';
+    try {
+        return realpathSync(resolve(path));
+    } catch {
+        return resolve(path);
+    }
+}
+
+const invokedPath = canonicalExecutablePath(process.argv[1]);
+const modulePath = canonicalExecutablePath(fileURLToPath(import.meta.url));
 if (invokedPath === modulePath) {
     runCLI().then((code) => {
         process.exitCode = code;

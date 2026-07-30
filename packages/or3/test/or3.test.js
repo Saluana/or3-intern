@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmod, mkdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -16,6 +16,27 @@ import {
     runCLI,
     withInstallLock,
 } from '../bin/or3.js';
+
+test('installed npm bin symlink invokes the bootstrap', async (t) => {
+    const directory = await makeTestDirectory(t);
+    const intern = join(directory, 'or3-intern');
+    await writeFile(intern, '#!/bin/sh\nprintf "forwarded:%s\\n" "$*"\n', { mode: 0o755 });
+    await chmod(intern, 0o755);
+
+    const link = join(directory, 'or3');
+    await symlink(new URL('../bin/or3.js', import.meta.url), link);
+    const result = spawnSync(link, ['connect', 'status'], {
+        encoding: 'utf8',
+        env: {
+            ...process.env,
+            OR3_INTERN_BIN: intern,
+        },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /OR3 Connect/);
+    assert.match(result.stdout, /forwarded:connect status/);
+});
 
 test('all cached management commands start offline without a shell PATH install', async (t) => {
     const installDir = await makeTestDirectory(t);

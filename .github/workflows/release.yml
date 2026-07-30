@@ -9,6 +9,7 @@ on:
       - '.github/workflows/release.yml'
       - 'cmd/or3-intern/**'
       - 'internal/**'
+      - 'packages/or3/**'
       - 'go.mod'
       - 'go.sum'
 
@@ -87,6 +88,11 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: Verify npm bootstrap
+        working-directory: packages/or3
+        run: |
+          npm test
+          npm pack --dry-run
       - name: Publish npx bootstrap
         working-directory: packages/or3
         env:

@@ -6,6 +6,12 @@ Connect a macOS or Linux computer to OR3 Cloud:
 npx or3 connect
 ```
 
+With Bun:
+
+```sh
+bunx or3 connect
+```
+
 The bootstrap downloads checksum-verified `or3-intern` and `cloudflared`
 release assets into `~/.or3/bin`, then opens OR3's browser device authorization.
 Downloads are streamed, deadline-bounded, and installed atomically under a

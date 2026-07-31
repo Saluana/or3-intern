@@ -7,6 +7,9 @@
     "directory": "clients/typescript"
   },
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "private": false,
   "sideEffects": false,
   "main": "./dist/index.js",

@@ -131,7 +131,7 @@ func probeLiveRunEvents(ctx context.Context, baseURL, token, origin string) (liv
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := probeCORSPreflight(probeCtx, baseURL, token, origin); err != nil {
+	if err := probeCORSPreflight(probeCtx, baseURL, origin); err != nil {
 		return liveRunVerification{}, err
 	}
 
@@ -213,16 +213,14 @@ func probeLiveRunEvents(ctx context.Context, baseURL, token, origin string) (liv
 	eventsRequest.Header.Set("Authorization", "Bearer "+token)
 	eventsRequest.Header.Set("Origin", origin)
 	eventsRequest.Header.Set("Accept", "text/event-stream")
-	eventsResponse, err := client.Do(eventsRequest)
+	eventsResponse, err := (&http.Client{}).Do(eventsRequest)
 	if err != nil {
 		return liveRunVerification{}, fmt.Errorf("connect to live run events: %w", err)
 	}
 	streaming, corsErr := validateLiveSSEResponse(eventsResponse.StatusCode, eventsResponse.Header, origin)
-	var frameErr error
+	var evidenceErr error
 	if corsErr == nil && streaming {
-		frameCtx, cancelFrame := context.WithTimeout(probeCtx, 5*time.Second)
-		_, frameErr = readSSEFrame(frameCtx, eventsResponse.Body)
-		cancelFrame()
+		evidenceErr = readLiveRunEvidence(probeCtx, eventsResponse.Body, runID)
 	}
 	eventsResponse.Body.Close()
 	if corsErr != nil {
@@ -231,8 +229,8 @@ func probeLiveRunEvents(ctx context.Context, baseURL, token, origin string) (liv
 	if !streaming {
 		return liveRunVerification{}, errors.New("runtime live run events did not return an SSE response")
 	}
-	if frameErr != nil {
-		return liveRunVerification{}, fmt.Errorf("runtime live run events opened but did not emit an SSE frame: %w", frameErr)
+	if evidenceErr != nil {
+		return liveRunVerification{}, fmt.Errorf("runtime live run events did not deliver assistant content followed by a terminal event: %w", evidenceErr)
 	}
 	cancelled := stop()
 	result := liveRunVerification{Streaming: "verified", Cancellation: "not-tested"}
@@ -240,6 +238,84 @@ func probeLiveRunEvents(ctx context.Context, baseURL, token, origin string) (liv
 		result.Cancellation = "verified"
 	}
 	return result, nil
+}
+
+func readLiveRunEvidence(ctx context.Context, body io.Reader, runID string) error {
+	if body == nil {
+		return errors.New("SSE response body is empty")
+	}
+	result := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReaderSize(body, 16*1024)
+		var data []string
+		assistantContent := false
+		for {
+			line, err := reader.ReadString('\n')
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "data:") {
+				data = append(data, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+			}
+			if trimmed == "" && len(data) > 0 {
+				var payload map[string]any
+				if json.Unmarshal([]byte(strings.Join(data, "\n")), &payload) == nil && liveEventMatchesRun(payload, runID) {
+					content, terminal := liveRunEventEvidence(payload)
+					assistantContent = assistantContent || content
+					if terminal {
+						if assistantContent {
+							result <- nil
+						} else {
+							result <- errors.New("terminal event arrived before assistant content")
+						}
+						return
+					}
+				}
+				data = data[:0]
+			}
+			if err != nil {
+				if err == io.EOF {
+					result <- errors.New("SSE stream ended before terminal evidence")
+				} else {
+					result <- err
+				}
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func liveEventMatchesRun(payload map[string]any, runID string) bool {
+	for _, key := range []string{"run_id", "runId", "turn_id", "turnId"} {
+		if value, ok := payload[key]; ok && strings.TrimSpace(fmt.Sprint(value)) != runID {
+			return false
+		}
+	}
+	return true
+}
+
+func liveRunEventEvidence(payload map[string]any) (content, terminal bool) {
+	event := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["event"])))
+	status := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["status"])))
+	for _, key := range []string{"delta", "text", "output", "content"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			content = true
+			break
+		}
+	}
+	switch event {
+	case "run.completed", "turn.completed", "run.failed", "turn.failed", "run.cancelled", "run.canceled", "turn.cancelled", "turn.canceled":
+		terminal = true
+	}
+	switch status {
+	case "completed", "complete", "succeeded", "success", "failed", "error", "cancelled", "canceled":
+		terminal = true
+	}
+	return content, terminal
 }
 
 // readSSEFrame waits for the first complete SSE frame. It deliberately does
@@ -291,7 +367,7 @@ func readSSEFrame(ctx context.Context, body io.Reader) (string, error) {
 	}
 }
 
-func probeCORSPreflight(ctx context.Context, baseURL, token, origin string) error {
+func probeCORSPreflight(ctx context.Context, baseURL, origin string) error {
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodOptions,
@@ -301,7 +377,6 @@ func probeCORSPreflight(ctx context.Context, baseURL, token, origin string) erro
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Origin", origin)
 	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	request.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
@@ -337,7 +412,24 @@ func validateCORSPreflight(status int, headers http.Header, origin string) error
 	if got := headers.Get("Access-Control-Allow-Origin"); got != origin {
 		return &hermesSSECorsError{Origin: origin}
 	}
+	if !headerIncludes(headers.Get("Access-Control-Allow-Methods"), http.MethodPost) {
+		return errors.New("CORS preflight does not allow POST")
+	}
+	for _, header := range []string{"Authorization", "Content-Type"} {
+		if !headerIncludes(headers.Get("Access-Control-Allow-Headers"), header) {
+			return fmt.Errorf("CORS preflight does not allow %s", header)
+		}
+	}
 	return nil
+}
+
+func headerIncludes(value, expected string) bool {
+	for _, candidate := range strings.Split(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(candidate), expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func hermesUpdateCheck(binary string) string {

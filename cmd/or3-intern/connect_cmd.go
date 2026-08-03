@@ -404,6 +404,13 @@ func finishRemoteConnectionSetup(
 				return fmt.Errorf("record online remote connection: %w", err)
 			}
 		case connectSetupStageOnline:
+			if state.Driver == "runs" {
+				// Runs adapters perform their authenticated remote capability and
+				// live-stream verification immediately after this shared tunnel
+				// lifecycle finishes. Let that adapter emit the only success
+				// message once the browser-facing path has passed.
+				return nil
+			}
 			fmt.Fprintln(stdout)
 			fmt.Fprintf(stdout, "Connected as %s\n", state.EnvironmentName)
 			fmt.Fprintln(stdout, "OR3 will stay reachable after you log out or restart.")
@@ -1010,6 +1017,15 @@ func probeRemoteConnectionForDoctor(
 }
 
 func runRemoteConnectionService(ctx context.Context, cfgPath, stateDir string, stdout, stderr io.Writer) error {
+	return runRemoteConnectionServiceWithVerification(ctx, cfgPath, stateDir, stdout, stderr, nil)
+}
+
+func runRemoteConnectionServiceWithVerification(
+	ctx context.Context,
+	cfgPath, stateDir string,
+	stdout, stderr io.Writer,
+	verify func(context.Context, remoteconnect.State) error,
+) error {
 	state, err := remoteconnect.LoadState(stateDir)
 	if err != nil {
 		return fmt.Errorf("load saved remote connection: %w", err)
@@ -1062,6 +1078,19 @@ func runRemoteConnectionService(ctx context.Context, cfgPath, stateDir string, s
 		}
 		return fmt.Errorf("start secure tunnel: %w", err)
 	}
+	if verify != nil {
+		if err := waitForTerminalTunnelVerification(ctx, state, verify); err != nil {
+			if tunnel.Process != nil {
+				_ = tunnel.Process.Signal(syscall.SIGTERM)
+			}
+			_ = tunnel.Wait()
+			if service != nil && service.Process != nil {
+				_ = service.Process.Signal(syscall.SIGTERM)
+				_ = service.Wait()
+			}
+			return err
+		}
+	}
 	fmt.Fprintf(stdout, "OR3 remote connection ready: %s\n", state.EnvironmentName)
 	if service == nil {
 		err := tunnel.Wait()
@@ -1089,6 +1118,28 @@ func runRemoteConnectionService(ctx context.Context, cfgPath, stateDir string, s
 		return nil
 	}
 	return fmt.Errorf("%s stopped: %w", result.name, result.err)
+}
+
+func waitForTerminalTunnelVerification(
+	ctx context.Context,
+	state remoteconnect.State,
+	verify func(context.Context, remoteconnect.State) error,
+) error {
+	verifyCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	var lastErr error
+	for {
+		if err := verify(verifyCtx, state); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-verifyCtx.Done():
+			return fmt.Errorf("terminal tunnel did not pass remote verification: %w", lastErr)
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func printRemoteConnectionStatus(stateDir string, stdout io.Writer) error {

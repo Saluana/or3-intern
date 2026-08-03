@@ -63,7 +63,7 @@ func TestMergeHermesEnvUsesTheDiscoveredPort(t *testing.T) {
 	}
 }
 
-func TestMergeHermesEnvPreservesExistingCorsOrigins(t *testing.T) {
+func TestMergeHermesEnvRestrictsCorsOriginsToOR3Cloud(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	if err := os.WriteFile(path, []byte("API_SERVER_CORS_ORIGINS=https://existing.example, https://or3.example\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -75,25 +75,25 @@ func TestMergeHermesEnvPreservesExistingCorsOrigins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(body); !strings.Contains(got, "API_SERVER_CORS_ORIGINS=https://existing.example,https://or3.example") {
-		t.Fatalf("existing Hermes CORS origins were not preserved: %s", got)
+	if got := string(body); !strings.Contains(got, "API_SERVER_CORS_ORIGINS=https://or3.example") || strings.Contains(got, "existing.example") {
+		t.Fatalf("Hermes CORS origins were not restricted to OR3 Cloud: %s", got)
 	}
 }
 
-func TestMergeHermesEnvRejectsWildcardCorsOrigins(t *testing.T) {
+func TestMergeHermesEnvReplacesWildcardCorsOrigins(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	if err := os.WriteFile(path, []byte("API_SERVER_CORS_ORIGINS=*\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := mergeHermesEnvAtPort(path, "https://or3.example", "", 8642); err == nil {
-		t.Fatal("wildcard Hermes CORS origin was accepted")
+	if err := mergeHermesEnvAtPort(path, "https://or3.example", "", 8642); err != nil {
+		t.Fatalf("mergeHermesEnvAtPort: %v", err)
 	}
 	body, readErr := os.ReadFile(path)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if string(body) != "API_SERVER_CORS_ORIGINS=*\n" {
-		t.Fatalf("failed Hermes configuration was mutated: %q", body)
+	if got := string(body); !strings.Contains(got, "API_SERVER_CORS_ORIGINS=https://or3.example") || strings.Contains(got, "API_SERVER_CORS_ORIGINS=*") {
+		t.Fatalf("wildcard Hermes CORS origin was not replaced: %q", body)
 	}
 }
 
@@ -173,6 +173,33 @@ func TestUpdateOpenClawConfigRejectsWildcardCorsOrigins(t *testing.T) {
 	}
 	if string(body) != initial {
 		t.Fatalf("failed OpenClaw configuration was mutated: %q", body)
+	}
+}
+
+func TestUpdateOpenClawConfigRejectsMalformedKnownTypesWithoutWriting(t *testing.T) {
+	for name, initial := range map[string]string{
+		"plugins":        `{"plugins":"unexpected"}`,
+		"plugin allow":   `{"plugins":{"allow":"unexpected"}}`,
+		"plugin entries": `{"plugins":{"entries":[]}}`,
+		"plugin config":  `{"plugins":{"entries":{"or3-runs":{"config":false}}}}`,
+		"origins":        `{"plugins":{"entries":{"or3-runs":{"config":{"allowedOrigins":"unexpected"}}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "openclaw.json")
+			if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := updateOpenClawConfig(path, "https://or3.example", ""); err == nil {
+				t.Fatal("malformed OpenClaw configuration was accepted")
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != initial {
+				t.Fatalf("malformed OpenClaw configuration was changed: %q", body)
+			}
+		})
 	}
 }
 
@@ -259,22 +286,39 @@ func TestOpenClawVersionCompatibilityMatchesPinnedPluginLine(t *testing.T) {
 			t.Fatalf("incompatible version accepted: %s", version)
 		}
 	}
-	if !openClawVersionCompatible("future banner without semver") {
-		t.Fatal("unknown version banner should defer to the runtime loader")
+	if openClawVersionCompatible("future banner without semver") {
+		t.Fatal("unknown version banner was accepted")
 	}
 }
 
 func TestOpenClawPluginVersionMustMatchThePinnedRelease(t *testing.T) {
-	if !openClawPluginVersionMatches(`{"plugin":{"id":"or3-runs","version":"0.1.0"}}`, "0.1.0") {
+	if !openClawPluginVersionMatches(`{"plugin":{"id":"or3-runs","version":"0.1.0","source":"npm","enabled":true}}`, "0.1.0") {
 		t.Fatal("pinned plugin version was not detected")
 	}
+	if !openClawPluginReady(`{"plugin":{"id":"or3-runs","version":"0.1.0","source":"npm:@or3/openclaw@0.1.0","enabled":true}}`, "0.1.0") {
+		t.Fatal("enabled pinned npm plugin was not detected")
+	}
 	for _, output := range []string{
-		`{"plugin":{"id":"or3-runs","version":"0.0.9"}}`,
+		`{"plugin":{"id":"or3-runs","version":"0.0.9","source":"npm"}}`,
+		`{"plugin":{"id":"other-plugin","version":"0.1.0","source":"npm"}}`,
+		`{"plugin":{"id":"or3-runs","version":"0.1.0","source":"local"}}`,
+		`{"plugin":{"id":"or3-runs","version":"0.1.0","source":"npm","enabled":false}}`,
 		`not-json`,
 	} {
-		if openClawPluginVersionMatches(output, "0.1.0") {
+		if openClawPluginReady(output, "0.1.0") {
 			t.Fatalf("unmatched plugin inspection was accepted: %s", output)
 		}
+	}
+}
+
+func TestRuntimeConsentRequiresTheExactApprovedAction(t *testing.T) {
+	t.Setenv("OR3_CONNECT_YES", "1")
+	t.Setenv("OR3_CONNECT_APPROVE", "plugin-install, source-patch")
+	if runtimeConsentApproved(runtimeConsentInstaller) {
+		t.Fatal("installer was approved without its explicit consent token")
+	}
+	if !runtimeConsentApproved(runtimeConsentPluginInstall) || !runtimeConsentApproved(runtimeConsentSourcePatch) {
+		t.Fatal("explicit runtime consent tokens were not accepted")
 	}
 }
 
@@ -390,6 +434,8 @@ func TestLiveSSEValidationDistinguishesPreflightAndStreamHeaders(t *testing.T) {
 	origin := "https://or3.example"
 	preflight := http.Header{}
 	preflight.Set("Access-Control-Allow-Origin", origin)
+	preflight.Set("Access-Control-Allow-Methods", "GET, POST")
+	preflight.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 	if err := validateCORSPreflight(http.StatusOK, preflight, origin); err != nil {
 		t.Fatalf("valid preflight rejected: %v", err)
 	}
@@ -412,6 +458,21 @@ func TestLiveSSEValidationDistinguishesPreflightAndStreamHeaders(t *testing.T) {
 	}
 	if err := validateCORSPreflight(http.StatusOK, missing, origin); err == nil {
 		t.Fatal("preflight without CORS was accepted")
+	}
+}
+
+func TestReadLiveRunEvidenceRequiresContentAndTerminalForTheRequestedRun(t *testing.T) {
+	valid := "data: {\"run_id\":\"run-1\",\"event\":\"message.delta\",\"delta\":\"OK\"}\n\ndata: {\"run_id\":\"run-1\",\"event\":\"run.completed\",\"output\":\"OK\"}\n\n"
+	if err := readLiveRunEvidence(context.Background(), strings.NewReader(valid), "run-1"); err != nil {
+		t.Fatalf("valid live evidence was rejected: %v", err)
+	}
+	wrongRun := "data: {\"run_id\":\"other\",\"event\":\"message.delta\",\"delta\":\"OK\"}\n\ndata: {\"run_id\":\"other\",\"event\":\"run.completed\"}\n\n"
+	if err := readLiveRunEvidence(context.Background(), strings.NewReader(wrongRun), "run-1"); err == nil {
+		t.Fatal("events for another run were accepted")
+	}
+	noContent := "data: {\"run_id\":\"run-1\",\"event\":\"run.completed\"}\n\n"
+	if err := readLiveRunEvidence(context.Background(), strings.NewReader(noContent), "run-1"); err == nil {
+		t.Fatal("terminal-only evidence was accepted")
 	}
 }
 

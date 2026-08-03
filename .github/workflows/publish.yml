@@ -78,7 +78,7 @@ jobs:
           path: or3-intern-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
 
   release:
-    needs: binaries
+    needs: npm
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -93,9 +93,12 @@ jobs:
           files: dist/*.tar.gz
 
   npm:
-    needs: release
+    needs: binaries
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -107,23 +110,39 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: npm install --global npm@11
-      - name: Verify npm bootstrap
-        working-directory: packages/or3
+      - name: Verify release versions and immutable registry targets
         run: |
-          npm test
-          npm pack --dry-run
-      - name: Verify TypeScript client package
+          VERSION="${GITHUB_REF_NAME#v}"
+          for PACKAGE in packages/or3 clients/typescript; do
+            ACTUAL_VERSION="$(node -p "require('./${PACKAGE}/package.json').version")"
+            if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
+              echo "${PACKAGE} version ${ACTUAL_VERSION} does not match tag ${VERSION}" >&2
+              exit 1
+            fi
+            NAME="$(node -p "require('./${PACKAGE}/package.json').name")"
+            if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${NAME}@${VERSION} already exists and cannot be republished" >&2
+              exit 1
+            fi
+          done
+      - name: Qualify immutable npm tarballs
+        run: |
+          npm test --prefix packages/or3
+          npm pack --json --prefix packages/or3 > packages/or3/pack.json
+          npm test --prefix clients/typescript
+          npm pack --json --prefix clients/typescript > clients/typescript/pack.json
+      - name: Publish qualified TypeScript client tarball
         working-directory: clients/typescript
         run: |
-          npm test
-          npm pack --dry-run
-      - name: Publish npx bootstrap
+          TARBALL="$(node -e "console.log(require('./pack.json')[0].filename)")"
+          npm publish "${TARBALL}" --access public --provenance
+      - name: Publish qualified npx bootstrap tarball
         working-directory: packages/or3
         run: |
-          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
-          npm publish --access public
-      - name: Publish TypeScript client
-        working-directory: clients/typescript
+          TARBALL="$(node -e "console.log(require('./pack.json')[0].filename)")"
+          npm publish "${TARBALL}" --access public --provenance
+      - name: Verify published package versions
         run: |
-          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
-          npm publish --access public
+          VERSION="${GITHUB_REF_NAME#v}"
+          test "$(npm view "@or3/intern-client@${VERSION}" version)" = "$VERSION"
+          test "$(npm view "@or3/connect@${VERSION}" version)" = "$VERSION"

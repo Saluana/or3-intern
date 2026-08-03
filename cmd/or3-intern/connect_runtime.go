@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	remoteconnect "or3-intern/internal/connect"
@@ -29,6 +30,8 @@ const (
 	openClawRunsPluginVersion = "0.1.0"
 	openClawDefaultPort       = 18789
 	hermesDefaultPort         = 8642
+	runtimeCommandTimeout     = 90 * time.Second
+	runtimeInstallTimeout     = 5 * time.Minute
 )
 
 type externalRuntimePlan struct {
@@ -254,14 +257,21 @@ func setupExternalRuntimeConnection(
 	// terminal-only tunnel needs to be retried; the saved state is the resume
 	// source of truth.
 	if options.NoService {
-		fmt.Fprintf(stdout, "\nConnected %s as %s. Keep this terminal open.\n", runtimeName, credential.EnvironmentName)
-		// The terminal-only path has already passed the adapter's authenticated
-		// capabilities, streaming, command, and cancellation checks locally.
-		// The named tunnel is intentionally not probed until it is running, so
-		// report the checks we actually completed instead of hiding them.
-		printExternalRuntimeCompletion(stdout, state, verification)
-		_ = removeRuntimePreparation(options.StateDir)
-		return runRemoteConnectionService(ctx, "", options.StateDir, stdout, stderr)
+		return runRemoteConnectionServiceWithVerification(ctx, "", options.StateDir, stdout, stderr, func(verifyCtx context.Context, saved remoteconnect.State) error {
+			adapter, remoteTarget, targetErr := externalRuntimeTargetFromState(saved)
+			if targetErr != nil {
+				return targetErr
+			}
+			remoteVerification, verifyErr := adapter.Verify(verifyCtx, remoteTarget)
+			if verifyErr != nil {
+				return fmt.Errorf("verify remote %s connection: %w", runtimeName, verifyErr)
+			}
+			printExternalRuntimeCompletion(stdout, saved, remoteVerification)
+			if err := removeRuntimePreparation(options.StateDir); err != nil {
+				return fmt.Errorf("remove runtime preparation checkpoint after remote verification: %w", err)
+			}
+			return nil
+		})
 	}
 	if err := finishRemoteConnectionSetup(ctx, state, options.StateDir, stdout, defaultConnectSetupOperations(), false); err != nil {
 		return err
@@ -561,6 +571,10 @@ func prepareOpenClawWithInput(ctx context.Context, input PrepareInput) (external
 	if _, err := run("plugins", "enable", "or3-runs"); err != nil {
 		return externalRuntimePlan{}, fmt.Errorf("enable OR3 Runs plugin: %w", err)
 	}
+	pluginInspection, inspectErr = run("plugins", "inspect", "or3-runs", "--json")
+	if inspectErr != nil || !openClawPluginReady(pluginInspection, openClawRunsPluginVersion) {
+		return externalRuntimePlan{}, errors.New("OR3 Runs plugin inspection did not confirm the expected npm source, pinned version, and enabled state")
+	}
 	port := openClawPort(configPath)
 	if bind := openClawBind(configPath); bind != "" && !isLoopbackBind(bind) {
 		return externalRuntimePlan{}, fmt.Errorf("OpenClaw Gateway bind %q is not loopback; set gateway.bind to loopback before connecting", bind)
@@ -726,10 +740,28 @@ func ensureRuntimeBinaryWithConfirmContext(
 			return "", "", fmt.Errorf("%s is required", name)
 		}
 		command := fmt.Sprintf("curl -fsSL %s | bash", installer)
-		cmd := exec.CommandContext(ctx, "sh", "-c", command)
+		installCtx, cancel := context.WithTimeout(ctx, runtimeInstallTimeout)
+		defer cancel()
+		cmd := exec.Command("sh", "-c", command)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
-		if err := cmd.Run(); err != nil {
-			return "", "", fmt.Errorf("install %s: %w", name, err)
+		if err := cmd.Start(); err != nil {
+			return "", "", fmt.Errorf("start %s installer: %w", name, err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		var installErr error
+		select {
+		case installErr = <-done:
+		case <-installCtx.Done():
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			<-done
+			return "", "", fmt.Errorf("install %s timed out after %s: %w", name, runtimeInstallTimeout, installCtx.Err())
+		}
+		if installErr != nil {
+			return "", "", fmt.Errorf("install %s: %w", name, installErr)
 		}
 		bin, err = findRuntimeBinary(name)
 		if err != nil {
@@ -784,34 +816,47 @@ func hasUsableOpenClawModel(output string) bool {
 }
 
 func openClawPluginVersionMatches(output, expected string) bool {
-	var value any
-	if err := json.Unmarshal([]byte(output), &value); err != nil {
+	inspection, err := decodeOpenClawPluginInspection(output)
+	if err != nil {
 		return false
 	}
-	return containsJSONVersion(value, strings.TrimSpace(expected))
+	return inspection.ID == "or3-runs" && inspection.Version == strings.TrimSpace(expected) && inspection.sourceIsNPM()
 }
 
-func containsJSONVersion(value any, expected string) bool {
-	switch current := value.(type) {
-	case map[string]any:
-		for key, child := range current {
-			if strings.EqualFold(key, "version") {
-				if version, ok := child.(string); ok && strings.TrimSpace(version) == expected {
-					return true
-				}
-			}
-			if containsJSONVersion(child, expected) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range current {
-			if containsJSONVersion(child, expected) {
-				return true
-			}
-		}
+type openClawPluginInspection struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	Enabled bool   `json:"enabled"`
+	Source  string `json:"source"`
+	Package string `json:"package"`
+}
+
+func decodeOpenClawPluginInspection(output string) (openClawPluginInspection, error) {
+	var payload struct {
+		Plugin openClawPluginInspection `json:"plugin"`
 	}
-	return false
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		return openClawPluginInspection{}, err
+	}
+	payload.Plugin.ID = strings.TrimSpace(payload.Plugin.ID)
+	payload.Plugin.Version = strings.TrimSpace(payload.Plugin.Version)
+	payload.Plugin.Source = strings.TrimSpace(payload.Plugin.Source)
+	payload.Plugin.Package = strings.TrimSpace(payload.Plugin.Package)
+	if payload.Plugin.ID == "" || payload.Plugin.Version == "" {
+		return openClawPluginInspection{}, errors.New("plugin inspection is missing plugin.id or plugin.version")
+	}
+	return payload.Plugin, nil
+}
+
+func (inspection openClawPluginInspection) sourceIsNPM() bool {
+	return strings.EqualFold(inspection.Source, "npm") ||
+		strings.HasPrefix(strings.ToLower(inspection.Source), "npm:") ||
+		strings.HasPrefix(inspection.Package, "@or3/openclaw@")
+}
+
+func openClawPluginReady(output, expected string) bool {
+	inspection, err := decodeOpenClawPluginInspection(output)
+	return err == nil && inspection.ID == "or3-runs" && inspection.Version == strings.TrimSpace(expected) && inspection.Enabled && inspection.sourceIsNPM()
 }
 
 func hasHermesModel(output string) bool {
@@ -829,9 +874,7 @@ func hasHermesModel(output string) bool {
 func openClawVersionCompatible(version string) bool {
 	match := regexp.MustCompile(`(?:^|[^0-9])([0-9]{4})\.([0-9]+)\.([0-9]+)([-+][0-9A-Za-z.-]+)?`).FindStringSubmatch(version)
 	if len(match) == 0 {
-		// A future OpenClaw may change its version banner. Let the runtime's
-		// own plugin loader make that decision instead of rejecting it here.
-		return true
+		return false
 	}
 	year, _ := strconv.Atoi(match[1])
 	minor, _ := strconv.Atoi(match[2])
@@ -855,10 +898,35 @@ func runRuntime(binary string, args ...string) (string, error) {
 }
 
 func runRuntimeContext(ctx context.Context, binary string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, binary, args...)
+	timeout := runtimeCommandTimeout
+	if len(args) >= 2 && args[0] == "plugins" && args[1] == "install" {
+		timeout = runtimeInstallTimeout
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.Command(binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-commandCtx.Done():
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-done
+		message := strings.TrimSpace(output.String())
+		if message == "" {
+			message = commandCtx.Err().Error()
+		}
+		return message, fmt.Errorf("runtime command %q timed out after %s: %w", strings.Join(append([]string{binary}, args...), " "), timeout, commandCtx.Err())
+	}
 	if err != nil {
 		message := strings.TrimSpace(output.String())
 		if message == "" {
@@ -870,12 +938,51 @@ func runRuntimeContext(ctx context.Context, binary string, args ...string) (stri
 }
 
 func confirmRuntimeAction(stdout io.Writer, action string) bool {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("OR3_CONNECT_YES")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("OR3_CONNECT_YES")), "true") {
+	if runtimeConsentApproved(runtimeConsentForAction(action)) {
 		return true
 	}
 	fmt.Fprintf(stdout, "%s [y/N] ", action)
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	return err == nil && strings.EqualFold(strings.TrimSpace(line), "y")
+}
+
+type runtimeConsent string
+
+const (
+	runtimeConsentSetup         runtimeConsent = "setup"
+	runtimeConsentInstaller     runtimeConsent = "installer"
+	runtimeConsentGateway       runtimeConsent = "gateway"
+	runtimeConsentPluginInstall runtimeConsent = "plugin-install"
+	runtimeConsentSourcePatch   runtimeConsent = "source-patch"
+)
+
+func runtimeConsentForAction(action string) runtimeConsent {
+	switch {
+	case strings.Contains(action, "Continue with this setup"):
+		return runtimeConsentSetup
+	case strings.Contains(action, "official installer"):
+		return runtimeConsentInstaller
+	case strings.Contains(action, "Gateway is not ready"):
+		return runtimeConsentGateway
+	case strings.Contains(action, "pinned OR3 Runs plugin"):
+		return runtimeConsentPluginInstall
+	case strings.Contains(action, "Hermes SSE CORS compatibility patch"):
+		return runtimeConsentSourcePatch
+	default:
+		return ""
+	}
+}
+
+func runtimeConsentApproved(required runtimeConsent) bool {
+	if required == "" {
+		return false
+	}
+	for _, value := range strings.Split(os.Getenv("OR3_CONNECT_APPROVE"), ",") {
+		if runtimeConsent(strings.TrimSpace(strings.ToLower(value))) == required {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimeConfirm(stdout io.Writer, action string, confirm func(string) (bool, error)) bool {
@@ -1032,25 +1139,15 @@ func mergeHermesEnvAtPort(path, origin, token string, port int) error {
 	return os.Rename(tmpPath, path)
 }
 
-// Hermes accepts a comma-separated CORS origin list. Keep any origins the
-// user already configured and add the exact OR3 browser origin once.
+// Hermes is exposed to the browser only for the requested OR3 Cloud origin.
+// The caller persists a rollback snapshot before replacing the allowlist.
 func mergeHermesCorsOrigins(existing, required string) (string, error) {
-	origins := make([]string, 0, 2)
-	for _, candidate := range strings.Split(existing, ",") {
-		candidate = strings.Trim(strings.TrimSpace(candidate), "\"'")
-		if candidate == "" || containsString(origins, candidate) {
-			continue
-		}
-		if candidate == "*" {
-			return "", errors.New("Hermes CORS cannot use wildcard origins; replace API_SERVER_CORS_ORIGINS with explicit origins")
-		}
-		origins = append(origins, candidate)
-	}
+	_ = existing
 	required = strings.Trim(strings.TrimSpace(required), "\"'")
-	if required != "" && !containsString(origins, required) {
-		origins = append(origins, required)
+	if required == "" {
+		return "", errors.New("Hermes CORS requires an explicit OR3 Cloud origin")
 	}
-	return strings.Join(origins, ","), nil
+	return required, nil
 }
 
 type runtimeFileSnapshot struct {
@@ -1446,21 +1543,41 @@ func isLoopbackBind(value string) bool {
 
 func updateOpenClawConfig(path, origin, token string) error {
 	config, err := readJSONFile(path)
-	if err != nil && !os.IsNotExist(err) {
+	if os.IsNotExist(err) {
+		config = map[string]any{}
+	} else if err != nil {
 		return fmt.Errorf("read OpenClaw config: %w", err)
 	}
 	if config == nil {
-		config = map[string]any{}
+		return errors.New("OpenClaw config root must be a JSON object")
 	}
-	plugins := ensureMap(config, "plugins")
-	allow := ensureStringSlice(plugins, "allow")
+	plugins, err := ensureMap(config, "plugins", "plugins")
+	if err != nil {
+		return err
+	}
+	allow, err := ensureStringSlice(plugins, "allow", "plugins.allow")
+	if err != nil {
+		return err
+	}
 	if !containsAnyString(allow, "or3-runs") {
 		plugins["allow"] = append(allow, "or3-runs")
 	}
-	entries := ensureMap(plugins, "entries")
-	entry := ensureMap(entries, "or3-runs")
-	pluginConfig := ensureMap(entry, "config")
-	origins := ensureStringSlice(pluginConfig, "allowedOrigins")
+	entries, err := ensureMap(plugins, "entries", "plugins.entries")
+	if err != nil {
+		return err
+	}
+	entry, err := ensureMap(entries, "or3-runs", "plugins.entries.or3-runs")
+	if err != nil {
+		return err
+	}
+	pluginConfig, err := ensureMap(entry, "config", "plugins.entries.or3-runs.config")
+	if err != nil {
+		return err
+	}
+	origins, err := ensureStringSlice(pluginConfig, "allowedOrigins", "plugins.entries.or3-runs.config.allowedOrigins")
+	if err != nil {
+		return err
+	}
 	if containsAnyString(origins, "*") {
 		return errors.New("OpenClaw CORS cannot use wildcard origins; replace plugins.entries.or3-runs.config.allowedOrigins with explicit origins")
 	}
@@ -1521,20 +1638,35 @@ func writeJSONFile(path string, value map[string]any) error {
 	return os.Rename(tmpPath, path)
 }
 
-func ensureMap(parent map[string]any, key string) map[string]any {
-	if existing, ok := parent[key].(map[string]any); ok {
-		return existing
+func ensureMap(parent map[string]any, key, path string) (map[string]any, error) {
+	existing, present := parent[key]
+	if !present || existing == nil {
+		value := map[string]any{}
+		parent[key] = value
+		return value, nil
 	}
-	value := map[string]any{}
-	parent[key] = value
-	return value
+	value, ok := existing.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("OpenClaw config %s must be an object", path)
+	}
+	return value, nil
 }
 
-func ensureStringSlice(parent map[string]any, key string) []any {
-	if existing, ok := parent[key].([]any); ok {
-		return existing
+func ensureStringSlice(parent map[string]any, key, path string) ([]any, error) {
+	existing, present := parent[key]
+	if !present || existing == nil {
+		return nil, nil
 	}
-	return nil
+	values, ok := existing.([]any)
+	if !ok {
+		return nil, fmt.Errorf("OpenClaw config %s must be an array", path)
+	}
+	for _, value := range values {
+		if _, ok := value.(string); !ok {
+			return nil, fmt.Errorf("OpenClaw config %s must contain only strings", path)
+		}
+	}
+	return values, nil
 }
 
 func containsAnyString(values []any, target string) bool {

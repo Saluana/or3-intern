@@ -6,6 +6,19 @@ Connect a macOS or Linux computer to OR3 Cloud:
 npx @or3/connect
 ```
 
+To connect an installed external agent with the guided setup, choose its
+runtime explicitly:
+
+```sh
+npx @or3/connect openclaw
+npx @or3/connect hermes
+```
+
+The command checks the runtime, asks before installing or changing anything,
+opens the normal OR3 browser approval, configures the loopback API, and keeps
+the named Cloudflare tunnel running as a background service. Runtime-owned
+model/provider onboarding still happens in OpenClaw or Hermes first.
+
 With Bun:
 
 ```sh

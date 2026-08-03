@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +33,13 @@ func TunnelConfigPath(dir string) string {
 
 func TunnelCredentialsPath(dir string) string {
 	return filepath.Join(dir, "cloudflared.json")
+}
+
+// RuntimeConfigBackupPath is a Connect-owned, owner-only backup of an
+// external runtime configuration. The command package owns its schema; the
+// state package owns its lifetime so connection cleanup cannot orphan it.
+func RuntimeConfigBackupPath(dir string) string {
+	return filepath.Join(dir, "runtime-config-backup.json")
 }
 
 func LoadState(dir string) (State, error) {
@@ -70,6 +78,13 @@ func SaveState(dir string, state State, tunnel TunnelCredential) error {
 		return err
 	}
 	if hasLocalCredential {
+		target := strings.TrimSpace(state.LocalOrigin)
+		if target == "" {
+			target = "http://127.0.0.1:9100"
+		}
+		if err := validateLoopbackTarget(target); err != nil {
+			return fmt.Errorf("save tunnel configuration: %w", err)
+		}
 		credentialsPath := TunnelCredentialsPath(dir)
 		credentialsBody, err := json.MarshalIndent(map[string]string{
 			"AccountTag":   strings.TrimSpace(tunnel.AccountTag),
@@ -84,10 +99,11 @@ func SaveState(dir string, state State, tunnel TunnelCredential) error {
 		}
 		configPath := TunnelConfigPath(dir)
 		configBody := fmt.Sprintf(
-			"tunnel: %s\ncredentials-file: %s\ningress:\n  - hostname: %s\n    service: http://127.0.0.1:9100\n    originRequest:\n      httpHostHeader: 127.0.0.1\n  - service: http_status:404\n",
+			"tunnel: %s\ncredentials-file: %s\ningress:\n  - hostname: %s\n    service: %s\n    originRequest:\n      httpHostHeader: 127.0.0.1\n  - service: http_status:404\n",
 			strconv.Quote(strings.TrimSpace(tunnel.TunnelID)),
 			strconv.Quote(credentialsPath),
 			strconv.Quote(strings.TrimSpace(tunnel.Hostname)),
+			target,
 		)
 		if err := atomicWrite(configPath, []byte(configBody), 0o600); err != nil {
 			return fmt.Errorf("save tunnel configuration: %w", err)
@@ -103,6 +119,17 @@ func SaveState(dir string, state State, tunnel TunnelCredential) error {
 	}
 	state.TunnelTokenFile = tokenPath
 	return writeState(dir, state)
+}
+
+func validateLoopbackTarget(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("the runtime target must be an http://127.0.0.1 origin")
+	}
+	if parsed.Port() == "" {
+		return errors.New("the runtime target must include a loopback port")
+	}
+	return nil
 }
 
 func UpdateState(dir string, state State) error {
@@ -145,10 +172,13 @@ func writeState(dir string, state State) error {
 
 func RemoveState(dir string) error {
 	for _, path := range []string{
-		StatePath(dir),
 		TunnelTokenPath(dir),
 		TunnelConfigPath(dir),
 		TunnelCredentialsPath(dir),
+		RuntimeConfigBackupPath(dir),
+		// Remove state last. If an owned artifact cannot be removed, the state
+		// remains as a durable retry handle instead of orphaning credentials.
+		StatePath(dir),
 	} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err

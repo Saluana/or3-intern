@@ -2,14 +2,25 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+    paths:
+      - '.github/workflows/publish.yml'
+      - 'cmd/or3-intern/**'
+      - 'internal/**'
+      - 'packages/or3/**'
+      - 'clients/typescript/**'
+      - 'go.mod'
+      - 'go.sum'
   pull_request:
     paths:
       - '.github/workflows/publish.yml'
       - 'cmd/or3-intern/**'
       - 'internal/**'
       - 'packages/or3/**'
+      - 'clients/typescript/**'
       - 'go.mod'
       - 'go.sum'
 
@@ -58,6 +69,8 @@ jobs:
           mkdir -p smoke
           tar -C smoke -xzf "or3-intern-${GOOS}-${GOARCH}.tar.gz"
           ./smoke/or3-intern version
+          ./smoke/or3-intern connect --help | grep -F 'openclaw'
+          ./smoke/or3-intern connect --help | grep -F 'hermes'
           go test ./internal/db -run '^TestOpen_CreatesDB$' -count=1
       - uses: actions/upload-artifact@v4
         with:

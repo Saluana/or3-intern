@@ -23,6 +23,16 @@ import { fileURLToPath } from 'node:url';
 const INTERN_REPOSITORY = 'Saluana/or3-intern';
 const CLOUDFLARED_REPOSITORY = 'cloudflare/cloudflared';
 export const CLOUDFLARED_VERSION = '2026.5.2';
+const SUPPORTED_CONNECT_SUBCOMMANDS = new Set([
+    'status',
+    'doctor',
+    'disconnect',
+    'uninstall',
+    'openclaw',
+    'hermes',
+    'run',
+    'setup',
+]);
 
 const DEFAULT_REQUEST_POLICY = Object.freeze({
     timeoutMs: 20_000,
@@ -44,15 +54,25 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
     const stderr = options.stderr ?? process.stderr;
     const command = args[0] || 'connect';
     const managementCommands = new Set(['status', 'doctor', 'disconnect', 'uninstall']);
+    const runtimeCommands = new Set(['openclaw', 'hermes']);
     let forwardedArgs;
     if (command === 'connect') {
+        const requestedSubcommand = args[1];
+        if (
+            requestedSubcommand &&
+            !requestedSubcommand.startsWith('-') &&
+            !SUPPORTED_CONNECT_SUBCOMMANDS.has(requestedSubcommand)
+        ) {
+            stderr.write('Usage: npx @or3/connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]\n');
+            return 2;
+        }
         forwardedArgs = args.length > 0 ? args : ['connect'];
     } else if (command.startsWith('-')) {
         forwardedArgs = ['connect', ...args];
-    } else if (managementCommands.has(command)) {
+    } else if (managementCommands.has(command) || runtimeCommands.has(command)) {
         forwardedArgs = ['connect', ...args];
     } else {
-        stderr.write('Usage: npx @or3/connect [status|doctor|disconnect|uninstall] [options]\n');
+        stderr.write('Usage: npx @or3/connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]\n');
         return 2;
     }
 
@@ -72,7 +92,7 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
         ? forwardedArgs[1]
         : 'setup';
     let cloudflared = process.env.OR3_CONNECT_CLOUDFLARED_BIN?.trim();
-    if (!cloudflared && (subcommand === 'setup' || subcommand === 'doctor' || subcommand === 'run')) {
+    if (!cloudflared && (subcommand === 'setup' || subcommand === 'openclaw' || subcommand === 'hermes' || subcommand === 'doctor' || subcommand === 'run')) {
         cloudflared = await ensureCloudflared(sharedOptions);
     }
 

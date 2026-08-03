@@ -6,6 +6,17 @@ Connect this computer to an OR3 Cloud account:
 npx @or3/connect
 ```
 
+For a supported external agent, use the runtime-specific guided command:
+
+```sh
+npx @or3/connect openclaw
+npx @or3/connect hermes
+```
+
+These commands reuse the same device approval, named tunnel, service, status,
+doctor, and disconnect lifecycle. They configure only the selected runtime's
+loopback API; finish model/provider onboarding in the runtime first.
+
 No access token, VPN, Cloudflare account, or QR scan is required. The command
 opens a browser, shows a matching phrase in both places, then asks once before
 installing the background service.

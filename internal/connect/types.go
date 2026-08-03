@@ -46,15 +46,22 @@ type DeviceTokenResponse struct {
 }
 
 type State struct {
-	Version               int                    `json:"version"`
-	CloudURL              string                 `json:"cloudUrl"`
-	AccountID             string                 `json:"accountId"`
-	WorkspaceID           string                 `json:"workspaceId"`
-	Namespace             string                 `json:"namespace,omitempty"`
-	EnvironmentID         string                 `json:"environmentId"`
-	EnvironmentName       string                 `json:"environmentName"`
-	Hostname              string                 `json:"hostname"`
-	ControlToken          string                 `json:"controlToken"`
+	Version         int    `json:"version"`
+	CloudURL        string `json:"cloudUrl"`
+	AccountID       string `json:"accountId"`
+	WorkspaceID     string `json:"workspaceId"`
+	Namespace       string `json:"namespace,omitempty"`
+	EnvironmentID   string `json:"environmentId"`
+	EnvironmentName string `json:"environmentName"`
+	Hostname        string `json:"hostname"`
+	ControlToken    string `json:"controlToken"`
+	// Driver/Runtime identify the local service behind the tunnel. Empty values
+	// are the legacy OR3 Intern connection and intentionally remain readable.
+	Driver                string                 `json:"driver,omitempty"`
+	Runtime               string                 `json:"runtime,omitempty"`
+	RuntimeVersion        string                 `json:"runtimeVersion,omitempty"`
+	LocalOrigin           string                 `json:"localOrigin,omitempty"`
+	BasePath              string                 `json:"basePath,omitempty"`
 	TunnelTokenFile       string                 `json:"tunnelTokenFile"`
 	TunnelConfigFile      string                 `json:"tunnelConfigFile,omitempty"`
 	TunnelCredentialsFile string                 `json:"tunnelCredentialsFile,omitempty"`
@@ -63,9 +70,14 @@ type State struct {
 	PreviousService       *ServiceConfigSnapshot `json:"previousService,omitempty"`
 	AppliedService        *ServiceConfigSnapshot `json:"appliedService,omitempty"`
 	Stage                 string                 `json:"stage,omitempty"`
-	TerminalOnly          bool                   `json:"terminalOnly,omitempty"`
-	Installed             bool                   `json:"installed"`
-	ConnectedAt           time.Time              `json:"connectedAt"`
+	// RuntimeConfigRestored and CloudRevoked make external-runtime cleanup
+	// resumable. They are written only after the corresponding cleanup step
+	// succeeds, so disconnect can safely retry after an interruption.
+	RuntimeConfigRestored bool      `json:"runtimeConfigRestored,omitempty"`
+	CloudRevoked          bool      `json:"cloudRevoked,omitempty"`
+	TerminalOnly          bool      `json:"terminalOnly,omitempty"`
+	Installed             bool      `json:"installed"`
+	ConnectedAt           time.Time `json:"connectedAt"`
 }
 
 type ServiceConfigSnapshot struct {
@@ -78,7 +90,11 @@ type HostMetadata struct {
 	Name             string `json:"name"`
 	Platform         string `json:"platform"`
 	Architecture     string `json:"architecture"`
-	InternVersion    string `json:"internVersion"`
+	InternVersion    string `json:"internVersion,omitempty"`
+	Runtime          string `json:"runtime,omitempty"`
+	RuntimeVersion   string `json:"runtimeVersion,omitempty"`
+	Driver           string `json:"driver,omitempty"`
+	BasePath         string `json:"basePath,omitempty"`
 	HostID           string `json:"hostId,omitempty"`
 	SigningPublicKey string `json:"signingPublicKey,omitempty"`
 	NoisePublicKey   string `json:"noisePublicKey,omitempty"`

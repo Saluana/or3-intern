@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,16 +18,11 @@ import (
 )
 
 type hermesSSECorsError struct {
-	Origin  string
-	Runtime string
+	Origin string
 }
 
 func (e *hermesSSECorsError) Error() string {
-	runtimeName := e.Runtime
-	if runtimeName == "" {
-		runtimeName = "runtime"
-	}
-	return fmt.Sprintf("%s live SSE response did not include Access-Control-Allow-Origin %q; this is an upstream CORS defect", runtimeName, e.Origin)
+	return fmt.Sprintf("Hermes live SSE response did not include Access-Control-Allow-Origin %q; this is an upstream CORS defect", e.Origin)
 }
 
 type liveRunVerification struct {
@@ -58,11 +54,42 @@ func verifyHermesTarget(ctx context.Context, target *RuntimeConnectionTarget) (*
 	return verificationFromCapabilities(capabilities, live), nil
 }
 
+// verifyExternalRuntimeConfiguration validates the loopback runtime without
+// creating a model run. The model-backed SSE probe is deliberately deferred
+// until the final public tunnel address is available.
+func verifyExternalRuntimeConfiguration(ctx context.Context, target *RuntimeConnectionTarget) error {
+	if target == nil || target.plan == nil {
+		return errors.New("runtime configuration verification target is incomplete")
+	}
+	if _, err := probeRunsCapabilitiesHTTP(ctx, targetBaseURL(target), target.AccessToken); err != nil {
+		return err
+	}
+	return probeCORSPreflight(ctx, targetBaseURL(target), target.plan.cloudOrigin)
+}
+
+func verifyExternalRuntimeWithRecovery(
+	ctx context.Context,
+	adapter RuntimeAdapter,
+	target *RuntimeConnectionTarget,
+	runtimeName, stateDir string,
+	stdout io.Writer,
+	confirm func(string) (bool, error),
+) (*Verification, error) {
+	verification, err := adapter.Verify(ctx, target)
+	if err == nil || runtimeName != "hermes" || target == nil || target.plan == nil {
+		return verification, err
+	}
+	if recoverErr := recoverHermesSSECors(*target.plan, stateDir, err, stdout, confirm); recoverErr != nil {
+		return nil, recoverErr
+	}
+	return adapter.Verify(ctx, target)
+}
+
 func verificationFromCapabilities(capabilities map[string]any, live liveRunVerification) *Verification {
 	features, _ := capabilities["features"].(map[string]any)
 	commands := "not-advertised"
 	if value, ok := features["commands"].(bool); ok && value {
-		commands = "verified"
+		commands = "advertised"
 	}
 	return &Verification{
 		Capabilities: capabilities,
@@ -111,13 +138,22 @@ func probeRunsCapabilitiesHTTP(ctx context.Context, baseURL, token string) (map[
 	}
 	features, _ := payload["features"].(map[string]any)
 	endpoints, _ := payload["endpoints"].(map[string]any)
-	if features["session_resources"] != true && endpoints["sessions"] == nil {
+	if features["session_resources"] != true && !validRuntimeEndpoint(endpoints["sessions"]) {
 		return nil, errors.New("runtime does not advertise Runs sessions")
 	}
-	if features["run_events_sse"] != true && endpoints["run_events"] == nil {
+	if features["run_events_sse"] != true && !validRuntimeEndpoint(endpoints["run_events"]) {
 		return nil, errors.New("runtime does not advertise Runs streaming")
 	}
 	return payload, nil
+}
+
+func validRuntimeEndpoint(value any) bool {
+	endpoint, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	path, ok := endpoint["path"].(string)
+	return ok && strings.HasPrefix(strings.TrimSpace(path), "/")
 }
 
 func probeRunsHTTP(ctx context.Context, baseURL, token string) error {
@@ -456,9 +492,7 @@ func recoverHermesSSECors(plan externalRuntimePlan, stateDir string, verifyErr e
 		fmt.Fprintln(stdout, hermesUpdateCheck(plan.runtimeBinary))
 	}
 	if confirm == nil {
-		confirm = func(action string) (bool, error) {
-			return confirmRuntimeAction(stdout, action), nil
-		}
+		return errors.New("Hermes patch confirmation is unavailable")
 	}
 	confirmed, err := confirm("Apply the narrowly scoped local Hermes SSE CORS compatibility patch?")
 	if err != nil {
@@ -491,17 +525,42 @@ func applyHermesSSECorsPatch(binary, stateDir string) error {
 	if bytes.Contains(body, []byte("cors = self._cors_headers_for_origin(origin)")) {
 		return errors.New("Hermes source already contains the SSE CORS fix; restart Hermes and retry")
 	}
+	helper := []byte("def _cors_headers_for_origin(self, origin")
+	corsHeader := []byte("Access-Control-Allow-Origin")
 	needle := []byte("        response = web.StreamResponse(status=200, headers=sse_headers)\n")
 	replacement := []byte("        origin = request.headers.get(\"Origin\", \"\")\n        cors = self._cors_headers_for_origin(origin) if origin else None\n        if cors:\n            sse_headers.update(cors)\n        response = web.StreamResponse(status=200, headers=sse_headers)\n")
-	if !bytes.Contains(body, needle) {
+	if !bytes.Contains(body, helper) || !bytes.Contains(body, corsHeader) || bytes.Count(body, needle) != 1 {
 		return errors.New("Hermes source is outside the verified SSE patch compatibility shape")
 	}
 	if err := recordHermesSourcePatchBackup(stateDir, path); err != nil {
 		return err
 	}
 	updated := bytes.Replace(body, needle, replacement, 1)
+	if err := validateHermesPythonSyntax(updated); err != nil {
+		return fmt.Errorf("validate Hermes SSE CORS patch: %w", err)
+	}
 	if err := atomicReplaceFile(path, updated); err != nil {
 		return fmt.Errorf("apply Hermes SSE CORS patch: %w", err)
+	}
+	return nil
+}
+
+func validateHermesPythonSyntax(source []byte) error {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		return errors.New("python3 is required to syntax-check the Hermes source patch")
+	}
+	commandCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, python, "-c", "import ast, sys; ast.parse(sys.stdin.read())")
+	command.Stdin = bytes.NewReader(source)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return errors.New(message)
 	}
 	return nil
 }

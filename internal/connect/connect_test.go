@@ -307,6 +307,20 @@ func TestSaveStateUsesValidatedExternalRuntimeIngress(t *testing.T) {
 	if _, err := os.Stat(TunnelCredentialsPath(invalidDir)); !os.IsNotExist(err) {
 		t.Fatalf("invalid target left tunnel credentials behind: %v", err)
 	}
+
+	nonLoopbackDir := filepath.Join(t.TempDir(), "non-loopback")
+	state.LocalOrigin = "http://0.0.0.0:18789"
+	if err := SaveState(nonLoopbackDir, state, TunnelCredential{
+		AccountTag:   "account-tag",
+		TunnelID:     "11111111-2222-3333-4444-555555555555",
+		TunnelSecret: "base64-tunnel-secret",
+		Hostname:     state.Hostname,
+	}); err == nil {
+		t.Fatal("non-loopback external runtime target unexpectedly accepted")
+	}
+	if _, err := os.Stat(TunnelCredentialsPath(nonLoopbackDir)); !os.IsNotExist(err) {
+		t.Fatalf("non-loopback target left tunnel credentials behind: %v", err)
+	}
 }
 
 func TestRenderServiceRunsAsInvokingUserAndUsesTokenFile(t *testing.T) {

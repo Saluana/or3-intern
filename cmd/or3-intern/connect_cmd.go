@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"database/sql"
@@ -30,13 +31,14 @@ import (
 )
 
 type connectCommandOptions struct {
-	CloudURL  string
-	StateDir  string
-	Name      string
-	NoService bool
-	NoBrowser bool
-	LocalOnly bool
-	Timeout   time.Duration
+	CloudURL     string
+	StateDir     string
+	Name         string
+	NoService    bool
+	NoBrowser    bool
+	LocalOnly    bool
+	Timeout      time.Duration
+	PromptReader *bufio.Reader
 }
 
 type connectSetupOperations struct {
@@ -117,9 +119,10 @@ func runConnectCommand(ctx context.Context, cfgPath string, args []string, stdou
 
 func parseConnectOptions(subcommand string, args []string) (connectCommandOptions, error) {
 	options := connectCommandOptions{
-		CloudURL: remoteconnect.DefaultCloudURL,
-		StateDir: remoteconnect.DefaultStateDir(),
-		Timeout:  remoteconnect.DefaultTimeout,
+		CloudURL:     remoteconnect.DefaultCloudURL,
+		StateDir:     remoteconnect.DefaultStateDir(),
+		Timeout:      remoteconnect.DefaultTimeout,
+		PromptReader: bufio.NewReader(os.Stdin),
 	}
 	fs := flag.NewFlagSet("connect "+subcommand, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -137,6 +140,18 @@ func parseConnectOptions(subcommand string, args []string) (connectCommandOption
 		return connectCommandOptions{}, newUsageError("unexpected connect arguments: %s", strings.Join(fs.Args(), " "))
 	}
 	return options, nil
+}
+
+func confirmRuntimeAction(input *bufio.Reader, stdout io.Writer, action string) bool {
+	if runtimeConsentApproved(runtimeConsentForAction(action)) {
+		return true
+	}
+	if input == nil {
+		return false
+	}
+	fmt.Fprintf(stdout, "%s [y/N] ", action)
+	line, err := input.ReadString('\n')
+	return err == nil && strings.EqualFold(strings.TrimSpace(line), "y")
 }
 
 func setupRemoteConnection(ctx context.Context, cfgPath string, options connectCommandOptions, stdout, stderr io.Writer) error {
@@ -308,8 +323,11 @@ func resumeRemoteConnectionSetup(
 			_ = operations.updateState(options.StateDir, state)
 			return fmt.Errorf("verify remote %s connection: %w", state.Runtime, err)
 		}
-		printExternalRuntimeCompletion(stdout, state, verification)
-		_ = removeRuntimePreparation(options.StateDir)
+		completedVerification, verificationErr := requiredExternalRuntimeVerification(verification)
+		if verificationErr != nil {
+			return verificationErr
+		}
+		printExternalRuntimeCompletion(stdout, state, completedVerification)
 		return nil
 	}
 	fmt.Fprintf(stdout, "Repairing the incomplete connection for %s.\n", state.EnvironmentName)
@@ -422,7 +440,7 @@ func finishRemoteConnectionSetup(
 	}
 }
 
-func printExternalRuntimeCompletion(stdout io.Writer, state remoteconnect.State, verification *Verification) {
+func printExternalRuntimeCompletion(stdout io.Writer, state remoteconnect.State, verification Verification) {
 	basePath := state.BasePath
 	if basePath == "" {
 		basePath = "/"
@@ -434,19 +452,15 @@ func printExternalRuntimeCompletion(stdout io.Writer, state remoteconnect.State,
 	fmt.Fprintf(stdout, "Runtime: %s %s\n", state.Runtime, state.RuntimeVersion)
 	fmt.Fprintf(stdout, "Remote endpoint: https://%s%s\n", state.Hostname, basePath)
 	fmt.Fprintf(stdout, "Service: %s\n", service)
-	capabilityResult, streamingResult, commandsResult, cancellationResult := "not-tested", "not-tested", "not-tested", "not-tested"
-	if verification != nil {
-		if verification.Capabilities == nil {
-			capabilityResult = "failed"
-		} else {
-			capabilityResult = "verified"
-		}
-		streamingResult = verification.Streaming
-		commandsResult = verification.Commands
-		cancellationResult = verification.Cancellation
-	}
-	fmt.Fprintf(stdout, "Verified: capabilities %s; streaming %s; commands %s; cancellation %s\n", capabilityResult, streamingResult, commandsResult, cancellationResult)
+	fmt.Fprintf(stdout, "Verified: capabilities verified; streaming %s; commands %s; cancellation %s\n", verification.Streaming, verification.Commands, verification.Cancellation)
 	fmt.Fprintln(stdout, "Open OR3 Chat → Agents to start a session with this host.")
+}
+
+func requiredExternalRuntimeVerification(verification *Verification) (Verification, error) {
+	if verification == nil || verification.Capabilities == nil {
+		return Verification{}, errors.New("remote runtime verification returned no capabilities")
+	}
+	return *verification, nil
 }
 
 func normalizedConnectSetupStage(state remoteconnect.State) string {
@@ -1097,7 +1111,7 @@ func runRemoteConnectionServiceWithVerification(
 		if ctx.Err() != nil {
 			return nil
 		}
-		return fmt.Errorf("secure tunnel stopped: %w", err)
+		return processStoppedError("secure tunnel", err)
 	}
 
 	type processResult struct {
@@ -1117,7 +1131,14 @@ func runRemoteConnectionServiceWithVerification(
 	if ctx.Err() != nil {
 		return nil
 	}
-	return fmt.Errorf("%s stopped: %w", result.name, result.err)
+	return processStoppedError(result.name, result.err)
+}
+
+func processStoppedError(name string, err error) error {
+	if err == nil {
+		return fmt.Errorf("%s stopped unexpectedly", name)
+	}
+	return fmt.Errorf("%s stopped: %w", name, err)
 }
 
 func waitForTerminalTunnelVerification(
@@ -1218,6 +1239,10 @@ func doctorRemoteConnection(ctx context.Context, stateDir string, stdout io.Writ
 }
 
 func disconnectRemoteConnection(ctx context.Context, options connectCommandOptions, stdout io.Writer) error {
+	return disconnectRemoteConnectionWithConfirmation(ctx, options, stdout, true)
+}
+
+func disconnectRemoteConnectionWithConfirmation(ctx context.Context, options connectCommandOptions, stdout io.Writer, requireConfirmation bool) error {
 	state, err := remoteconnect.LoadState(options.StateDir)
 	if os.IsNotExist(err) {
 		restored, restoreErr := restoreOrphanedExternalRuntimeConfiguration(ctx, options.StateDir)
@@ -1228,18 +1253,17 @@ func disconnectRemoteConnection(ctx context.Context, options connectCommandOptio
 			if removeErr := removeRuntimeConfigBackup(options.StateDir); removeErr != nil {
 				return fmt.Errorf("remove restored runtime configuration backup: %w", removeErr)
 			}
-			if removeErr := removeRuntimePreparation(options.StateDir); removeErr != nil {
-				return fmt.Errorf("remove runtime preparation checkpoint: %w", removeErr)
-			}
 			fmt.Fprintln(stdout, "Interrupted external runtime setup was restored. No OR3 Cloud enrollment was saved.")
 			return nil
 		}
-		_ = removeRuntimePreparation(options.StateDir)
 		fmt.Fprintln(stdout, "This computer is not connected to OR3 Cloud.")
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	if requireConfirmation && !confirmRuntimeAction(options.PromptReader, stdout, "Disconnect this computer from OR3 Cloud? This stops its tunnel, revokes cloud access, removes Connect state, and restores Connect-managed configuration.") {
+		return errors.New("remote connection disconnect was declined")
 	}
 	if state.Driver == "runs" {
 		return disconnectExternalRuntimeConnection(ctx, options, state, stdout)
@@ -1261,9 +1285,6 @@ func disconnectRemoteConnection(ctx context.Context, options connectCommandOptio
 		return err
 	}
 	if err := remoteconnect.RemoveState(options.StateDir); err != nil {
-		return err
-	}
-	if err := removeRuntimePreparation(options.StateDir); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "Remote access is disconnected. Local OR3 remains unchanged.")
@@ -1437,9 +1458,6 @@ func uninstallRemoteConnection(ctx context.Context, options connectCommandOption
 			return fmt.Errorf("remove saved connection: %w", removeErr)
 		}
 	}
-	if removeErr := removeRuntimePreparation(options.StateDir); removeErr != nil {
-		return fmt.Errorf("remove runtime preparation checkpoint: %w", removeErr)
-	}
 	if options.LocalOnly {
 		fmt.Fprintln(stdout, "Local OR3 Connect files were removed. Revoke the computer from OR3 Cloud separately.")
 	} else {
@@ -1458,9 +1476,6 @@ func uninstallExternalRuntimeLocally(ctx context.Context, options connectCommand
 		if err := restoreExternalRuntimeConfiguration(ctx, options.StateDir, state); err != nil {
 			return fmt.Errorf("restore external runtime configuration: %w; saved connection was preserved for retry", err)
 		}
-	}
-	if err := removeRuntimePreparation(options.StateDir); err != nil {
-		return fmt.Errorf("remove runtime preparation checkpoint: %w", err)
 	}
 	if err := remoteconnect.RemoveState(options.StateDir); err != nil {
 		return fmt.Errorf("remove saved connection: %w", err)

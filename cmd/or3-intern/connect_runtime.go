@@ -5,13 +5,14 @@ package main
 // adapters only prepare the runtime's documented loopback API.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -32,7 +33,16 @@ const (
 	hermesDefaultPort         = 8642
 	runtimeCommandTimeout     = 90 * time.Second
 	runtimeInstallTimeout     = 5 * time.Minute
+	hermesInstallerVersion    = "v2026.7.7.2"
+	hermesInstallerSHA256     = "a93c65b01ea392e179cf872e182bd01a2b65c0c15f17833e9f9569033ef10e07"
 )
+
+const hermesInstallerURL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/" + hermesInstallerVersion + "/scripts/install.sh"
+
+type runtimeInstaller struct {
+	url    string
+	sha256 string
+}
 
 type externalRuntimePlan struct {
 	host          remoteconnect.HostMetadata
@@ -41,7 +51,6 @@ type externalRuntimePlan struct {
 	cloudOrigin   string
 	runtimeBinary string
 	configure     func(context.Context, string) error
-	verify        func(context.Context, string) error
 	rollback      func(context.Context) error
 }
 
@@ -79,25 +88,26 @@ func setupExternalRuntimeConnection(
 	}
 	if existing, err := remoteconnect.LoadState(options.StateDir); err == nil {
 		if existing.Runtime != runtimeName {
-			return fmt.Errorf("this computer is already connected as %s; run `npx @or3/connect disconnect` before switching runtimes", existing.Runtime)
+			current := strings.TrimSpace(existing.Runtime)
+			if current == "" {
+				current = "a legacy Connect host"
+			}
+			fmt.Fprintf(stdout, "This computer is already connected as %s. Use `npx @or3/connect status` to inspect it or `npx @or3/connect disconnect` to remove it safely before continuing.\n", current)
+			if !confirmRuntimeAction(options.PromptReader, stdout, fmt.Sprintf("Replace the existing %s connection with %s? This disconnects the current host, stops its tunnel, revokes its cloud access, and restores its OR3 configuration.", current, runtimeName)) {
+				return errors.New("external runtime replacement was declined")
+			}
+			if err := disconnectRemoteConnectionWithConfirmation(ctx, options, stdout, false); err != nil {
+				return fmt.Errorf("replace existing connection: %w", err)
+			}
 		}
-		return resumeRemoteConnectionSetup(ctx, existing, options, stdout, defaultConnectSetupOperations())
+		if existing.Runtime == runtimeName {
+			return resumeRemoteConnectionSetup(ctx, existing, options, stdout, defaultConnectSetupOperations())
+		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("load saved remote connection for repair: %w", err)
 	}
-	resumeCheckpoint, err := loadRuntimePreparation(options.StateDir)
-	if err != nil {
-		return err
-	}
-	if resumeCheckpoint != nil && string(resumeCheckpoint.Runtime) != runtimeName {
-		return fmt.Errorf("an incomplete %s preparation is saved; resume it with `npx @or3/connect %s` or remove it with `npx @or3/connect disconnect`", resumeCheckpoint.Runtime, resumeCheckpoint.Runtime)
-	}
-	if resumeCheckpoint != nil {
-		fmt.Fprintf(stdout, "Resuming incomplete %s preparation from its last checkpoint.\n", runtimeName)
-	}
-
 	printExternalRuntimePlan(stdout, runtimeName)
-	if !confirmRuntimeAction(stdout, "Continue with this setup?") {
+	if !confirmRuntimeAction(options.PromptReader, stdout, "Continue with this setup?") {
 		return errors.New("external runtime setup was declined")
 	}
 	adapter, err := runtimeAdapterFor(runtimeName)
@@ -105,34 +115,20 @@ func setupExternalRuntimeConnection(
 		return err
 	}
 	confirm := func(action string) (bool, error) {
-		return confirmRuntimeAction(stdout, action), nil
+		return confirmRuntimeAction(options.PromptReader, stdout, action), nil
 	}
 	plan, err := prepareExternalRuntimeWithAdapter(ctx, adapter, PrepareInput{
 		CloudOrigin: options.CloudURL,
 		StateDir:    options.StateDir,
 		Confirm:     confirm,
-		Resume:      resumeCheckpoint,
 		Stdout:      stdout,
 		Stderr:      stderr,
 	})
 	if err != nil {
-		var readiness *runtimePreparationError
-		if errors.As(err, &readiness) {
-			// Keep a non-secret checkpoint before waiting. If the user chooses
-			// not to wait (or this process is interrupted), the next invocation
-			// can resume without repeating the runtime setup explanation.
-			if checkpointErr := saveRuntimePreparation(options.StateDir, AdapterState{
-				Runtime: adapter.ID(),
-				Stage:   "runtime_onboarding",
-			}); checkpointErr != nil {
-				return fmt.Errorf("save runtime preparation checkpoint: %w", checkpointErr)
-			}
-		}
 		plan, err = waitForRuntimePreparation(ctx, adapter, PrepareInput{
 			CloudOrigin: options.CloudURL,
 			StateDir:    options.StateDir,
 			Confirm:     confirm,
-			Resume:      resumeCheckpoint,
 			Stdout:      stdout,
 			Stderr:      stderr,
 		}, err, options.Timeout)
@@ -143,24 +139,12 @@ func setupExternalRuntimeConnection(
 	if name := strings.TrimSpace(options.Name); name != "" {
 		plan.host.Name = name
 	}
-	if err := saveRuntimePreparation(options.StateDir, AdapterState{
-		Runtime:     adapter.ID(),
-		Stage:       connectSetupStageLocalConfigured,
-		LocalOrigin: plan.localOrigin,
-		BasePath:    plan.basePath,
-		Version:     plan.host.RuntimeVersion,
-	}); err != nil {
-		return externalRuntimeSetupErrorWithCleanup(
-			fmt.Errorf("save runtime preparation checkpoint: %w", err),
-			rollbackExternalRuntimePreparation(context.Background(), options.StateDir, plan),
-		)
-	}
 	client := remoteconnect.NewClient(options.CloudURL)
 	authorization, err := client.Start(ctx, plan.host)
 	if err != nil {
 		return externalRuntimeSetupErrorWithCleanup(
 			err,
-			rollbackExternalRuntimePreparation(context.Background(), options.StateDir, plan),
+			rollbackExternalRuntimeConfiguration(context.Background(), options.StateDir, plan),
 		)
 	}
 	fmt.Fprintln(stdout, "\nSign in to connect this runtime:")
@@ -174,13 +158,13 @@ func setupExternalRuntimeConnection(
 	if err != nil {
 		return externalRuntimeSetupErrorWithCleanup(
 			err,
-			rollbackExternalRuntimePreparation(context.Background(), options.StateDir, plan),
+			rollbackExternalRuntimeConfiguration(context.Background(), options.StateDir, plan),
 		)
 	}
 	if err := validateDeviceCredential(credential); err != nil {
 		return externalRuntimeSetupErrorWithCleanup(
 			err,
-			rollbackExternalRuntimePreparation(context.Background(), options.StateDir, plan),
+			rollbackExternalRuntimeConfiguration(context.Background(), options.StateDir, plan),
 		)
 	}
 	state := remoteconnect.State{
@@ -208,7 +192,7 @@ func setupExternalRuntimeConnection(
 		return externalRuntimeSetupErrorWithCleanup(
 			fmt.Errorf("save external runtime connection: %w", err),
 			errors.Join(
-				rollbackExternalRuntimePreparation(context.Background(), options.StateDir, plan),
+				rollbackExternalRuntimeConfiguration(context.Background(), options.StateDir, plan),
 				client.Revoke(context.Background(), state),
 			),
 		)
@@ -229,19 +213,9 @@ func setupExternalRuntimeConnection(
 		DisplayName: plan.host.Name,
 		plan:        &plan,
 	}
-	verification, err := adapter.Verify(ctx, target)
-	if err != nil {
-		if _, ok := adapter.(externalRuntimeAdapter); ok && runtimeName == "hermes" {
-			if recoverErr := recoverHermesSSECors(*target.plan, options.StateDir, err, stdout, confirm); recoverErr == nil {
-				verification, err = adapter.Verify(ctx, target)
-			} else {
-				err = recoverErr
-			}
-		}
-	}
-	if err != nil {
+	if err := verifyExternalRuntimeConfiguration(ctx, target); err != nil {
 		return externalRuntimeSetupErrorWithCleanup(
-			fmt.Errorf("verify %s: %w", runtimeName, err),
+			fmt.Errorf("verify local %s configuration: %w", runtimeName, err),
 			cleanupExternalRuntimeEnrollment(context.Background(), options.StateDir, state, plan),
 		)
 	}
@@ -258,28 +232,31 @@ func setupExternalRuntimeConnection(
 	// source of truth.
 	if options.NoService {
 		return runRemoteConnectionServiceWithVerification(ctx, "", options.StateDir, stdout, stderr, func(verifyCtx context.Context, saved remoteconnect.State) error {
-			adapter, remoteTarget, targetErr := externalRuntimeTargetFromState(saved)
+			remoteTarget, targetErr := externalRuntimeRemoteTarget(target, saved)
 			if targetErr != nil {
 				return targetErr
 			}
-			remoteVerification, verifyErr := adapter.Verify(verifyCtx, remoteTarget)
+			if !confirmRuntimeAction(options.PromptReader, stdout, "Run one short public verification prompt using your configured model/provider? It may consume provider tokens.") {
+				return errors.New("public runtime verification was declined; the connection remains configured but is not ready for use")
+			}
+			remoteVerification, verifyErr := verifyExternalRuntimeWithRecovery(verifyCtx, adapter, remoteTarget, runtimeName, options.StateDir, stdout, confirm)
 			if verifyErr != nil {
 				return fmt.Errorf("verify remote %s connection: %w", runtimeName, verifyErr)
 			}
-			printExternalRuntimeCompletion(stdout, saved, remoteVerification)
-			if err := removeRuntimePreparation(options.StateDir); err != nil {
-				return fmt.Errorf("remove runtime preparation checkpoint after remote verification: %w", err)
+			completedVerification, verificationErr := requiredExternalRuntimeVerification(remoteVerification)
+			if verificationErr != nil {
+				return verificationErr
 			}
+			printExternalRuntimeCompletion(stdout, saved, completedVerification)
 			return nil
 		})
 	}
 	if err := finishRemoteConnectionSetup(ctx, state, options.StateDir, stdout, defaultConnectSetupOperations(), false); err != nil {
 		return err
 	}
-	// The local check proves the runtime itself is configured. Once the
-	// managed service and tunnel are online, repeat the same live capability,
-	// SSE, and cancellation check through the exact HTTPS path the browser will
-	// use. Do not report an active host until that path has passed.
+	// Local capability and browser-preflight checks prove the runtime is
+	// configured without invoking a model. Run the single model-backed stream
+	// probe only through the final HTTPS address a browser will use.
 	remoteTarget, targetErr := externalRuntimeRemoteTarget(target, state)
 	if targetErr != nil {
 		return externalRuntimeSetupErrorWithCleanup(
@@ -287,16 +264,27 @@ func setupExternalRuntimeConnection(
 			cleanupExternalRuntimeEnrollment(context.Background(), options.StateDir, state, plan),
 		)
 	}
-	remoteVerification, verifyErr := adapter.Verify(ctx, remoteTarget)
+	if !confirmRuntimeAction(options.PromptReader, stdout, "Run one short public verification prompt using your configured model/provider? It may consume provider tokens.") {
+		if err := markExternalRuntimeVerificationPending(options.StateDir, state); err != nil {
+			return fmt.Errorf("record declined public runtime verification: %w", err)
+		}
+		return errors.New("public runtime verification was declined; the connection remains configured but is not ready for use")
+	}
+	remoteVerification, verifyErr := verifyExternalRuntimeWithRecovery(ctx, adapter, remoteTarget, runtimeName, options.StateDir, stdout, confirm)
 	if verifyErr != nil {
 		return externalRuntimeSetupErrorWithCleanup(
 			fmt.Errorf("verify remote %s connection: %w", runtimeName, verifyErr),
 			cleanupExternalRuntimeEnrollment(context.Background(), options.StateDir, state, plan),
 		)
 	}
-	verification = remoteVerification
-	printExternalRuntimeCompletion(stdout, state, verification)
-	_ = removeRuntimePreparation(options.StateDir)
+	completedVerification, verificationErr := requiredExternalRuntimeVerification(remoteVerification)
+	if verificationErr != nil {
+		return externalRuntimeSetupErrorWithCleanup(
+			verificationErr,
+			cleanupExternalRuntimeEnrollment(context.Background(), options.StateDir, state, plan),
+		)
+	}
+	printExternalRuntimeCompletion(stdout, state, completedVerification)
 	return nil
 }
 
@@ -372,6 +360,12 @@ func verifyExternalRuntimeState(ctx context.Context, state remoteconnect.State) 
 	return adapter.Verify(ctx, target)
 }
 
+func markExternalRuntimeVerificationPending(stateDir string, state remoteconnect.State) error {
+	state.Installed = true
+	state.Stage = connectSetupStageInstalled
+	return remoteconnect.UpdateState(stateDir, state)
+}
+
 func prepareExternalRuntimeWithAdapter(ctx context.Context, adapter RuntimeAdapter, input PrepareInput) (externalRuntimePlan, error) {
 	target, err := adapter.Prepare(ctx, input)
 	if err != nil {
@@ -397,9 +391,7 @@ func waitForRuntimePreparation(
 		input.Stderr = io.Discard
 	}
 	if input.Confirm == nil {
-		input.Confirm = func(action string) (bool, error) {
-			return confirmRuntimeAction(input.Stdout, action), nil
-		}
+		return externalRuntimePlan{}, errors.New("runtime preparation confirmation is unavailable")
 	}
 	var readiness *runtimePreparationError
 	if !errors.As(err, &readiness) {
@@ -451,6 +443,7 @@ func printExternalRuntimePlan(stdout io.Writer, runtimeName string) {
 	fmt.Fprintln(stdout, "  • configure its authenticated Runs API on loopback with OR3's exact browser origin")
 	fmt.Fprintln(stdout, "  • ask you to approve this computer in OR3 Cloud")
 	fmt.Fprintln(stdout, "  • create a named Cloudflare Tunnel and optional background service")
+	fmt.Fprintln(stdout, "  • ask before one short public verification prompt that may use your configured model/provider tokens")
 }
 
 func validateDeviceCredential(credential remoteconnect.DeviceCredential) error {
@@ -477,30 +470,6 @@ func mustCloudflaredPath() string {
 	return "cloudflared"
 }
 
-func prepareExternalRuntime(
-	ctx context.Context,
-	runtimeName, cloudURL string,
-	stdout, stderr io.Writer,
-) (externalRuntimePlan, error) {
-	adapter, err := runtimeAdapterFor(runtimeName)
-	if err != nil {
-		return externalRuntimePlan{}, err
-	}
-	return prepareExternalRuntimeWithAdapter(ctx, adapter, PrepareInput{
-		CloudOrigin: cloudURL,
-		Stdout:      stdout,
-		Stderr:      stderr,
-	})
-}
-
-func prepareOpenClaw(ctx context.Context, cloudURL string, stdout, stderr io.Writer) (externalRuntimePlan, error) {
-	return prepareOpenClawWithInput(ctx, PrepareInput{
-		CloudOrigin: cloudURL,
-		Stdout:      stdout,
-		Stderr:      stderr,
-	})
-}
-
 func prepareOpenClawWithInput(ctx context.Context, input PrepareInput) (externalRuntimePlan, error) {
 	cloudURL := input.CloudOrigin
 	stdout, stderr := input.Stdout, input.Stderr
@@ -522,7 +491,10 @@ func prepareOpenClawWithInput(ctx context.Context, input PrepareInput) (external
 	if !openClawVersionCompatible(version) {
 		return externalRuntimePlan{}, fmt.Errorf("OpenClaw %s is outside the supported 2026.7.x compatibility line for @or3/openclaw@%s; update OpenClaw before connecting", firstLine(version), openClawRunsPluginVersion)
 	}
-	configPath := openClawConfigPath(bin)
+	configPath, err := openClawConfigPath(ctx, bin)
+	if err != nil {
+		return externalRuntimePlan{}, err
+	}
 	snapshot, snapshotErr := runtimeSnapshotForPreparation(input.StateDir, "openclaw", bin, configPath)
 	if snapshotErr != nil {
 		return externalRuntimePlan{}, snapshotErr
@@ -575,13 +547,17 @@ func prepareOpenClawWithInput(ctx context.Context, input PrepareInput) (external
 	if inspectErr != nil || !openClawPluginReady(pluginInspection, openClawRunsPluginVersion) {
 		return externalRuntimePlan{}, errors.New("OR3 Runs plugin inspection did not confirm the expected npm source, pinned version, and enabled state")
 	}
-	port := openClawPort(configPath)
-	if bind := openClawBind(configPath); bind != "" && !isLoopbackBind(bind) {
-		return externalRuntimePlan{}, fmt.Errorf("OpenClaw Gateway bind %q is not loopback; set gateway.bind to loopback before connecting", bind)
-	}
 	if err := updateOpenClawConfig(configPath, origin, ""); err != nil {
 		return externalRuntimePlan{}, err
 	}
+	bind, bindErr := openClawBind(configPath)
+	if bindErr != nil {
+		return externalRuntimePlan{}, bindErr
+	}
+	if !isLoopbackBind(bind) {
+		return externalRuntimePlan{}, fmt.Errorf("OpenClaw Gateway bind %q is not loopback; set gateway.bind to loopback before connecting", bind)
+	}
+	port := openClawPort(configPath)
 	if _, err := run("gateway", "restart"); err != nil {
 		return externalRuntimePlan{}, fmt.Errorf("restart OpenClaw Gateway: %w", err)
 	}
@@ -606,23 +582,12 @@ func prepareOpenClawWithInput(ctx context.Context, input PrepareInput) (external
 			}
 			return nil
 		},
-		verify: func(ctx context.Context, token string) error {
-			return probeRunsHTTP(ctx, local+"/or3/", token)
-		},
 		rollback: func(rollbackCtx context.Context) error {
 			return restoreRuntimeConfiguration(rollbackCtx, "openclaw", bin, snapshot)
 		},
 	}
 	rollbackOnError = false
 	return plan, nil
-}
-
-func prepareHermes(ctx context.Context, cloudURL string, stdout, stderr io.Writer) (externalRuntimePlan, error) {
-	return prepareHermesWithInput(ctx, PrepareInput{
-		CloudOrigin: cloudURL,
-		Stdout:      stdout,
-		Stderr:      stderr,
-	})
 }
 
 func prepareHermesWithInput(ctx context.Context, input PrepareInput) (externalRuntimePlan, error) {
@@ -639,7 +604,7 @@ func prepareHermesWithInput(ctx context.Context, input PrepareInput) (externalRu
 	if err != nil {
 		return externalRuntimePlan{}, err
 	}
-	bin, version, err := ensureRuntimeBinaryWithConfirmContext(ctx, "hermes", "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh", stdout, stderr, confirm)
+	bin, version, err := ensurePinnedRuntimeBinaryWithConfirmContext(ctx, "hermes", runtimeInstaller{url: hermesInstallerURL, sha256: hermesInstallerSHA256}, stdout, stderr, confirm)
 	if err != nil {
 		return externalRuntimePlan{}, err
 	}
@@ -659,7 +624,10 @@ func prepareHermesWithInput(ctx context.Context, input PrepareInput) (externalRu
 			errors.New("Hermes has no configured model/provider; finish `hermes model` or `hermes setup` first"),
 		)
 	}
-	envPath := hermesEnvPath(bin)
+	envPath, err := hermesEnvPath(ctx, bin)
+	if err != nil {
+		return externalRuntimePlan{}, err
+	}
 	snapshot, snapshotErr := runtimeSnapshotForPreparation(input.StateDir, "hermes", bin, envPath)
 	if snapshotErr != nil {
 		return externalRuntimePlan{}, snapshotErr
@@ -704,9 +672,6 @@ func prepareHermesWithInput(ctx context.Context, input PrepareInput) (externalRu
 			}
 			return nil
 		},
-		verify: func(ctx context.Context, token string) error {
-			return probeRunsHTTP(ctx, local+"/", token)
-		},
 		rollback: func(rollbackCtx context.Context) error {
 			return restoreRuntimeConfiguration(rollbackCtx, "hermes", bin, snapshot)
 		},
@@ -733,16 +698,63 @@ func ensureRuntimeBinaryWithConfirmContext(
 	stdout, stderr io.Writer,
 	confirm func(string) (bool, error),
 ) (string, string, error) {
+	return ensureRuntimeInstaller(ctx, name, runtimeInstaller{url: installer}, stdout, stderr, confirm)
+}
+
+func ensurePinnedRuntimeBinaryWithConfirmContext(
+	ctx context.Context,
+	name string,
+	installer runtimeInstaller,
+	stdout, stderr io.Writer,
+	confirm func(string) (bool, error),
+) (string, string, error) {
+	return ensureRuntimeInstaller(ctx, name, installer, stdout, stderr, confirm)
+}
+
+func ensureRuntimeInstaller(
+	ctx context.Context,
+	name string,
+	installer runtimeInstaller,
+	stdout, stderr io.Writer,
+	confirm func(string) (bool, error),
+) (string, string, error) {
 	bin, err := findRuntimeBinary(name)
 	if err != nil {
-		fmt.Fprintf(stdout, "`%s` is not installed. Official installer: %s\n", name, installer)
+		fmt.Fprintf(stdout, "`%s` is not installed. Official installer: %s\n", name, installer.url)
 		if !runtimeConfirm(stdout, "Run the official installer now?", confirm) {
 			return "", "", fmt.Errorf("%s is required", name)
 		}
-		command := fmt.Sprintf("curl -fsSL %s | bash", installer)
 		installCtx, cancel := context.WithTimeout(ctx, runtimeInstallTimeout)
 		defer cancel()
-		cmd := exec.Command("sh", "-c", command)
+		var cmd *exec.Cmd
+		var installerPath string
+		if installer.sha256 != "" {
+			installerFile, createErr := os.CreateTemp("", "or3-"+name+"-installer-")
+			if createErr != nil {
+				return "", "", fmt.Errorf("create %s installer file: %w", name, createErr)
+			}
+			installerPath = installerFile.Name()
+			if err := installerFile.Close(); err != nil {
+				_ = os.Remove(installerPath)
+				return "", "", fmt.Errorf("close %s installer file: %w", name, err)
+			}
+			defer os.Remove(installerPath)
+			download := exec.CommandContext(installCtx, "curl", "-fsSL", installer.url, "-o", installerPath)
+			download.Stdout, download.Stderr = stdout, stderr
+			if err := download.Run(); err != nil {
+				return "", "", fmt.Errorf("download pinned %s installer: %w", name, err)
+			}
+			body, readErr := os.ReadFile(installerPath)
+			if readErr != nil {
+				return "", "", fmt.Errorf("read pinned %s installer: %w", name, readErr)
+			}
+			if got := fmt.Sprintf("%x", sha256.Sum256(body)); !strings.EqualFold(got, installer.sha256) {
+				return "", "", fmt.Errorf("pinned %s installer checksum mismatch", name)
+			}
+			cmd = exec.CommandContext(installCtx, "bash", installerPath)
+		} else {
+			cmd = exec.Command("sh", "-c", fmt.Sprintf("curl -fsSL %s | bash", installer.url))
+		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
 		if err := cmd.Start(); err != nil {
@@ -937,15 +949,6 @@ func runRuntimeContext(ctx context.Context, binary string, args ...string) (stri
 	return output.String(), nil
 }
 
-func confirmRuntimeAction(stdout io.Writer, action string) bool {
-	if runtimeConsentApproved(runtimeConsentForAction(action)) {
-		return true
-	}
-	fmt.Fprintf(stdout, "%s [y/N] ", action)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	return err == nil && strings.EqualFold(strings.TrimSpace(line), "y")
-}
-
 type runtimeConsent string
 
 const (
@@ -954,6 +957,9 @@ const (
 	runtimeConsentGateway       runtimeConsent = "gateway"
 	runtimeConsentPluginInstall runtimeConsent = "plugin-install"
 	runtimeConsentSourcePatch   runtimeConsent = "source-patch"
+	runtimeConsentReplace       runtimeConsent = "replace"
+	runtimeConsentDisconnect    runtimeConsent = "disconnect"
+	runtimeConsentProbe         runtimeConsent = "probe"
 )
 
 func runtimeConsentForAction(action string) runtimeConsent {
@@ -968,6 +974,12 @@ func runtimeConsentForAction(action string) runtimeConsent {
 		return runtimeConsentPluginInstall
 	case strings.Contains(action, "Hermes SSE CORS compatibility patch"):
 		return runtimeConsentSourcePatch
+	case strings.Contains(action, "Replace the existing"):
+		return runtimeConsentReplace
+	case strings.Contains(action, "Disconnect this computer"):
+		return runtimeConsentDisconnect
+	case strings.Contains(action, "public verification prompt"):
+		return runtimeConsentProbe
 	default:
 		return ""
 	}
@@ -986,11 +998,11 @@ func runtimeConsentApproved(required runtimeConsent) bool {
 }
 
 func runtimeConfirm(stdout io.Writer, action string, confirm func(string) (bool, error)) bool {
-	if confirm != nil {
-		confirmed, err := confirm(action)
-		return err == nil && confirmed
+	if confirm == nil {
+		return false
 	}
-	return confirmRuntimeAction(stdout, action)
+	confirmed, err := confirm(action)
+	return err == nil && confirmed
 }
 
 func normalizedCloudOrigin(value string) (string, error) {
@@ -1008,7 +1020,21 @@ func normalizedCloudOrigin(value string) (string, error) {
 			return "", errors.New("OR3 Cloud URL must use HTTPS except for loopback development URLs")
 		}
 	}
-	return strings.TrimRight(scheme+"://"+parsed.Host, "/"), nil
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "" {
+		return "", errors.New("OR3 Cloud URL must include a hostname for runtime CORS")
+	}
+	port := parsed.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	host := hostname
+	if port != "" {
+		host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	return scheme + "://" + host, nil
 }
 
 func firstLine(value string) string {
@@ -1056,14 +1082,8 @@ func hermesPortForRuntimeContext(ctx context.Context, bin string) int {
 	return hermesDefaultPort
 }
 
-func hermesEnvPath(bin string) string {
-	if output, err := runRuntime(bin, "config", "env-path"); err == nil {
-		if path := firstAbsolutePath(output, ".env"); path != "" {
-			return path
-		}
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".hermes", ".env")
+func hermesEnvPath(ctx context.Context, bin string) (string, error) {
+	return discoverRuntimeConfigPath(ctx, bin, "OR3_HERMES_ENV_PATH", ".env", "Hermes environment", "config", "env-path")
 }
 
 func mergeHermesEnv(path, origin, token string) error {
@@ -1369,20 +1389,14 @@ func restorePersistedRuntimeConfigBackup(ctx context.Context, backup persistedRu
 	})
 }
 
-func rollbackExternalRuntimePreparation(ctx context.Context, stateDir string, plan externalRuntimePlan) error {
+func rollbackExternalRuntimeConfiguration(ctx context.Context, stateDir string, plan externalRuntimePlan) error {
 	if plan.rollback == nil {
-		return errors.Join(
-			removeRuntimeConfigBackup(stateDir),
-			removeRuntimePreparation(stateDir),
-		)
+		return removeRuntimeConfigBackup(stateDir)
 	}
 	if err := plan.rollback(ctx); err != nil {
 		return err
 	}
-	return errors.Join(
-		removeRuntimeConfigBackup(stateDir),
-		removeRuntimePreparation(stateDir),
-	)
+	return removeRuntimeConfigBackup(stateDir)
 }
 
 func externalRuntimeSetupErrorWithCleanup(cause, cleanupErr error) error {
@@ -1439,9 +1453,6 @@ func cleanupExternalRuntimeEnrollment(ctx context.Context, stateDir string, stat
 	if len(cleanupErrs) > 0 {
 		return errors.Join(cleanupErrs...)
 	}
-	if err := removeRuntimePreparation(stateDir); err != nil {
-		return fmt.Errorf("remove runtime preparation checkpoint: %w", err)
-	}
 	if err := remoteconnect.RemoveState(stateDir); err != nil {
 		return fmt.Errorf("remove saved connection: %w", err)
 	}
@@ -1476,14 +1487,36 @@ func atomicReplaceRuntimeFile(path string, body []byte, mode os.FileMode) error 
 	return os.Rename(tmpPath, path)
 }
 
-func openClawConfigPath(bin string) string {
-	if output, err := runRuntime(bin, "config", "file"); err == nil {
-		if path := firstAbsolutePath(output, ".json"); path != "" {
-			return path
-		}
+func openClawConfigPath(ctx context.Context, bin string) (string, error) {
+	return discoverRuntimeConfigPath(ctx, bin, "OR3_OPENCLAW_CONFIG_PATH", ".json", "OpenClaw configuration", "config", "file")
+}
+
+func discoverRuntimeConfigPath(ctx context.Context, bin, overrideEnv, suffix, label string, args ...string) (string, error) {
+	if override := strings.TrimSpace(os.Getenv(overrideEnv)); override != "" {
+		return validateRuntimeConfigPath(override, suffix, label)
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".openclaw", "openclaw.json")
+	output, err := runRuntimeContext(ctx, bin, args...)
+	if err != nil {
+		return "", fmt.Errorf("discover %s with %s %s: %w; set %s to an absolute active configuration path to override", label, bin, strings.Join(args, " "), err, overrideEnv)
+	}
+	path := firstAbsolutePath(output, suffix)
+	if path == "" {
+		return "", fmt.Errorf("%s discovery returned no absolute %s path; set %s to an absolute active configuration path to override", label, suffix, overrideEnv)
+	}
+	return validateRuntimeConfigPath(path, suffix, label)
+}
+
+func validateRuntimeConfigPath(path, suffix, label string) (string, error) {
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) || !strings.HasSuffix(path, suffix) {
+		return "", fmt.Errorf("%s path must be an absolute %s file", label, suffix)
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return "", fmt.Errorf("%s path %q is a directory", label, path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect %s path: %w", label, err)
+	}
+	return path, nil
 }
 
 func firstAbsolutePath(output, suffix string) string {
@@ -1519,17 +1552,20 @@ func openClawPort(path string) int {
 	return openClawDefaultPort
 }
 
-func openClawBind(path string) string {
+func openClawBind(path string) (string, error) {
 	value, err := readJSONFile(path)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read OpenClaw config to verify gateway bind: %w", err)
 	}
-	if gateway, ok := value["gateway"].(map[string]any); ok {
-		if bind, ok := gateway["bind"].(string); ok {
-			return strings.TrimSpace(bind)
-		}
+	gateway, ok := value["gateway"].(map[string]any)
+	if !ok {
+		return "", errors.New("OpenClaw config gateway must be an object with an explicit loopback bind")
 	}
-	return ""
+	bind, ok := gateway["bind"].(string)
+	if !ok || strings.TrimSpace(bind) == "" {
+		return "", errors.New("OpenClaw config gateway.bind must explicitly be a loopback address")
+	}
+	return strings.TrimSpace(bind), nil
 }
 
 func isLoopbackBind(value string) bool {
@@ -1550,6 +1586,15 @@ func updateOpenClawConfig(path, origin, token string) error {
 	}
 	if config == nil {
 		return errors.New("OpenClaw config root must be a JSON object")
+	}
+	gateway, err := ensureMap(config, "gateway", "gateway")
+	if err != nil {
+		return err
+	}
+	if bind, present := gateway["bind"]; !present || bind == nil {
+		gateway["bind"] = "loopback"
+	} else if bindValue, ok := bind.(string); !ok || !isLoopbackBind(bindValue) {
+		return errors.New("OpenClaw config gateway.bind must be an explicit loopback address")
 	}
 	plugins, err := ensureMap(config, "plugins", "plugins")
 	if err != nil {
@@ -1588,11 +1633,9 @@ func updateOpenClawConfig(path, origin, token string) error {
 	if token != "" {
 		pluginConfig["token"] = token
 	}
-	if gateway, ok := config["gateway"].(map[string]any); ok {
-		if auth, ok := gateway["auth"].(map[string]any); ok {
-			if gatewayToken, ok := auth["token"].(string); ok && strings.TrimSpace(gatewayToken) != "" {
-				pluginConfig["gatewayToken"] = gatewayToken
-			}
+	if auth, ok := gateway["auth"].(map[string]any); ok {
+		if gatewayToken, ok := auth["token"].(string); ok && strings.TrimSpace(gatewayToken) != "" {
+			pluginConfig["gatewayToken"] = gatewayToken
 		}
 	}
 	return writeJSONFile(path, config)

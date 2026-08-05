@@ -178,6 +178,8 @@ func TestUpdateOpenClawConfigRejectsWildcardCorsOrigins(t *testing.T) {
 
 func TestUpdateOpenClawConfigRejectsMalformedKnownTypesWithoutWriting(t *testing.T) {
 	for name, initial := range map[string]string{
+		"gateway":        `{"gateway":"unexpected"}`,
+		"gateway bind":   `{"gateway":{"bind":"lan"}}`,
 		"plugins":        `{"plugins":"unexpected"}`,
 		"plugin allow":   `{"plugins":{"allow":"unexpected"}}`,
 		"plugin entries": `{"plugins":{"entries":[]}}`,
@@ -208,11 +210,24 @@ func TestOpenClawBindMustRemainLoopback(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"gateway":{"bind":"lan"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := openClawBind(path); got != "lan" {
-		t.Fatalf("openClawBind = %q, want lan", got)
+	if got, err := openClawBind(path); err != nil || got != "lan" {
+		t.Fatalf("openClawBind = %q, %v; want lan", got, err)
 	}
 	if isLoopbackBind("lan") || !isLoopbackBind("loopback") || !isLoopbackBind("127.0.0.1") {
 		t.Fatal("loopback bind validation did not distinguish loopback from LAN")
+	}
+	missing := filepath.Join(t.TempDir(), "missing-gateway.json")
+	if err := os.WriteFile(missing, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openClawBind(missing); err == nil {
+		t.Fatal("missing OpenClaw gateway bind was accepted")
+	}
+	if err := updateOpenClawConfig(missing, "https://or3.example", ""); err != nil {
+		t.Fatalf("updateOpenClawConfig: %v", err)
+	}
+	if got, err := openClawBind(missing); err != nil || got != "loopback" {
+		t.Fatalf("configured bind = %q, %v; want loopback", got, err)
 	}
 }
 
@@ -313,12 +328,71 @@ func TestOpenClawPluginVersionMustMatchThePinnedRelease(t *testing.T) {
 
 func TestRuntimeConsentRequiresTheExactApprovedAction(t *testing.T) {
 	t.Setenv("OR3_CONNECT_YES", "1")
-	t.Setenv("OR3_CONNECT_APPROVE", "plugin-install, source-patch")
+	t.Setenv("OR3_CONNECT_APPROVE", "plugin-install, source-patch, replace")
 	if runtimeConsentApproved(runtimeConsentInstaller) {
 		t.Fatal("installer was approved without its explicit consent token")
 	}
-	if !runtimeConsentApproved(runtimeConsentPluginInstall) || !runtimeConsentApproved(runtimeConsentSourcePatch) {
+	if !runtimeConsentApproved(runtimeConsentPluginInstall) || !runtimeConsentApproved(runtimeConsentSourcePatch) || !runtimeConsentApproved(runtimeConsentReplace) {
 		t.Fatal("explicit runtime consent tokens were not accepted")
+	}
+	if runtimeConsentApproved(runtimeConsentDisconnect) || runtimeConsentApproved(runtimeConsentProbe) {
+		t.Fatal("replacement approval widened to a different destructive action")
+	}
+	for _, action := range []string{
+		"Disconnect this computer from OR3 Cloud? This stops its tunnel, revokes cloud access, removes Connect state, and restores Connect-managed configuration.",
+		"Run one short public verification prompt using your configured model/provider? It may consume provider tokens.",
+	} {
+		if runtimeConsentApproved(runtimeConsentForAction(action)) {
+			t.Fatalf("unapproved action was accepted: %q", action)
+		}
+	}
+}
+
+func TestDeclinedRuntimeMutationsLeaveRuntimeFilesUntouched(t *testing.T) {
+	var installerOutput bytes.Buffer
+	confirmed := false
+	_, _, err := ensureRuntimeBinaryWithConfirmContext(
+		context.Background(),
+		"or3-runtime-that-does-not-exist",
+		"https://installer.example.test/install.sh",
+		&installerOutput,
+		io.Discard,
+		func(action string) (bool, error) {
+			confirmed = strings.Contains(action, "official installer")
+			return false, nil
+		},
+	)
+	if err == nil || !confirmed {
+		t.Fatalf("declined runtime installer = %v, confirmed=%v", err, confirmed)
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, "gateway", "platforms", "api_server.py")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("class APIServer:\n    def _cors_headers_for_origin(self, origin):\n        return {\"Access-Control-Allow-Origin\": origin}\n\n    async def _handle_run_events(self, request):\n        sse_headers = {}\n        response = web.StreamResponse(status=200, headers=sse_headers)\n")
+	if err := os.WriteFile(path, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OR3_HERMES_SOURCE_ROOT", root)
+	err = recoverHermesSSECors(
+		externalRuntimePlan{},
+		"",
+		&hermesSSECorsError{Origin: "https://or3.example"},
+		io.Discard,
+		func(string) (bool, error) { return false, nil },
+	)
+	var corsErr *hermesSSECorsError
+	if !errors.As(err, &corsErr) {
+		t.Fatalf("declined Hermes patch = %v", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("declined Hermes patch modified runtime source")
 	}
 }
 
@@ -330,8 +404,16 @@ func TestFirstAbsolutePathIgnoresRuntimeWarnings(t *testing.T) {
 }
 
 func TestNormalizedCloudOriginRejectsNonOriginsAndInsecureRemoteURLs(t *testing.T) {
-	if got, err := normalizedCloudOrigin("https://OR3.example/"); err != nil || got != "https://OR3.example" {
-		t.Fatalf("normalizedCloudOrigin = %q, %v", got, err)
+	for input, want := range map[string]string{
+		"https://OR3.example/":     "https://or3.example",
+		"https://OR3.example:443":  "https://or3.example",
+		"https://OR3.example:8443": "https://or3.example:8443",
+		"http://[::1]:8080":        "http://[::1]:8080",
+		"http://[::1]":             "http://[::1]",
+	} {
+		if got, err := normalizedCloudOrigin(input); err != nil || got != want {
+			t.Fatalf("normalizedCloudOrigin(%q) = %q, %v; want %q", input, got, err, want)
+		}
 	}
 	for _, value := range []string{
 		"ftp://or3.example",
@@ -342,6 +424,22 @@ func TestNormalizedCloudOriginRejectsNonOriginsAndInsecureRemoteURLs(t *testing.
 		if _, err := normalizedCloudOrigin(value); err == nil {
 			t.Fatalf("normalizedCloudOrigin accepted %q", value)
 		}
+	}
+}
+
+func TestRuntimeConfigDiscoveryDoesNotGuessAfterFailure(t *testing.T) {
+	binDir := t.TempDir()
+	bin := filepath.Join(binDir, "runtime")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho discovery failed >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := discoverRuntimeConfigPath(context.Background(), bin, "OR3_TEST_CONFIG_PATH", ".json", "test runtime", "config", "file"); err == nil {
+		t.Fatal("failed runtime discovery fell back to a guessed path")
+	}
+	override := filepath.Join(t.TempDir(), "runtime.json")
+	t.Setenv("OR3_TEST_CONFIG_PATH", override)
+	if got, err := discoverRuntimeConfigPath(context.Background(), bin, "OR3_TEST_CONFIG_PATH", ".json", "test runtime", "config", "file"); err != nil || got != override {
+		t.Fatalf("explicit config override = %q, %v", got, err)
 	}
 }
 
@@ -497,7 +595,7 @@ func TestHermesSSECorsPatchIsNarrowAndAtomic(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	source := "async def _handle_run_events(request):\n        sse_headers = {}\n        response = web.StreamResponse(status=200, headers=sse_headers)\n"
+	source := "class APIServer:\n    def _cors_headers_for_origin(self, origin):\n        return {\"Access-Control-Allow-Origin\": origin}\n\n    async def _handle_run_events(self, request):\n        sse_headers = {}\n        response = web.StreamResponse(status=200, headers=sse_headers)\n"
 	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -515,39 +613,31 @@ func TestHermesSSECorsPatchIsNarrowAndAtomic(t *testing.T) {
 	if err := applyHermesSSECorsPatch("hermes", ""); err == nil {
 		t.Fatal("already-patched source was edited a second time")
 	}
-}
 
-func TestRuntimePreparationCheckpointContainsNoCredentialAndRoundTrips(t *testing.T) {
-	dir := t.TempDir()
-	state := AdapterState{
-		Runtime:     connectRuntimeOpenClaw,
-		Stage:       connectSetupStageLocalConfigured,
-		LocalOrigin: "http://127.0.0.1:18789",
-		BasePath:    "/or3/",
-		Version:     "2026.7.1-2",
-	}
-	if err := saveRuntimePreparation(dir, state); err != nil {
-		t.Fatalf("saveRuntimePreparation: %v", err)
-	}
-	body, err := os.ReadFile(runtimePreparationPath(dir))
-	if err != nil {
+	if err := os.WriteFile(path, []byte("async def _handle_run_events(request):\n        sse_headers = {}\n        response = web.StreamResponse(status=200, headers=sse_headers)\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(body), "token") || strings.Contains(string(body), "secret") {
-		t.Fatalf("preparation checkpoint contains a credential-like field: %s", body)
+	if err := applyHermesSSECorsPatch("hermes", ""); err == nil {
+		t.Fatal("patch accepted a source without the verified CORS helper contract")
 	}
-	loaded, err := loadRuntimePreparation(dir)
-	if err != nil {
-		t.Fatalf("loadRuntimePreparation: %v", err)
+}
+
+func TestHermesInstallerIsPinnedAndChecksummed(t *testing.T) {
+	if strings.Contains(hermesInstallerURL, "/main/") || !strings.Contains(hermesInstallerURL, "/"+hermesInstallerVersion+"/") {
+		t.Fatalf("Hermes installer URL is not pinned: %s", hermesInstallerURL)
 	}
-	if loaded.Runtime != state.Runtime || loaded.Stage != state.Stage || loaded.BasePath != state.BasePath {
-		t.Fatalf("checkpoint did not round-trip: %+v", loaded)
+	if len(hermesInstallerSHA256) != 64 {
+		t.Fatalf("Hermes installer checksum has unexpected length: %q", hermesInstallerSHA256)
 	}
-	if err := removeRuntimePreparation(dir); err != nil {
-		t.Fatalf("removeRuntimePreparation: %v", err)
-	}
-	if _, err := os.Stat(runtimePreparationPath(dir)); !os.IsNotExist(err) {
-		t.Fatalf("checkpoint remains after removal: %v", err)
+}
+
+func TestVerificationFromCapabilitiesLabelsCommandsAsAdvertised(t *testing.T) {
+	verification := verificationFromCapabilities(
+		map[string]any{"features": map[string]any{"commands": true}},
+		liveRunVerification{},
+	)
+	if verification.Commands != "advertised" {
+		t.Fatalf("commands result = %q, want advertised", verification.Commands)
 	}
 }
 
@@ -772,10 +862,6 @@ type fakeRuntimeAdapter struct {
 }
 
 func (f fakeRuntimeAdapter) ID() ConnectRuntimeID { return f.id }
-
-func (f fakeRuntimeAdapter) Detect(context.Context) (bool, string, error) {
-	return true, "test", nil
-}
 
 func (f fakeRuntimeAdapter) Prepare(ctx context.Context, input PrepareInput) (*RuntimeConnectionTarget, error) {
 	plan, err := f.prepare(ctx, input)

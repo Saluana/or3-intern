@@ -38,6 +38,50 @@ test('installed npm bin symlink invokes the bootstrap', async (t) => {
     assert.match(result.stdout, /forwarded:connect status/);
 });
 
+test('rejects an unsupported nested connect runtime before bootstrap side effects', async () => {
+    let output = '';
+    const code = await runCLI(['connect', 'unknown-runtime'], {
+        stdout: { write(value) { output += value; } },
+        stderr: { write(value) { output += value; } },
+    });
+
+    assert.equal(code, 2);
+    assert.match(output, /openclaw\|hermes/);
+});
+
+test('routes external runtime commands through connect', async (t) => {
+    const installDir = await makeTestDirectory(t);
+    const binary = join(installDir, 'or3-intern');
+    await writeFile(binary, '#!/bin/sh\nprintf "forwarded:%s\\n" "$*"\n', { mode: 0o755 });
+    await chmod(binary, 0o755);
+    const cloudflared = join(installDir, 'cloudflared');
+    await writeFile(cloudflared, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    await chmod(cloudflared, 0o755);
+    await writeFile(`${cloudflared}.version`, `${CLOUDFLARED_VERSION}\n`, { mode: 0o600 });
+    const previousIntern = process.env.OR3_INTERN_BIN;
+    process.env.OR3_INTERN_BIN = binary;
+    t.after(() => {
+        if (previousIntern === undefined) delete process.env.OR3_INTERN_BIN;
+        else process.env.OR3_INTERN_BIN = previousIntern;
+    });
+    let output = '';
+    const code = await runCLI(['hermes'], {
+        installDir,
+        fetchImpl: async () => { throw new Error('offline'); },
+        stdout: { write(value) { output += value; } },
+        stderr: { write(value) { output += value; } },
+        spawnImpl: (_command, args) => {
+            output += `forwarded:${args.join(' ')}\n`;
+            const child = new EventEmitter();
+            queueMicrotask(() => child.emit('exit', 0, null));
+            return child;
+        },
+    });
+
+    assert.equal(code, 0);
+    assert.match(output, /forwarded:connect hermes/);
+});
+
 test('all cached management commands start offline without a shell PATH install', async (t) => {
     const installDir = await makeTestDirectory(t);
     const binary = join(installDir, 'or3-intern');

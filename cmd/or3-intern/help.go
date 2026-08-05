@@ -74,7 +74,7 @@ var rootHelpSections = []struct {
 
 var helpTopics = map[string]helpCommand{
 	"connect": {
-		Usage:   "npx @or3/connect [status|doctor|disconnect|uninstall] [options]",
+		Usage:   "npx @or3/connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]",
 		Summary: "Connect this computer securely to OR3 Cloud.",
 		Description: []string{
 			"Opens a browser sign-in, confirms a matching code, and installs a small background service so this computer stays reachable after logout or restart.",
@@ -82,6 +82,8 @@ var helpTopics = map[string]helpCommand{
 			"Credentials are saved with owner-only permissions and tunnel secrets are never placed in process arguments.",
 		},
 		Subcommands: []helpItem{
+			{Name: "openclaw", Description: "Connect an OpenClaw Gateway through its OR3 Runs plugin"},
+			{Name: "hermes", Description: "Connect a Hermes API server through its Runs endpoint"},
 			{Name: "status", Description: "Show the saved remote connection"},
 			{Name: "doctor", Description: "Check the tunnel client and remote reachability"},
 			{Name: "disconnect", Description: "Revoke remote access and stop the background service"},
@@ -94,7 +96,7 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--no-browser", Description: "Print the sign-in link without opening it"},
 			{Name: "--cloud-url <url>", Description: "Use a self-hosted or staging OR3 Cloud endpoint"},
 		},
-		Examples: []string{"npx @or3/connect", "npx @or3/connect --name \"Studio Mac\"", "npx @or3/connect status", "npx @or3/connect disconnect"},
+		Examples: []string{"npx @or3/connect", "npx @or3/connect openclaw", "npx @or3/connect hermes", "npx @or3/connect status", "npx @or3/connect disconnect"},
 	},
 	"configure": {
 		Usage:   "or3-intern configure [--section provider|storage|runtime|context|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",

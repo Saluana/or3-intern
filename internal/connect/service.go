@@ -73,6 +73,45 @@ func CurrentServiceSpec(configPath, stateDir string) (ServiceSpec, error) {
 	}, nil
 }
 
+// CurrentExternalServiceSpec builds the same least-privilege Connect service
+// descriptor without loading an OR3 Intern config. External runtimes are the
+// process behind the tunnel, so the managed service only needs access to its
+// own state directory and never starts the Intern API.
+func CurrentExternalServiceSpec(stateDir string) (ServiceSpec, error) {
+	binary, err := os.Executable()
+	if err != nil {
+		return ServiceSpec{}, err
+	}
+	binary, err = filepath.EvalSymlinks(binary)
+	if err != nil {
+		return ServiceSpec{}, err
+	}
+	current, err := user.Current()
+	if err != nil {
+		return ServiceSpec{}, err
+	}
+	group := current.Gid
+	if parsed, err := user.LookupGroupId(current.Gid); err == nil {
+		group = parsed.Name
+	}
+	defaultConfigPath := config.DefaultPath()
+	return ServiceSpec{
+		Label:         "chat.or3.connect",
+		User:          current.Username,
+		Group:         group,
+		WorkingDir:    filepath.Dir(defaultConfigPath),
+		Binary:        binary,
+		ConfigPath:    defaultConfigPath,
+		StateDir:      stateDir,
+		StdoutPath:    filepath.Join(stateDir, "connect.log"),
+		StderrPath:    filepath.Join(stateDir, "connect-error.log"),
+		Path:          serviceExecutablePath(os.Getenv("PATH"), current.HomeDir),
+		Home:          current.HomeDir,
+		TempDir:       os.TempDir(),
+		WritablePaths: []string{stateDir},
+	}, nil
+}
+
 func serviceWritablePaths(stateDir string, cfg config.Config) ([]string, error) {
 	candidates := []string{
 		stateDir,

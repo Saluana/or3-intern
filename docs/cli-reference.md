@@ -14,7 +14,7 @@ If running from a checkout, replace `or3-intern` with `go run ./cmd/or3-intern`.
 | Command | Purpose |
 | --- | --- |
 | `or3-intern setup` | Guided first-run setup with scenario and safety choices. |
-| `npx @or3/connect [status\|doctor\|disconnect\|uninstall]` | Connect this computer to OR3 Cloud without a VPN or pasted token. |
+| `npx @or3/connect [openclaw\|hermes\|status\|doctor\|disconnect\|uninstall]` | Connect this computer or a supported external runtime to OR3 Cloud without a VPN or pasted token. |
 | `or3-intern chat` | Interactive runner-backed chat. |
 | `or3-intern health [--check|--fix|--json]` | Readiness checks and safe repairs. |
 | `or3-intern status [--advanced]` | Safety, access, and problem summary. |

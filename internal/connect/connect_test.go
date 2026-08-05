@@ -255,6 +255,74 @@ func TestSaveStateWritesOwnerOnlyLocallyManagedTunnelFiles(t *testing.T) {
 	}
 }
 
+func TestSaveStateUsesValidatedExternalRuntimeIngress(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "connect")
+	state := State{
+		CloudURL:        "https://or3.chat",
+		AccountID:       "acct-1",
+		WorkspaceID:     "workspace-1",
+		EnvironmentID:   "env-1",
+		EnvironmentName: "OpenClaw",
+		Hostname:        "openclaw.example.test",
+		ControlToken:    "control-secret",
+		Driver:          "runs",
+		Runtime:         "openclaw",
+		LocalOrigin:     "http://127.0.0.1:18789",
+		BasePath:        "/or3/",
+	}
+	if err := SaveState(dir, state, TunnelCredential{
+		AccountTag:   "account-tag",
+		TunnelID:     "11111111-2222-3333-4444-555555555555",
+		TunnelSecret: "base64-tunnel-secret",
+		Hostname:     state.Hostname,
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	configBody, err := os.ReadFile(TunnelConfigPath(dir))
+	if err != nil {
+		t.Fatalf("read tunnel config: %v", err)
+	}
+	if !strings.Contains(string(configBody), `service: http://127.0.0.1:18789`) {
+		t.Fatalf("external runtime ingress was not persisted: %s", configBody)
+	}
+	if err := SaveState(dir, state, TunnelCredential{
+		AccountTag:   "account-tag",
+		TunnelID:     "11111111-2222-3333-4444-555555555555",
+		TunnelSecret: "base64-tunnel-secret",
+		Hostname:     state.Hostname,
+	}); err != nil {
+		t.Fatalf("repeat SaveState: %v", err)
+	}
+
+	invalidDir := filepath.Join(t.TempDir(), "invalid")
+	state.LocalOrigin = "http://127.0.0.1:18789/or3/"
+	if err := SaveState(invalidDir, state, TunnelCredential{
+		AccountTag:   "account-tag",
+		TunnelID:     "11111111-2222-3333-4444-555555555555",
+		TunnelSecret: "base64-tunnel-secret",
+		Hostname:     state.Hostname,
+	}); err == nil {
+		t.Fatal("path-bearing loopback target unexpectedly accepted")
+	}
+	if _, err := os.Stat(TunnelCredentialsPath(invalidDir)); !os.IsNotExist(err) {
+		t.Fatalf("invalid target left tunnel credentials behind: %v", err)
+	}
+
+	nonLoopbackDir := filepath.Join(t.TempDir(), "non-loopback")
+	state.LocalOrigin = "http://0.0.0.0:18789"
+	if err := SaveState(nonLoopbackDir, state, TunnelCredential{
+		AccountTag:   "account-tag",
+		TunnelID:     "11111111-2222-3333-4444-555555555555",
+		TunnelSecret: "base64-tunnel-secret",
+		Hostname:     state.Hostname,
+	}); err == nil {
+		t.Fatal("non-loopback external runtime target unexpectedly accepted")
+	}
+	if _, err := os.Stat(TunnelCredentialsPath(nonLoopbackDir)); !os.IsNotExist(err) {
+		t.Fatalf("non-loopback target left tunnel credentials behind: %v", err)
+	}
+}
+
 func TestRenderServiceRunsAsInvokingUserAndUsesTokenFile(t *testing.T) {
 	spec := ServiceSpec{
 		Label:      "chat.or3.connect",

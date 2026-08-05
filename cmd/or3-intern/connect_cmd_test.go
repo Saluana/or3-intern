@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,6 +28,39 @@ type connectRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn connectRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+func TestConfirmRuntimeActionReusesCommandReader(t *testing.T) {
+	t.Setenv("OR3_CONNECT_APPROVE", "")
+	reader := bufio.NewReader(strings.NewReader("y\ny\n"))
+	for _, action := range []string{"First confirmation?", "Second confirmation?"} {
+		if !confirmRuntimeAction(reader, io.Discard, action) {
+			t.Fatalf("confirmation %q was not read from the shared reader", action)
+		}
+	}
+}
+
+func TestProcessStoppedErrorHandlesCleanExit(t *testing.T) {
+	if got := processStoppedError("secure tunnel", nil).Error(); got != "secure tunnel stopped unexpectedly" {
+		t.Fatalf("clean exit error = %q", got)
+	}
+	stopped := processStoppedError("OR3 service", errors.New("exit status 1"))
+	if !strings.Contains(stopped.Error(), "OR3 service stopped: exit status 1") {
+		t.Fatalf("failed process error = %v", stopped)
+	}
+}
+
+func TestRequiredExternalRuntimeVerificationRequiresCapabilities(t *testing.T) {
+	if _, err := requiredExternalRuntimeVerification(nil); err == nil {
+		t.Fatal("nil verification was accepted")
+	}
+	if _, err := requiredExternalRuntimeVerification(&Verification{}); err == nil {
+		t.Fatal("verification without capabilities was accepted")
+	}
+	verification, err := requiredExternalRuntimeVerification(&Verification{Capabilities: map[string]any{}})
+	if err != nil || verification.Capabilities == nil {
+		t.Fatalf("valid verification = %#v, %v", verification, err)
+	}
 }
 
 type connectSetupCloudFixture struct {

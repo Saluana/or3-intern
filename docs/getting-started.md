@@ -27,8 +27,17 @@ The beginner mental model is:
 npx @or3/connect intern
 ```
 
-This downloads the verified OR3 Intern release and opens guided setup. Use
-`npx @or3/connect intern chat` for a later local conversation.
+This downloads the verified OR3 Intern release and opens guided setup when the
+matching package and release assets are published. Use
+`npx @or3/connect intern chat` for a later local conversation. Check
+[Connect release status](connect-release-status.md) first: the registry's
+current `@or3/connect` version predates this local subcommand, so do not
+silently substitute the older package.
+
+Remote Connect is withheld from managed Cloud. Do not run bare
+`npx @or3/connect` against the old `https://or3.chat` default. A verified
+staging or self-hosted operator may use the advanced `--cloud-url` path in
+[remote-connect.md](remote-connect.md).
 
 ### Source contributors: install the bare `or3-intern` command
 

@@ -46,10 +46,10 @@ test('rejects an unsupported nested connect runtime before bootstrap side effect
     });
 
     assert.equal(code, 2);
-    assert.match(output, /openclaw\|hermes/);
+    assert.match(output, /intern \[command\]/);
 });
 
-test('routes external runtime commands through connect', async (t) => {
+test('routes explicitly configured external runtime commands through connect', async (t) => {
     const installDir = await makeTestDirectory(t);
     const binary = join(installDir, 'or3-intern');
     await writeFile(binary, '#!/bin/sh\nprintf "forwarded:%s\\n" "$*"\n', { mode: 0o755 });
@@ -65,7 +65,7 @@ test('routes external runtime commands through connect', async (t) => {
         else process.env.OR3_INTERN_BIN = previousIntern;
     });
     let output = '';
-    const code = await runCLI(['hermes'], {
+    const code = await runCLI(['hermes', '--cloud-url', 'https://staging.example.test'], {
         installDir,
         fetchImpl: async () => { throw new Error('offline'); },
         stdout: { write(value) { output += value; } },
@@ -80,6 +80,23 @@ test('routes external runtime commands through connect', async (t) => {
 
     assert.equal(code, 0);
     assert.match(output, /forwarded:connect hermes/);
+});
+
+test('withholds the default remote bootstrap before downloading anything', async () => {
+    let output = '';
+    let fetches = 0;
+    const code = await runCLI([], {
+        fetchImpl: async () => {
+            fetches++;
+            throw new Error('the withheld path must not download releases');
+        },
+        stdout: { write(value) { output += value; } },
+        stderr: { write(value) { output += value; } },
+    });
+
+    assert.equal(code, 2);
+    assert.equal(fetches, 0);
+    assert.match(output, /not enabled by default/);
 });
 
 test('runs Intern setup without Go, a PATH change, or a Cloudflare download', async (t) => {

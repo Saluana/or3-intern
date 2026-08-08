@@ -3,10 +3,16 @@ package connect
 import "time"
 
 const (
-	DefaultCloudURL     = "https://or3.chat"
-	DefaultPollInterval = 3 * time.Second
-	DefaultTimeout      = 10 * time.Minute
-	StateVersion        = 2
+	// DefaultCloudURL is intentionally empty. The managed OR3 Cloud Connect
+	// endpoint is withheld until its device flow has passed a public staging
+	// smoke. Requiring an explicit --cloud-url (or OR3_CONNECT_CLOUD_URL)
+	// keeps a copied command from sending credentials to an unverified central
+	// endpoint while preserving the advanced self-hosted/staging path.
+	DefaultCloudURL              = ""
+	RemoteConnectWithheldMessage = "remote OR3 Connect is not enabled by default; use local OR3 Intern, or provide an explicitly verified staging/self-hosted URL with --cloud-url"
+	DefaultPollInterval          = 3 * time.Second
+	DefaultTimeout               = 10 * time.Minute
+	StateVersion                 = 2
 )
 
 type DeviceAuthorization struct {

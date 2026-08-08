@@ -156,8 +156,38 @@ jobs:
         run: |
           TARBALL="$(node -e "console.log(require('./pack.json')[0].filename)")"
           npm publish "${TARBALL}" --access public --provenance
-      - name: Verify published package versions
+      - name: Verify exact published versions after bounded registry propagation
         run: |
+          set -eu
           VERSION="${GITHUB_REF_NAME#v}"
-          test "$(npm view "@or3/intern-client@${VERSION}" version)" = "$VERSION"
-          test "$(npm view "@or3/connect@${VERSION}" version)" = "$VERSION"
+
+          wait_for_version() {
+            PACKAGE="$1"
+            for ATTEMPT in $(seq 1 12); do
+              OBSERVED="$(npm view "${PACKAGE}@${VERSION}" version --json 2>/dev/null || true)"
+              if [ "$OBSERVED" = "\"${VERSION}\"" ] || [ "$OBSERVED" = "$VERSION" ]; then
+                return 0
+              fi
+              sleep "$((ATTEMPT * 5))"
+            done
+            echo "${PACKAGE}@${VERSION} was not visible on npm after bounded retries" >&2
+            exit 1
+          }
+
+          wait_for_version "@or3/intern-client"
+          wait_for_version "@or3/connect"
+
+      - name: Smoke-test exact Connect package with Node 20 Alpine
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker run --rm --cpus=1 --memory=512m -e CONNECT_VERSION="$VERSION" node:20-alpine \
+            sh -ceu '
+            for ATTEMPT in $(seq 1 6); do
+              if npx --yes --package="@or3/connect@${CONNECT_VERSION}" or3 intern --help; then
+                exit 0
+              fi
+              sleep "$((ATTEMPT * 5))"
+            done
+            echo "exact @or3/connect@${CONNECT_VERSION} intern bootstrap did not propagate" >&2
+            exit 1'

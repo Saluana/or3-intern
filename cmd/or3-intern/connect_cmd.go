@@ -139,6 +139,9 @@ func parseConnectOptions(subcommand string, args []string) (connectCommandOption
 	if len(fs.Args()) > 0 {
 		return connectCommandOptions{}, newUsageError("unexpected connect arguments: %s", strings.Join(fs.Args(), " "))
 	}
+	if (subcommand == "setup" || subcommand == "openclaw" || subcommand == "hermes") && strings.TrimSpace(options.CloudURL) == "" {
+		return connectCommandOptions{}, newUsageError("%s", remoteconnect.RemoteConnectWithheldMessage)
+	}
 	return options, nil
 }
 

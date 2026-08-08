@@ -50,6 +50,36 @@ func TestProcessStoppedErrorHandlesCleanExit(t *testing.T) {
 	}
 }
 
+func TestParseConnectOptionsWithholdsUnconfiguredRemoteSetup(t *testing.T) {
+	t.Setenv("OR3_CONNECT_CLOUD_URL", "")
+	for _, subcommand := range []string{"setup", "openclaw", "hermes"} {
+		_, err := parseConnectOptions(subcommand, nil)
+		if err == nil || !strings.Contains(err.Error(), "not enabled by default") {
+			t.Fatalf("parseConnectOptions(%q) error = %v, want withheld message", subcommand, err)
+		}
+	}
+}
+
+func TestParseConnectOptionsAllowsExplicitVerifiedEndpoint(t *testing.T) {
+	t.Setenv("OR3_CONNECT_CLOUD_URL", "")
+	options, err := parseConnectOptions("setup", []string{"--cloud-url", "https://staging.example.test"})
+	if err != nil {
+		t.Fatalf("parseConnectOptions explicit endpoint: %v", err)
+	}
+	if options.CloudURL != "https://staging.example.test" {
+		t.Fatalf("CloudURL = %q", options.CloudURL)
+	}
+}
+
+func TestParseConnectOptionsAllowsManagementWithoutCloudURL(t *testing.T) {
+	t.Setenv("OR3_CONNECT_CLOUD_URL", "")
+	for _, subcommand := range []string{"status", "doctor", "disconnect", "uninstall", "run"} {
+		if _, err := parseConnectOptions(subcommand, nil); err != nil {
+			t.Fatalf("parseConnectOptions(%q): %v", subcommand, err)
+		}
+	}
+}
+
 func TestRequiredExternalRuntimeVerificationRequiresCapabilities(t *testing.T) {
 	if _, err := requiredExternalRuntimeVerification(nil); err == nil {
 		t.Fatal("nil verification was accepted")

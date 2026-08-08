@@ -1,27 +1,32 @@
 # OR3 Connect
 
-Connect a macOS or Linux computer to OR3 Cloud:
+This package contains the advanced OR3 Connect bootstrap and the local Intern
+launcher. Remote Connect is **not** a managed-Cloud launch feature yet: the
+old `https://or3.chat` default is intentionally disabled. See the [Connect
+release status](https://github.com/Saluana/or3-intern/blob/main/docs/connect-release-status.md)
+page for the immutable package and binary-asset contract.
 
-```sh
-npx @or3/connect
-```
-
-To run OR3 Intern locally without installing Go or changing your shell PATH:
+When the matching package and Intern release are published, start local OR3
+Intern without Go or a PATH edit:
 
 ```sh
 npx @or3/connect intern
 ```
 
-That downloads the verified OR3 Intern release and opens its guided local
-setup. Add an Intern command after `intern` when needed, for example
-`npx @or3/connect intern chat`.
+The source tree currently targets `@or3/connect@0.1.1`, while npm serves only
+the immutable `0.1.0` package. Do not claim the `intern` subcommand is
+available from npm until the exact package and matching `or3-intern` release
+asset resolve.
 
-To connect an installed external agent with the guided setup, choose its
-runtime explicitly:
+For a source checkout today, use `go run ./cmd/or3-intern setup` and
+`go run ./cmd/or3-intern chat` instead.
+
+To connect an installed external agent, choose its runtime and an explicitly
+verified staging or self-hosted endpoint:
 
 ```sh
-npx @or3/connect openclaw
-npx @or3/connect hermes
+or3-intern connect openclaw --cloud-url https://staging.example.test
+or3-intern connect hermes --cloud-url https://staging.example.test
 ```
 
 The command checks the runtime, asks before installing or changing anything,
@@ -52,5 +57,6 @@ npx @or3/connect disconnect
 The bootstrap never asks for an API token or puts tunnel credentials in process
 arguments.
 
-Remote access requires an OR3 Cloud account. Local/offline OR3 remains
-account-free.
+Those management commands operate on a previously configured advanced
+connection. Local/offline OR3 remains account-free; managed Cloud Connect is
+withheld until its public staging flow is proved.

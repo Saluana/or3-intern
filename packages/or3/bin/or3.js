@@ -33,7 +33,8 @@ const SUPPORTED_CONNECT_SUBCOMMANDS = new Set([
     'run',
     'setup',
 ]);
-const CONNECT_USAGE = 'Usage: npx @or3/connect [intern|openclaw|hermes|status|doctor|disconnect|uninstall] [options]\n';
+const CONNECT_USAGE = 'Usage: npx @or3/connect intern [command] | npx @or3/connect [status|doctor|disconnect|uninstall] [options]\n';
+const CONNECT_WITHHELD_MESSAGE = 'Remote OR3 Connect is not enabled by default. Use `npx @or3/connect intern` for local Intern, or pass an explicitly verified staging/self-hosted `--cloud-url` to the advanced Connect command.\n';
 
 const DEFAULT_REQUEST_POLICY = Object.freeze({
     timeoutMs: 20_000,
@@ -81,6 +82,11 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
         return 2;
     }
 
+    if (remoteSetupNeedsExplicitCloudURL(args) && !hasExplicitCloudURL(args)) {
+        stderr.write(CONNECT_WITHHELD_MESSAGE);
+        return 2;
+    }
+
     const installDir = options.installDir ?? getInstallDir();
     stdout.write(internCommand ? 'OR3 Intern\n\n' : 'OR3 Connect\n\n');
     await mkdir(installDir, { recursive: true, mode: 0o700 });
@@ -118,6 +124,22 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
             env: childEnvironment,
         }
     );
+}
+
+function remoteSetupNeedsExplicitCloudURL(args) {
+    const command = args[0] || 'connect';
+    if (command === 'intern') return false;
+    if (command === 'connect' || command.startsWith('-')) {
+        const subcommand = command === 'connect' ? args[1] : command;
+        return !subcommand || subcommand.startsWith('-') || ['setup', 'openclaw', 'hermes'].includes(subcommand);
+    }
+    return ['openclaw', 'hermes', 'setup'].includes(command);
+}
+
+function hasExplicitCloudURL(args) {
+    if (process.env.OR3_CONNECT_CLOUD_URL?.trim()) return true;
+    const index = args.indexOf('--cloud-url');
+    return index >= 0 && Boolean(args[index + 1]?.trim());
 }
 
 export async function ensureIntern(options = {}) {

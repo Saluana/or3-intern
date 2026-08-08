@@ -12,8 +12,12 @@ For the simplest local setup, with no Go install or PATH change:
 npx @or3/connect intern
 ```
 
-It downloads the verified OR3 Intern release and opens guided setup. Run later
-commands the same way, for example `npx @or3/connect intern chat`.
+This is the local-first bootstrap path when the matching Connect package and
+Intern release assets are published. Run later commands the same way, for
+example `npx @or3/connect intern chat`. Check [Connect release status](docs/connect-release-status.md)
+before copying a versioned command: the currently published `@or3/connect`
+package is older than the source that added the `intern` subcommand, and remote
+Connect is withheld from managed Cloud.
 
 If you are contributing from this source checkout and want the bare
 `or3-intern` command, install it once:
@@ -54,7 +58,7 @@ or3-intern version
     or3-intern service
     ```
 
-    For the quickest local OR3 Chat setup, run `or3-intern devices create` and paste the one-time displayed token into the app. For an approval-based flow, use `or3-intern pairing request`. See docs/v1/user-guide/app-integration/or3-app-connection-guide.md for the full web, Electron, iOS, Android, pairing, disconnect, and troubleshooting flow.
+    For the quickest local OR3 Chat setup, run `or3-intern devices create` and paste the one-time displayed token into the app. For an approval-based flow, use `or3-intern pairing request`. See [the OR3 App connection guide](docs/app-connection.md) for pairing, disconnect, and troubleshooting.
 
 4. Install and authenticate a runner (OpenCode recommended), then check readiness:
 
@@ -96,7 +100,7 @@ Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary f
 Root help shows the full command catalog by default:
 
 - `or3-intern setup` guided first-run setup using scenario and safety choices
-- `or3-intern connect` one-command, account-bound remote access through OR3 Cloud
+- `or3-intern connect --cloud-url <verified-endpoint>` advanced remote access for a verified staging or self-hosted Cloud; managed Cloud Connect is currently withheld
 - `or3-intern chat` interactive CLI
 - `or3-intern health [--check|--fix|--json]` normal readiness checks and safe repairs
 - `or3-intern status [--advanced]` plain-language safety and access summary
@@ -140,6 +144,7 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - Security and hardening
 - MCP tool integrations
 - Internal service API reference
+- [Connect release status](docs/connect-release-status.md)
 
 ## Operational notes
 
@@ -152,6 +157,9 @@ The setup docs stay text-first in-repo. Screenshots or terminal recordings can b
 - `or3-intern doctor` is the main readiness command before exposing connected apps, triggers, or the service API.
 - `OR3_SERVICE_UNSAFE_DEV=true` is only for local development restarts; it preserves `--unsafe-dev` and bypasses startup safety gates.
 - `Dockerfile` and `compose.yaml` provide a hosted-service starting point, not a complete production hardening profile.
+- Remote Connect is not a managed-Cloud launch feature. Use local Intern or the
+  explicit advanced `--cloud-url` path only after an operator has verified the
+  endpoint; do not use the old `https://or3.chat` default.
 
 ## Config alignment
 

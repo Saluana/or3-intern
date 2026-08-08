@@ -30,7 +30,7 @@ var rootHelpSections = []struct {
 		Title: "Simple commands",
 		Items: []helpItem{
 			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
-			{Name: "connect", Description: "Connect this computer securely to OR3 Cloud"},
+			{Name: "connect", Description: "Advanced remote access; requires an explicitly verified Cloud URL"},
 			{Name: "chat", Description: "Start chatting with OR3"},
 			{Name: "health", Description: "Check if OR3 is ready to work"},
 			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
@@ -74,11 +74,12 @@ var rootHelpSections = []struct {
 
 var helpTopics = map[string]helpCommand{
 	"connect": {
-		Usage:   "npx @or3/connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]",
-		Summary: "Connect this computer securely to OR3 Cloud.",
+		Usage:   "or3-intern connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]",
+		Summary: "Advanced remote access for a verified staging or self-hosted OR3 Cloud.",
 		Description: []string{
-			"Opens a browser sign-in, confirms a matching code, and installs a small background service so this computer stays reachable after logout or restart.",
-			"Remote access requires an OR3 Cloud account. Local and offline use never requires an account.",
+			"Remote Connect is withheld from the default managed Cloud path until its device flow passes a public staging smoke.",
+			"Provide --cloud-url (or OR3_CONNECT_CLOUD_URL) only for an explicitly verified staging or self-hosted endpoint. The former https://or3.chat default is not used.",
+			"Local and offline use never requires an account; use `npx @or3/connect intern` when the matching Intern bootstrap release is available.",
 			"Credentials are saved with owner-only permissions and tunnel secrets are never placed in process arguments.",
 		},
 		Subcommands: []helpItem{
@@ -94,9 +95,9 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--no-service", Description: "Keep the connection in this terminal instead of installing a service"},
 			{Name: "--local-only", Description: "Advanced uninstall escape hatch: remove local files without revoking cloud access"},
 			{Name: "--no-browser", Description: "Print the sign-in link without opening it"},
-			{Name: "--cloud-url <url>", Description: "Use a self-hosted or staging OR3 Cloud endpoint"},
+			{Name: "--cloud-url <url>", Description: "Advanced: use an explicitly verified self-hosted or staging endpoint"},
 		},
-		Examples: []string{"npx @or3/connect", "npx @or3/connect openclaw", "npx @or3/connect hermes", "npx @or3/connect status", "npx @or3/connect disconnect"},
+		Examples: []string{"npx @or3/connect intern", "or3-intern connect --cloud-url https://staging.example.test", "npx @or3/connect status", "npx @or3/connect disconnect"},
 	},
 	"configure": {
 		Usage:   "or3-intern configure [--section provider|storage|runtime|context|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",

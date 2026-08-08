@@ -70,7 +70,8 @@ Docs for the app-facing surface:
 
 - `docs/api-reference.md`
 - `docs/migration-runner-first.md`
-- `docs/archive/v1/user-guide/app-integration/or3-app-connection-guide.md`
+- `docs/app-connection.md`
+- `docs/connect-release-status.md` (current Connect launch decision and version contract)
 
 When changing a service endpoint, auth policy, pairing, secure connections, or response contract, check `or3-app` callers too.
 

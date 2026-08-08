@@ -1,39 +1,51 @@
 # Remote access with OR3 Connect
 
-Connect this computer to an OR3 Cloud account:
+## Managed Cloud status
+
+Remote Connect is currently **withheld** from the managed Cloud launch. The
+central `https://or3.chat` device endpoint has not passed the required public
+staging smoke, so this guide does not provide a bare `npx @or3/connect`
+command. Local/offline Intern remains account-free.
+
+Read [Connect release status](connect-release-status.md) before choosing a
+package version. The registry currently serves `@or3/connect@0.1.0`, while the
+source `intern` bootstrap is `0.1.1` and its matching `or3-intern` release
+asset is not published yet.
+
+## Advanced staging or self-hosted path
+
+An operator who has independently verified a staging or self-hosted Cloud
+endpoint can opt into the existing device flow explicitly:
 
 ```bash
-npx @or3/connect
+or3-intern connect --cloud-url https://staging.example.test
 ```
 
-For local OR3 Intern setup instead (no Go install or PATH edit), run
-`npx @or3/connect intern`.
-
-For a supported external agent, use the runtime-specific guided command:
+For an external runtime, use the same explicit endpoint:
 
 ```sh
-npx @or3/connect openclaw
-npx @or3/connect hermes
+or3-intern connect openclaw --cloud-url https://staging.example.test
+or3-intern connect hermes --cloud-url https://staging.example.test
 ```
 
-These commands reuse the same device approval, named tunnel, service, status,
+These commands reuse the device approval, named tunnel, service, status,
 doctor, and disconnect lifecycle. They configure only the selected runtime's
-loopback API; finish model/provider onboarding in the runtime first.
+loopback API; finish model/provider onboarding in the runtime first. The
+endpoint must be HTTPS (except exact loopback development URLs), and the
+command validates verification URLs before accepting credentials.
 
-No access token, VPN, Cloudflare account, or QR scan is required. The command
-opens a browser, shows a matching phrase in both places, then asks once before
-installing the background service.
-
-Local/offline use remains account-free.
+The advanced flow opens a browser, shows a matching phrase in both places, and
+asks once before installing the background service. It does not require a
+pasted access token, VPN, Cloudflare account, or QR scan when the selected
+endpoint has the complete device flow configured.
 
 ## Commands
 
 ```bash
-npx @or3/connect
-npx @or3/connect status
-npx @or3/connect doctor
-npx @or3/connect disconnect
-npx @or3/connect uninstall
+or3-intern connect status
+or3-intern connect doctor
+or3-intern connect disconnect
+or3-intern connect uninstall
 ```
 
 Useful setup flags:
@@ -41,7 +53,7 @@ Useful setup flags:
 - `--name "Studio Mac"` sets the name shown in OR3.
 - `--no-service` runs only until the terminal closes.
 - `--no-browser` prints the URL for a headless computer.
-- `--cloud-url` selects a staging or self-hosted OR3 Cloud.
+- `--cloud-url` is required for setup/openclaw/hermes and selects a staging or self-hosted OR3 Cloud. It is intentionally never defaulted to `https://or3.chat`.
 
 ## Files and services
 

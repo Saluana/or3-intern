@@ -6,8 +6,11 @@ For normal local use, no installation is needed:
 npx @or3/connect intern
 ```
 
-It downloads the verified binary and opens setup without requiring Go or a
-shell PATH change. Install the CLI only if you specifically want the bare
+This is the local-first path once the matching package and Intern release are
+published. See [Connect release status](connect-release-status.md) for the
+immutable version contract; the currently published package is older than the
+source `intern` subcommand. From a checkout, use `go run ./cmd/or3-intern ...`
+until the exact package/assets are released. Install the CLI only if you specifically want the bare
 `or3-intern` command:
 
 ```bash
@@ -23,7 +26,7 @@ If running from a checkout, replace `or3-intern` with `go run ./cmd/or3-intern`.
 | --- | --- |
 | `npx @or3/connect intern [command]` | Download and run OR3 Intern; with no command, opens guided local setup. |
 | `or3-intern setup` | Guided first-run setup with scenario and safety choices. |
-| `npx @or3/connect [openclaw\|hermes\|status\|doctor\|disconnect\|uninstall]` | Connect this computer or a supported external runtime to OR3 Cloud without a VPN or pasted token. |
+| `or3-intern connect --cloud-url <verified-endpoint>` | Advanced remote Connect for a verified staging or self-hosted endpoint. Managed Cloud Connect is withheld. |
 | `or3-intern chat` | Interactive runner-backed chat. |
 | `or3-intern health [--check|--fix|--json]` | Readiness checks and safe repairs. |
 | `or3-intern status [--advanced]` | Safety, access, and problem summary. |

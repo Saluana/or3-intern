@@ -82,12 +82,48 @@ test('routes external runtime commands through connect', async (t) => {
     assert.match(output, /forwarded:connect hermes/);
 });
 
+test('runs Intern setup without Go, a PATH change, or a Cloudflare download', async (t) => {
+    const installDir = await makeTestDirectory(t);
+    const binary = join(installDir, 'or3-intern');
+    await writeFile(binary, '#!/bin/sh\nprintf "forwarded:%s\\n" "$*"\n', { mode: 0o755 });
+    await chmod(binary, 0o755);
+    const previousIntern = process.env.OR3_INTERN_BIN;
+    process.env.OR3_INTERN_BIN = binary;
+    t.after(() => {
+        if (previousIntern === undefined) delete process.env.OR3_INTERN_BIN;
+        else process.env.OR3_INTERN_BIN = previousIntern;
+    });
+
+    let output = '';
+    let fetches = 0;
+    const code = await runCLI(['intern'], {
+        installDir,
+        fetchImpl: async () => {
+            fetches++;
+            throw new Error('Cloudflare download should not run');
+        },
+        stdout: { write(value) { output += value; } },
+        stderr: { write(value) { output += value; } },
+        spawnImpl: (_command, args) => {
+            output += `forwarded:${args.join(' ')}\n`;
+            const child = new EventEmitter();
+            queueMicrotask(() => child.emit('exit', 0, null));
+            return child;
+        },
+    });
+
+    assert.equal(code, 0);
+    assert.equal(fetches, 0);
+    assert.match(output, /OR3 Intern/);
+    assert.match(output, /forwarded:setup/);
+});
+
 test('all cached management commands start offline without a shell PATH install', async (t) => {
     const installDir = await makeTestDirectory(t);
     const binary = join(installDir, 'or3-intern');
     await writeFile(binary, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(binary, 0o755);
-    await writeFile(`${binary}.version`, 'v0.1.0\n', { mode: 0o600 });
+    await writeFile(`${binary}.version`, 'v0.1.1\n', { mode: 0o600 });
     const cloudflared = join(installDir, 'cloudflared');
     await writeFile(cloudflared, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(cloudflared, 0o755);

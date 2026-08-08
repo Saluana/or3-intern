@@ -6,6 +6,9 @@ Connect this computer to an OR3 Cloud account:
 npx @or3/connect
 ```
 
+For local OR3 Intern setup instead (no Go install or PATH edit), run
+`npx @or3/connect intern`.
+
 For a supported external agent, use the runtime-specific guided command:
 
 ```sh

@@ -1,6 +1,6 @@
 {
   "name": "@or3/connect",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One-command OR3 Connect bootstrap",
   "license": "GPL-3.0",
   "type": "module",
@@ -20,7 +20,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=20"
   },
   "keywords": [
     "or3",

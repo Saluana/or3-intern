@@ -21,7 +21,16 @@ The beginner mental model is:
 - Allowed Actions — what OR3 can do without asking
 - Activity Log — what OR3 records for later review
 
-### 0. Install the CLI if you want the bare `or3-intern` command
+### 0. Start without installing Go or editing your PATH
+
+```bash
+npx @or3/connect intern
+```
+
+This downloads the verified OR3 Intern release and opens guided setup. Use
+`npx @or3/connect intern chat` for a later local conversation.
+
+### Source contributors: install the bare `or3-intern` command
 
 ```bash
 ./scripts/install-cli.sh

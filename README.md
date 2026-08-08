@@ -6,7 +6,17 @@ The README now stays focused on orientation and quick start. Detailed guides and
 
 ## Quick start
 
-If you want to use the bare `or3-intern` command from your shell, install it once:
+For the simplest local setup, with no Go install or PATH change:
+
+```bash
+npx @or3/connect intern
+```
+
+It downloads the verified OR3 Intern release and opens guided setup. Run later
+commands the same way, for example `npx @or3/connect intern chat`.
+
+If you are contributing from this source checkout and want the bare
+`or3-intern` command, install it once:
 
 ```bash
 ./scripts/install-cli.sh

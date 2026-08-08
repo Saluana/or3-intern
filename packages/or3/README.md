@@ -6,6 +6,16 @@ Connect a macOS or Linux computer to OR3 Cloud:
 npx @or3/connect
 ```
 
+To run OR3 Intern locally without installing Go or changing your shell PATH:
+
+```sh
+npx @or3/connect intern
+```
+
+That downloads the verified OR3 Intern release and opens its guided local
+setup. Add an Intern command after `intern` when needed, for example
+`npx @or3/connect intern chat`.
+
 To connect an installed external agent with the guided setup, choose its
 runtime explicitly:
 
@@ -25,8 +35,9 @@ With Bun:
 bunx @or3/connect
 ```
 
-The bootstrap downloads checksum-verified `or3-intern` and `cloudflared`
-release assets into `~/.or3/bin`, then opens OR3's browser device authorization.
+The bootstrap downloads checksum-verified `or3-intern` and, for remote Connect,
+`cloudflared` release assets into `~/.or3/bin`, then opens OR3's browser device
+authorization.
 Downloads are streamed, deadline-bounded, and installed atomically under a
 shared lock. A valid cached install continues to work offline.
 

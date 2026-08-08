@@ -33,6 +33,7 @@ const SUPPORTED_CONNECT_SUBCOMMANDS = new Set([
     'run',
     'setup',
 ]);
+const CONNECT_USAGE = 'Usage: npx @or3/connect [intern|openclaw|hermes|status|doctor|disconnect|uninstall] [options]\n';
 
 const DEFAULT_REQUEST_POLICY = Object.freeze({
     timeoutMs: 20_000,
@@ -56,14 +57,18 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
     const managementCommands = new Set(['status', 'doctor', 'disconnect', 'uninstall']);
     const runtimeCommands = new Set(['openclaw', 'hermes']);
     let forwardedArgs;
-    if (command === 'connect') {
+    const internCommand = command === 'intern';
+    if (internCommand) {
+        forwardedArgs = args.slice(1);
+        if (forwardedArgs.length === 0) forwardedArgs = ['setup'];
+    } else if (command === 'connect') {
         const requestedSubcommand = args[1];
         if (
             requestedSubcommand &&
             !requestedSubcommand.startsWith('-') &&
             !SUPPORTED_CONNECT_SUBCOMMANDS.has(requestedSubcommand)
         ) {
-            stderr.write('Usage: npx @or3/connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]\n');
+            stderr.write(CONNECT_USAGE);
             return 2;
         }
         forwardedArgs = args.length > 0 ? args : ['connect'];
@@ -72,12 +77,12 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
     } else if (managementCommands.has(command) || runtimeCommands.has(command)) {
         forwardedArgs = ['connect', ...args];
     } else {
-        stderr.write('Usage: npx @or3/connect [openclaw|hermes|status|doctor|disconnect|uninstall] [options]\n');
+        stderr.write(CONNECT_USAGE);
         return 2;
     }
 
     const installDir = options.installDir ?? getInstallDir();
-    stdout.write('OR3 Connect\n\n');
+    stdout.write(internCommand ? 'OR3 Intern\n\n' : 'OR3 Connect\n\n');
     await mkdir(installDir, { recursive: true, mode: 0o700 });
 
     const sharedOptions = {
@@ -92,7 +97,8 @@ export async function runCLI(args = process.argv.slice(2), options = {}) {
         ? forwardedArgs[1]
         : 'setup';
     let cloudflared = process.env.OR3_CONNECT_CLOUDFLARED_BIN?.trim();
-    if (!cloudflared && (subcommand === 'setup' || subcommand === 'openclaw' || subcommand === 'hermes' || subcommand === 'doctor' || subcommand === 'run')) {
+    const isConnectCommand = forwardedArgs[0] === 'connect';
+    if (!cloudflared && isConnectCommand && (subcommand === 'setup' || subcommand === 'openclaw' || subcommand === 'hermes' || subcommand === 'doctor' || subcommand === 'run')) {
         cloudflared = await ensureCloudflared(sharedOptions);
     }
 

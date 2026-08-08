@@ -1,6 +1,14 @@
 # CLI Reference
 
-Install the CLI once if you want to use the bare `or3-intern` command:
+For normal local use, no installation is needed:
+
+```bash
+npx @or3/connect intern
+```
+
+It downloads the verified binary and opens setup without requiring Go or a
+shell PATH change. Install the CLI only if you specifically want the bare
+`or3-intern` command:
 
 ```bash
 ./scripts/install-cli.sh
@@ -13,6 +21,7 @@ If running from a checkout, replace `or3-intern` with `go run ./cmd/or3-intern`.
 
 | Command | Purpose |
 | --- | --- |
+| `npx @or3/connect intern [command]` | Download and run OR3 Intern; with no command, opens guided local setup. |
 | `or3-intern setup` | Guided first-run setup with scenario and safety choices. |
 | `npx @or3/connect [openclaw\|hermes\|status\|doctor\|disconnect\|uninstall]` | Connect this computer or a supported external runtime to OR3 Cloud without a VPN or pasted token. |
 | `or3-intern chat` | Interactive runner-backed chat. |

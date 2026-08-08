@@ -51,6 +51,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Install Linux build dependencies
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install --yes libsqlite3-dev
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -58,7 +61,11 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o dist/or3-intern ./cmd/or3-intern
+          if [ "$GOOS" = 'linux' ]; then
+            go build -trimpath -ldflags="-s -w -linkmode external -extldflags '-static'" -o dist/or3-intern ./cmd/or3-intern
+          else
+            go build -trimpath -ldflags="-s -w" -o dist/or3-intern ./cmd/or3-intern
+          fi
           tar -C dist -czf "or3-intern-${GOOS}-${GOARCH}.tar.gz" or3-intern
       - name: Smoke test archive and SQLite vector runtime
         env:
@@ -72,13 +79,16 @@ jobs:
           ./smoke/or3-intern connect --help | grep -F 'openclaw'
           ./smoke/or3-intern connect --help | grep -F 'hermes'
           go test ./internal/db -run '^TestOpen_CreatesDB$' -count=1
+      - name: Smoke test the Linux archive on Alpine
+        if: matrix.goos == 'linux'
+        run: docker run --rm -v "$PWD/smoke:/smoke:ro" alpine:3.20 /smoke/or3-intern version
       - uses: actions/upload-artifact@v4
         with:
           name: or3-intern-${{ matrix.goos }}-${{ matrix.goarch }}
           path: or3-intern-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
 
   release:
-    needs: npm
+    needs: binaries
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -93,7 +103,7 @@ jobs:
           files: dist/*.tar.gz
 
   npm:
-    needs: binaries
+    needs: release
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -131,6 +141,11 @@ jobs:
           npm pack --json --prefix packages/or3 > packages/or3/pack.json
           npm test --prefix clients/typescript
           npm pack --json --prefix clients/typescript > clients/typescript/pack.json
+      - name: Smoke-test the released one-command bootstrap
+        working-directory: packages/or3
+        run: |
+          TARBALL="$(node -e "console.log(require('./pack.json')[0].filename)")"
+          npm exec --yes --package="./$TARBALL" -- or3 intern --help
       - name: Publish qualified TypeScript client tarball
         working-directory: clients/typescript
         run: |

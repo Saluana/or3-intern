@@ -276,6 +276,28 @@ func TestServiceAuthMiddleware_RateLimitsFailedBearerAttempts(t *testing.T) {
 	}
 }
 
+func TestServiceAuthFailureTrackerSweepsAndBoundsCredentialKeys(t *testing.T) {
+	tracker := &serviceAuthFailureTracker{}
+	now := time.Now().UTC()
+	for i := 0; i < serviceAuthFailureMaxEntries+32; i++ {
+		tracker.Record([]string{fmt.Sprintf("auth:credential:%d", i)}, now)
+	}
+	tracker.mu.Lock()
+	count := len(tracker.failures)
+	tracker.mu.Unlock()
+	if count > serviceAuthFailureMaxEntries {
+		t.Fatalf("expected at most %d entries, got %d", serviceAuthFailureMaxEntries, count)
+	}
+
+	tracker.Record([]string{"auth:credential:fresh"}, now.Add(serviceAuthFailureWindow+time.Second))
+	tracker.mu.Lock()
+	count = len(tracker.failures)
+	tracker.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected expired credential keys to be swept, got %d entries", count)
+	}
+}
+
 func TestValidateServiceAuthorization(t *testing.T) {
 	secret := strings.Repeat("s", 32)
 	now := time.Unix(1_700_000_000, 0)
@@ -1175,7 +1197,6 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	reqBody := strings.NewReader(`{
 		"changes":[
 			{"section":"provider","field":"provider_temperature","op":"set","value":"0.5"},
-			{"section":"context","field":"context_pressure_warning","op":"set","value":"75"},
 			{"section":"service","field":"service_enabled","op":"toggle"},
 			{"section":"channels","channel":"slack","field":"access","op":"choose","value":"allowlist"}
 		]
@@ -1199,14 +1220,28 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	if server.controlSvc == nil || server.controlSvc.Config.Provider.Temperature != 0.5 {
 		t.Fatalf("expected cached controlplane config update, got %#v", server.controlSvc)
 	}
-	if loaded.Context.Pressure.WarningPercent != 75 {
-		t.Fatalf("expected context pressure warning update, got %d", loaded.Context.Pressure.WarningPercent)
-	}
 	if !loaded.Service.Enabled {
 		t.Fatal("expected service_enabled toggle to set true")
 	}
 	if loaded.Channels.Slack.InboundPolicy != config.InboundPolicyAllowlist {
 		t.Fatalf("expected slack allowlist policy, got %q", loaded.Channels.Slack.InboundPolicy)
+	}
+}
+
+func TestServiceConfigureApplyRejectsLegacyContextField(t *testing.T) {
+	cfg := config.Default()
+	server := &serviceServer{config: cfg, configPath: filepath.Join(t.TempDir(), "or3-intern.json")}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/configure/apply", strings.NewReader(`{"changes":[{"section":"context","field":"context_pressure_warning","op":"set","value":"75"}]}`))
+	req = req.WithContext(context.WithValue(req.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigure(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected legacy context update to be rejected, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unsupported field update") {
+		t.Fatalf("expected a clear unsupported-field error, got %s", rec.Body.String())
 	}
 }
 

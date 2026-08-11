@@ -309,40 +309,6 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Channels.Email.SMTPPort <= 0 {
 		cfg.Channels.Email.SMTPPort = 587
 	}
-	if strings.TrimSpace(cfg.Context.Mode) == "" {
-		cfg.Context.Mode = "quality"
-	}
-	switch cfg.Context.Mode {
-	case "poor":
-		if cfg.Context.MaxInputTokens <= 0 {
-			cfg.Context.MaxInputTokens = 5000
-		}
-	case "balanced":
-		if cfg.Context.MaxInputTokens <= 0 {
-			cfg.Context.MaxInputTokens = 8000
-		}
-	case "quality", "custom":
-		if cfg.Context.MaxInputTokens <= 0 {
-			cfg.Context.MaxInputTokens = 16000
-		}
-	default:
-		return cfg, fmt.Errorf("invalid context.mode %q: must be poor, balanced, quality, or custom", cfg.Context.Mode)
-	}
-	if cfg.Context.OutputReserveTokens <= 0 {
-		cfg.Context.OutputReserveTokens = 1200
-	}
-	if cfg.Context.SafetyMarginTokens < 0 {
-		cfg.Context.SafetyMarginTokens = 0
-	}
-	if cfg.Context.Pressure.WarningPercent <= 0 {
-		cfg.Context.Pressure.WarningPercent = 70
-	}
-	if cfg.Context.Pressure.HighPercent <= cfg.Context.Pressure.WarningPercent {
-		cfg.Context.Pressure.HighPercent = cfg.Context.Pressure.WarningPercent + 10
-	}
-	if cfg.Context.Pressure.EmergencyPercent <= cfg.Context.Pressure.HighPercent {
-		cfg.Context.Pressure.EmergencyPercent = cfg.Context.Pressure.HighPercent + 10
-	}
 	if cfg.Skills.MaxRunSeconds <= 0 {
 		cfg.Skills.MaxRunSeconds = 30
 	}

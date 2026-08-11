@@ -2,6 +2,7 @@ package main
 
 import (
 	"or3-intern/internal/artifacts"
+	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/memory"
 	"or3-intern/internal/providers"
@@ -43,7 +44,22 @@ func (s *serviceServer) serviceEmbedProvider() *providers.Client {
 	if s == nil {
 		return nil
 	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
 	return s.embedProvider
+}
+
+// configAndEmbedProviderSnapshot returns the embedding client that belongs to
+// the same configuration snapshot. Embedding settings can change at runtime,
+// so callers that initialize a configuration-dependent service must not mix
+// the old client with the new model routing (or vice versa).
+func (s *serviceServer) configAndEmbedProviderSnapshot() (config.Config, *providers.Client) {
+	if s == nil {
+		return config.Config{}, nil
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return config.Clone(s.config), s.embedProvider
 }
 
 func (s *serviceServer) serviceMemRetriever() *memory.Retriever {
@@ -64,6 +80,8 @@ func (s *serviceServer) applyHostDeps(host serviceHostDeps) {
 	if s == nil {
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if host.DB != nil {
 		s.database = host.DB
 	}

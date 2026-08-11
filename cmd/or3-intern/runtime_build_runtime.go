@@ -17,10 +17,9 @@ import (
 	"or3-intern/internal/runners"
 )
 
-func buildServiceJobRegistry(cmd string) *jobs.Registry {
-	if cmd != "service" {
-		return nil
-	}
+// buildRuntimeJobRegistry keeps runner-chat event delivery available for every
+// command that can start a turn, including the one-shot foreground agent.
+func buildRuntimeJobRegistry() *jobs.Registry {
 	return jobs.NewRegistry(0, 0)
 }
 

@@ -986,8 +986,6 @@ func sectionStatus(cfg config.Config, section string) string {
 		return emptyAsNone(cfg.DBPath) + " · " + emptyAsNone(cfg.ArtifactsDir)
 	case "runtime":
 		return fmt.Sprintf("session=%s · workers=%d · consolidation=%t", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.ConsolidationEnabled)
-	case "context":
-		return fmt.Sprintf("mode=%s", cfg.Context.Mode)
 	case "workspace":
 		return fmt.Sprintf("%s", emptyAsNone(cfg.WorkspaceDir))
 	case "skills":
@@ -1080,9 +1078,7 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "runtime_profile", Label: "Runtime profile", Description: "Preset hardening posture for local or hosted deployments.", Kind: configureFieldChoice, Value: profileValue, Choices: profileChoices, ChoiceIndex: indexOfChoice(profileChoices, profileValue)},
 			{Key: "runtime_bootstrap_max_chars", Label: "Bootstrap max chars", Description: "Max chars per bootstrap file included in prompts.", Kind: configureFieldText, Value: formatInt(cfg.BootstrapMaxChars), EmptyHint: "20000"},
 			{Key: "runtime_bootstrap_total_chars", Label: "Bootstrap total max chars", Description: "Total bootstrap prompt budget across files.", Kind: configureFieldText, Value: formatInt(cfg.BootstrapTotalMaxChars), EmptyHint: "150000"},
-			{Key: "runtime_session_cache", Label: "Session cache limit", Description: "Cached session count for runtime state.", Kind: configureFieldText, Value: formatInt(cfg.SessionCache), EmptyHint: "64"},
 			{Key: "runtime_history_max", Label: "History max messages", Description: "Conversation messages retained in active prompt history.", Kind: configureFieldText, Value: formatInt(cfg.HistoryMax), EmptyHint: "40"},
-			{Key: "runtime_max_tool_bytes", Label: "Max tool bytes", Description: "Max tool output bytes before artifact spillover.", Kind: configureFieldText, Value: formatInt(cfg.MaxToolBytes), EmptyHint: "98304"},
 			{Key: "runtime_max_media_bytes", Label: "Max media bytes", Description: "Largest media payload accepted by the runtime.", Kind: configureFieldText, Value: formatInt(cfg.MaxMediaBytes), EmptyHint: "20971520"},
 			{Key: "runtime_memory_retrieve", Label: "Memory retrieve limit", Description: "How many long-term memory hits are injected into prompts.", Kind: configureFieldText, Value: formatInt(cfg.MemoryRetrieve), EmptyHint: "8"},
 			{Key: "runtime_vector_k", Label: "Vector search K", Description: "Semantic memory candidate count before ranking.", Kind: configureFieldText, Value: formatInt(cfg.VectorK), EmptyHint: "8"},
@@ -1095,24 +1091,6 @@ func buildSectionFieldsRaw(cfg config.Config, section, cwd string) []configureFi
 			{Key: "runtime_consolidation_max_messages", Label: "Consolidation max messages", Description: "Max messages summarized in one consolidation pass.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationMaxMessages), EmptyHint: "50"},
 			{Key: "runtime_consolidation_max_input_chars", Label: "Consolidation max input chars", Description: "Prompt budget for consolidation transcript input.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationMaxInputChars), EmptyHint: "12000"},
 			{Key: "runtime_consolidation_async_timeout", Label: "Consolidation async timeout", Description: "Timeout for async consolidation passes, in seconds.", Kind: configureFieldText, Value: formatInt(cfg.ConsolidationAsyncTimeoutSeconds), EmptyHint: "30"},
-		}
-	case "context":
-		modeChoices := []string{"poor", "balanced", "quality", "custom"}
-		modeValue := cfg.Context.Mode
-		if strings.TrimSpace(modeValue) == "" {
-			modeValue = "quality"
-		}
-		return []configureField{
-			{Key: "context_mode", Label: "Context mode", Description: "Packet budget preset. Existing configs stay quality-leaning unless changed.", Kind: configureFieldChoice, Value: modeValue, Choices: modeChoices, ChoiceIndex: indexOfChoice(modeChoices, modeValue)},
-			{Key: "context_retrieval_multiplier", Label: "Candidate multiplier", Description: "How many retrieval candidates to consider before budgeted packing.", Kind: configureFieldText, Value: formatInt(cfg.Context.Retrieval.CandidateMultiplier), EmptyHint: "3"},
-			{Key: "context_retrieval_min_score", Label: "Minimum retrieval score", Description: "Minimum score for memory/document candidates before packing.", Kind: configureFieldText, Value: formatFloat(cfg.Context.Retrieval.MinScore), EmptyHint: "0.03"},
-			{Key: "context_pressure_warning", Label: "Pressure warning percent", Description: "Context utilization level that starts soft pressure warnings.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.WarningPercent), EmptyHint: "70"},
-			{Key: "context_pressure_high", Label: "Pressure high percent", Description: "Context utilization level that triggers stronger compression.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.HighPercent), EmptyHint: "85"},
-			{Key: "context_pressure_emergency", Label: "Pressure emergency percent", Description: "Context utilization level that triggers emergency pruning.", Kind: configureFieldText, Value: formatInt(cfg.Context.Pressure.EmergencyPercent), EmptyHint: "95"},
-			{Key: "context_task_card_enabled", Label: "Task card", Description: "Track current goal, plan, decisions, refs, and active files across turns.", Kind: configureFieldToggle, Value: onOff(cfg.Context.TaskCard.Enabled)},
-			{Key: "context_task_card_max_refs", Label: "Task card max refs", Description: "Maximum source refs retained on the active task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxRefs), EmptyHint: "12"},
-			{Key: "context_task_card_max_plan", Label: "Task card max plan items", Description: "Maximum active plan items retained on the task card.", Kind: configureFieldText, Value: formatInt(cfg.Context.TaskCard.MaxPlanItems), EmptyHint: "8"},
-			{Key: "context_artifact_summary_chars", Label: "Artifact summary chars", Description: "Bounded artifact/tool-output summary size stored for retrieval.", Kind: configureFieldText, Value: formatInt(cfg.Context.Artifacts.SummaryMaxChars), EmptyHint: "500"},
 		}
 	case "workspace":
 		workspace := cfg.WorkspaceDir
@@ -1329,9 +1307,7 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"runtime_profile":                       "A preset safety posture. Hosted profiles are stricter for servers; local-dev is more permissive. Warning: changing this can enable or block tools at startup.",
 	"runtime_bootstrap_max_chars":           "Maximum text OR3 reads from each instruction or memory file. Lower values make prompts smaller; higher values include more background but cost more tokens.",
 	"runtime_bootstrap_total_chars":         "Maximum combined text OR3 reads from all bootstrap files. Warning: setting this too high can make every request slower and more expensive.",
-	"runtime_session_cache":                 "How many active conversations OR3 keeps ready in memory. Most users should leave this alone unless running many separate sessions.",
 	"runtime_history_max":                   "How many recent chat messages stay directly visible to the AI. Lower values are faster; higher values preserve more short-term context but use more tokens.",
-	"runtime_max_tool_bytes":                "Maximum size of a tool result kept directly in chat. Larger results may be saved as artifacts instead. Warning: very high values can overwhelm the AI prompt.",
 	"runtime_max_media_bytes":               "Largest image or attachment OR3 will accept. Warning: raising this can use more disk space and memory.",
 	"runtime_memory_retrieve":               "How many saved memory items OR3 may add to a prompt. Higher values can improve recall but may add old or distracting context.",
 	"runtime_vector_k":                      "Advanced memory search setting: how many meaning-based memory matches to consider. Most users should leave this near the default.",
@@ -1344,16 +1320,6 @@ var helpfulSectionFieldDescriptions = map[string]string{
 	"runtime_consolidation_max_messages":    "Maximum messages summarized in one memory-cleanup pass. Higher values can improve summaries but make each cleanup slower.",
 	"runtime_consolidation_max_input_chars": "Maximum transcript text sent to the memory-summary model. Higher values preserve more detail but cost more and can timeout on small models.",
 	"runtime_consolidation_async_timeout":   "How long background memory cleanup may run before OR3 gives up. Increase this if summaries timeout on slower providers.",
-	"context_mode":                          "Overall prompt-budget preset. Quality includes more context; poor is smaller and cheaper; custom preserves your manual budget values.",
-	"context_retrieval_multiplier":          "How many extra memory candidates OR3 checks before choosing what fits. Higher values may find better memories but can slow searches.",
-	"context_retrieval_min_score":           "How relevant a memory must be before OR3 includes it. Higher values are stricter; too high can make OR3 forget useful context.",
-	"context_pressure_warning":              "Prompt fullness percentage where OR3 starts being careful about space. Lower values make it compress earlier.",
-	"context_pressure_high":                 "Prompt fullness percentage where OR3 becomes more aggressive about trimming less important context.",
-	"context_pressure_emergency":            "Prompt fullness percentage where OR3 may drop low-priority context to avoid model errors. Warning: setting this too high can cause over-limit failures.",
-	"context_task_card_enabled":             "Keeps a small running note of the current task, plan, decisions, references, and active files so long jobs stay coherent.",
-	"context_task_card_max_refs":            "Maximum references kept on the task card. Higher values remember more links/files but use more prompt space.",
-	"context_task_card_max_plan":            "Maximum plan items kept on the task card. Higher values help detailed projects; lower values keep the prompt cleaner.",
-	"context_artifact_summary_chars":        "Maximum characters saved when OR3 summarizes a large artifact or tool output for later recall. Higher values keep more detail but use more storage/context.",
 	"workspace_dir":                         "The main folder OR3 should treat as your project. File tools and document indexing usually work relative to this folder.",
 	"workspace_allowed_dir":                 "Optional extra folder OR3 may access. Leave blank unless you intentionally need a second allowed location.",
 	"skills_max_run_seconds":                "Maximum time a skill command may run. Lower values stop stuck skills sooner; higher values help long-running skills finish.",

@@ -13,15 +13,19 @@ import (
 	"or3-intern/internal/bus"
 )
 
-const defaultDeduplicatorTTL = 5 * time.Minute
+const (
+	defaultDeduplicatorTTL        = 5 * time.Minute
+	defaultDeduplicatorMaxEntries = 4096
+)
 
 // IngressDeduplicator tracks recently seen message identifiers and blocks
 // duplicate delivery within a configurable window. It is safe for concurrent
 // use.
 type IngressDeduplicator struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
-	ttl  time.Duration
+	mu         sync.Mutex
+	seen       map[string]time.Time
+	ttl        time.Duration
+	maxEntries int
 }
 
 // NewIngressDeduplicator creates a deduplicator with the given TTL (how long a
@@ -31,20 +35,34 @@ func NewIngressDeduplicator(ttl time.Duration) *IngressDeduplicator {
 		ttl = defaultDeduplicatorTTL
 	}
 	return &IngressDeduplicator{
-		seen: make(map[string]time.Time),
-		ttl:  ttl,
+		seen:       make(map[string]time.Time),
+		ttl:        ttl,
+		maxEntries: defaultDeduplicatorMaxEntries,
 	}
 }
 
 // IsDuplicate returns true when key was already seen within the TTL window.
 // Evicts stale entries on each call.
 func (d *IngressDeduplicator) IsDuplicate(key string) bool {
+	if d == nil || strings.TrimSpace(key) == "" {
+		return false
+	}
 	now := time.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.seen == nil {
+		d.seen = make(map[string]time.Time)
+	}
 	d.evictExpired(now)
 	if _, exists := d.seen[key]; exists {
 		return true
+	}
+	maxEntries := d.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = defaultDeduplicatorMaxEntries
+	}
+	for len(d.seen) >= maxEntries {
+		d.evictOldest()
 	}
 	d.seen[key] = now
 	return false
@@ -56,6 +74,23 @@ func (d *IngressDeduplicator) evictExpired(now time.Time) {
 		if now.Sub(t) >= d.ttl {
 			delete(d.seen, k)
 		}
+	}
+}
+
+// evictOldest must be called with d.mu held and only while d.seen is nonempty.
+func (d *IngressDeduplicator) evictOldest() {
+	var oldestKey string
+	var oldest time.Time
+	found := false
+	for key, seenAt := range d.seen {
+		if !found || seenAt.Before(oldest) {
+			oldestKey = key
+			oldest = seenAt
+			found = true
+		}
+	}
+	if found {
+		delete(d.seen, oldestKey)
 	}
 }
 
@@ -83,6 +118,13 @@ type Channel interface {
 	Deliver(ctx context.Context, to, text string, meta map[string]any) error
 }
 
+// ConnectionStatusProvider is optionally implemented by channels that keep a
+// live inbound connection. Values are intended for diagnostics: connected,
+// reconnecting, failed, or stopped.
+type ConnectionStatusProvider interface {
+	ConnectionStatus() string
+}
+
 // TypingIndicator is optionally implemented by channels that can show a
 // transient "assistant is working" state while a turn is being processed.
 type TypingIndicator interface {
@@ -93,12 +135,22 @@ type TypingIndicator interface {
 type Manager struct {
 	mu       sync.RWMutex
 	channels map[string]Channel
-	started  map[string]bool
+	started  map[string]*channelStart
+	starting map[string]*channelStart
+}
+
+type channelStart struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewManager constructs an empty channel manager.
 func NewManager() *Manager {
-	return &Manager{channels: map[string]Channel{}, started: map[string]bool{}}
+	return &Manager{
+		channels: map[string]Channel{},
+		started:  map[string]*channelStart{},
+		starting: map[string]*channelStart{},
+	}
 }
 
 // Register adds ch under its normalized name.
@@ -131,6 +183,47 @@ func (m *Manager) Names() []string {
 	return out
 }
 
+// ConnectionStatuses returns the current diagnostic state for registered
+// channels. Channels without a persistent inbound connection report unknown.
+func (m *Manager) ConnectionStatuses() map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	m.mu.RLock()
+	channels := make(map[string]Channel, len(m.channels))
+	started := make(map[string]bool, len(m.started))
+	starting := make(map[string]bool, len(m.starting))
+	for name, ch := range m.channels {
+		channels[name] = ch
+	}
+	for name := range m.started {
+		started[name] = true
+	}
+	for name := range m.starting {
+		starting[name] = true
+	}
+	m.mu.RUnlock()
+	statuses := make(map[string]string, len(channels))
+	for name, ch := range channels {
+		if provider, ok := ch.(ConnectionStatusProvider); ok {
+			if status := provider.ConnectionStatus(); status != "" && status != "stopped" {
+				statuses[name] = status
+				continue
+			}
+		}
+		if !started[name] && !starting[name] {
+			statuses[name] = "stopped"
+			continue
+		}
+		if provider, ok := ch.(ConnectionStatusProvider); ok {
+			statuses[name] = provider.ConnectionStatus()
+			continue
+		}
+		statuses[name] = "unknown"
+	}
+	return statuses
+}
+
 // StartAll starts every registered channel in name order.
 func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
 	for _, name := range m.Names() {
@@ -143,22 +236,42 @@ func (m *Manager) StartAll(ctx context.Context, eventBus *bus.Bus) error {
 
 // Start starts the named channel if it is not already running.
 func (m *Manager) Start(ctx context.Context, name string, eventBus *bus.Bus) error {
+	name = strings.TrimSpace(strings.ToLower(name))
 	ch, err := m.get(name)
 	if err != nil {
 		return err
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
-	if m.started[name] {
+	if m.started[name] != nil || m.starting[name] != nil {
 		m.mu.Unlock()
 		return nil
 	}
+	startCtx, cancel := context.WithCancel(ctx)
+	start := &channelStart{cancel: cancel, done: make(chan struct{})}
+	m.starting[name] = start
 	m.mu.Unlock()
-	if err := ch.Start(ctx, eventBus); err != nil {
+
+	err = ch.Start(startCtx, eventBus)
+	m.mu.Lock()
+	if m.starting[name] == start {
+		delete(m.starting, name)
+		if err == nil && startCtx.Err() == nil {
+			m.started[name] = start
+		}
+	}
+	close(start.done)
+	m.mu.Unlock()
+	if err != nil {
+		start.cancel()
 		return err
 	}
-	m.mu.Lock()
-	m.started[name] = true
-	m.mu.Unlock()
+	if err := startCtx.Err(); err != nil {
+		start.cancel()
+		return err
+	}
 	return nil
 }
 
@@ -178,18 +291,36 @@ func (m *Manager) StopAll(ctx context.Context) error {
 
 // Stop stops the named channel if it is running.
 func (m *Manager) Stop(ctx context.Context, name string) error {
+	name = strings.TrimSpace(strings.ToLower(name))
 	ch, err := m.get(name)
 	if err != nil {
 		return err
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
-	started := m.started[name]
+	running := m.started[name]
+	start := m.starting[name]
+	if start != nil {
+		start.cancel()
+	}
+	if running != nil {
+		running.cancel()
+	}
 	m.mu.Unlock()
-	if !started {
+	if running == nil && start == nil {
 		return nil
 	}
 	if err := ch.Stop(ctx); err != nil {
 		return err
+	}
+	if start != nil {
+		select {
+		case <-start.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	m.mu.Lock()
 	delete(m.started, name)

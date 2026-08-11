@@ -1,9 +1,9 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 )
@@ -22,54 +22,76 @@ type helpItem struct {
 	Description string
 }
 
-var rootHelpSections = []struct {
+type rootHelpSection struct {
 	Title string
 	Items []helpItem
-}{
-	{
-		Title: "Simple commands",
-		Items: []helpItem{
-			{Name: "setup", Description: "Guided first-run setup with scenario and safety choices"},
-			{Name: "connect", Description: "Advanced remote access; requires an explicitly verified Cloud URL"},
-			{Name: "chat", Description: "Start chatting with OR3"},
-			{Name: "health", Description: "Check if OR3 is ready to work"},
-			{Name: "status", Description: "Check what OR3 can access and what needs attention"},
-			{Name: "settings", Description: "Review and update your settings"},
-			{Name: "help", Description: "Show help for simple or advanced commands"},
-		},
-	},
-	{
-		Title: "Advanced commands",
-		Items: []helpItem{
-			{Name: "configure", Description: "Advanced settings wizard for manual or scripted edits"},
-			{Name: "init", Description: "Compatibility alias for setup; use `setup` instead"},
-			{Name: "config-path", Description: "Print the resolved config.json path"},
-			{Name: "chat", Description: "Interactive CLI session"},
-			{Name: "serve", Description: "Run enabled channels, triggers, heartbeat, cron, and workers"},
-			{Name: "service", Description: "Run the authenticated internal HTTP API"},
-			{Name: "agent", Description: "Run a one-shot foreground turn"},
-			{Name: "version", Description: "Print the binary version"},
-		},
-	},
-	{
-		Title: "Operator tools",
-		Items: []helpItem{
-			{Name: "doctor", Description: "Advanced diagnostics; use `health` for normal checks"},
-			{Name: "access", Description: "Set simple Reader, Operator, or Admin access for channels"},
-			{Name: "cron", Description: "Manage scheduled cron jobs (add, list, show, remove, run, pause, resume)"},
-			{Name: "capabilities", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
-			{Name: "embeddings", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
-			{Name: "secrets", Description: "Manage encrypted secret references stored in SQLite"},
-			{Name: "audit", Description: "Inspect or verify the append-only audit chain"},
-			{Name: "skills", Description: "List, inspect, search, install, update, check, and remove skills"},
-			{Name: "approvals", Description: "Inspect and resolve approval requests and allowlists"},
-			{Name: "devices", Description: "Issue, list, rotate, and revoke device tokens"},
-			{Name: "pairing", Description: "Create and resolve app or channel pairing requests"},
-			{Name: "scope", Description: "Link session keys to a shared history scope"},
-			{Name: "migrate-jsonl", Description: "Import legacy session history from JSONL"},
-			{Name: "migrate-openclaw", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
-		},
-	},
+}
+
+type rootCommand struct {
+	Name        string
+	Section     string
+	Description string
+}
+
+var rootCommandCatalog = []rootCommand{
+	{Name: "setup", Section: "Simple commands", Description: "Guided first-run setup with scenario and safety choices"},
+	{Name: "chat", Section: "Simple commands", Description: "Start chatting with OR3"},
+	{Name: "health", Section: "Simple commands", Description: "Check if OR3 is ready to work"},
+	{Name: "status", Section: "Simple commands", Description: "Check what OR3 can access and what needs attention"},
+	{Name: "settings", Section: "Simple commands", Description: "Review and update your settings"},
+	{Name: "help", Section: "Simple commands", Description: "Show help for simple or advanced commands"},
+	{Name: "configure", Section: "Advanced commands", Description: "Advanced settings wizard for manual or scripted edits"},
+	{Name: "init", Section: "Advanced commands", Description: "Compatibility alias for setup; use `setup` instead"},
+	{Name: "config-path", Section: "Advanced commands", Description: "Print the resolved config.json path"},
+	{Name: "connect", Section: "Advanced commands", Description: "Advanced remote access; requires an explicitly verified Cloud URL"},
+	{Name: "serve", Section: "Advanced commands", Description: "Run enabled channels, triggers, heartbeat, cron, and workers"},
+	{Name: "service", Section: "Advanced commands", Description: "Run the authenticated internal HTTP API"},
+	{Name: "agent", Section: "Advanced commands", Description: "Run a one-shot foreground turn"},
+	{Name: "version", Section: "Advanced commands", Description: "Print the binary version"},
+	{Name: "doctor", Section: "Operator tools", Description: "Advanced diagnostics; use `health` for normal checks"},
+	{Name: "access", Section: "Operator tools", Description: "Set simple Reader, Operator, or Admin access for channels"},
+	{Name: "cron", Section: "Operator tools", Description: "Manage scheduled cron jobs (add, list, show, remove, run, pause, resume)"},
+	{Name: "capabilities", Section: "Operator tools", Description: "Inspect runtime posture, ingress policy, approvals, and profiles"},
+	{Name: "embeddings", Section: "Operator tools", Description: "Inspect or rebuild stored memory and doc embeddings after provider/model changes"},
+	{Name: "memory", Section: "Operator tools", Description: "Search, add, and pin long-term memory entries"},
+	{Name: "secrets", Section: "Operator tools", Description: "Manage encrypted secret references stored in SQLite"},
+	{Name: "audit", Section: "Operator tools", Description: "Inspect or verify the append-only audit chain"},
+	{Name: "skills", Section: "Operator tools", Description: "List, inspect, search, install, update, check, and remove skills"},
+	{Name: "approvals", Section: "Operator tools", Description: "Inspect and resolve approval requests and allowlists"},
+	{Name: "devices", Section: "Operator tools", Description: "Issue, list, rotate, and revoke device tokens"},
+	{Name: "pairing", Section: "Operator tools", Description: "Create and resolve app or channel pairing requests"},
+	{Name: "scope", Section: "Operator tools", Description: "Link session keys to a shared history scope"},
+	{Name: "migrate-jsonl", Section: "Operator tools", Description: "Import legacy session history from JSONL"},
+	{Name: "migrate-openclaw", Section: "Operator tools", Description: "Import a local OpenClaw agent into or3-intern files, daily notes, and dreams"},
+}
+
+var rootHelpSections = buildRootHelpSections(rootCommandCatalog)
+
+func buildRootHelpSections(commands []rootCommand) []rootHelpSection {
+	sectionOrder := []string{"Simple commands", "Advanced commands", "Operator tools"}
+	sections := make([]rootHelpSection, 0, len(sectionOrder))
+	byTitle := make(map[string]int, len(sectionOrder))
+	for _, title := range sectionOrder {
+		byTitle[title] = len(sections)
+		sections = append(sections, rootHelpSection{Title: title})
+	}
+	for _, command := range commands {
+		index, ok := byTitle[command.Section]
+		if !ok {
+			continue
+		}
+		sections[index].Items = append(sections[index].Items, helpItem{Name: command.Name, Description: command.Description})
+	}
+	return sections
+}
+
+func isKnownRootCommand(command string) bool {
+	for _, candidate := range rootCommandCatalog {
+		if candidate.Name == command {
+			return true
+		}
+	}
+	return false
 }
 
 var helpTopics = map[string]helpCommand{
@@ -79,7 +101,7 @@ var helpTopics = map[string]helpCommand{
 		Description: []string{
 			"Remote Connect is withheld from the default managed Cloud path until its device flow passes a public staging smoke.",
 			"Provide --cloud-url (or OR3_CONNECT_CLOUD_URL) only for an explicitly verified staging or self-hosted endpoint. The former https://or3.chat default is not used.",
-			"Local and offline use never requires an account; use `npx @or3/connect intern` when the matching Intern bootstrap release is available.",
+			"Local and offline use never requires an account. Install with `npx @or3/connect intern` or from this checkout with `./scripts/install-cli.sh`.",
 			"Credentials are saved with owner-only permissions and tunnel secrets are never placed in process arguments.",
 		},
 		Subcommands: []helpItem{
@@ -97,10 +119,10 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--no-browser", Description: "Print the sign-in link without opening it"},
 			{Name: "--cloud-url <url>", Description: "Advanced: use an explicitly verified self-hosted or staging endpoint"},
 		},
-		Examples: []string{"npx @or3/connect intern", "or3-intern connect --cloud-url https://staging.example.test", "npx @or3/connect status", "npx @or3/connect disconnect"},
+		Examples: []string{"or3-intern connect --cloud-url https://staging.example.test", "or3-intern connect status", "or3-intern connect disconnect"},
 	},
 	"configure": {
-		Usage:   "or3-intern configure [--section provider|storage|runtime|context|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",
+		Usage:   "or3-intern configure [--section provider|storage|runtime|workspace|skills|auth|security|hardening|session|automation|channels|service] ...",
 		Summary: "Advanced configuration wizard for manual or scripted edits.",
 		Description: []string{
 			"Configure is the advanced configuration wizard. Most users should use `or3-intern setup` for first-run and `or3-intern settings` for day-to-day changes.",
@@ -111,7 +133,7 @@ var helpTopics = map[string]helpCommand{
 			"Use repeatable --section flags for targeted updates, or run without flags to choose sections interactively.",
 		},
 		Flags: []helpItem{
-			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, runtime, context, workspace, skills, auth, security, hardening, session, automation, channels, service"},
+			{Name: "--section <name>", Description: "Repeatable section filter: provider, storage, runtime, workspace, skills, auth, security, hardening, session, automation, channels, service"},
 		},
 		Examples: []string{"or3-intern configure", "or3-intern configure --section provider --section security", "or3-intern configure --section channels"},
 	},
@@ -125,15 +147,15 @@ var helpTopics = map[string]helpCommand{
 		Examples: []string{"or3-intern setup"},
 	},
 	"settings": {
-		Usage:   "or3-intern settings [--section provider|workspace|devices|safety|channels|tools|memory|advanced] [--export path|-] [--advanced]",
+		Usage:   "or3-intern settings [--section provider|workspace|safety|channels|memory|advanced] [--export path|-] [--advanced]",
 		Summary: "Open the canonical settings flow for reviewing and updating your setup.",
 		Description: []string{
 			"Settings is the recommended entrypoint for configuration. Setup, init, configure, and doctor --fix stay available for first-run, compatibility, and repair workflows.",
-			"Shows a task-based settings home for AI Provider, Workspace Folder, Connected Devices, Safety Level, Channels, Tools, Memory, and Advanced.",
+			"Shows a task-based settings home for AI Provider, Workspace Folder, Safety, Channels, Memory, and Advanced options.",
 			"Use --section to jump to a task, or --export to write the current advanced JSON config without making JSON editing the default path.",
 		},
 		Flags: []helpItem{
-			{Name: "--section <name>", Description: "Open a task section: provider, workspace, devices, safety, channels, tools, memory, advanced"},
+			{Name: "--section <name>", Description: "Open a task section: provider, workspace, safety, channels, memory, advanced"},
 			{Name: "--export <path|->", Description: "Export current config JSON to a file or stdout"},
 			{Name: "--advanced", Description: "Show advanced settings actions on the home screen"},
 		},
@@ -172,7 +194,7 @@ var helpTopics = map[string]helpCommand{
 		Description: []string{
 			"This is the default command when no command is provided.",
 			"Inside chat, use /new to archive the current session into memory and then clear the live message history for a fresh conversation.",
-			"Use /status to inspect message counts, consolidation distance, context token pressure, retrieval settings, and tool limits.",
+			"Use /status to inspect the active session and runner state. Runner-specific context and tool permissions are managed by the selected runner.",
 		},
 		Examples: []string{"or3-intern chat"},
 	},
@@ -195,6 +217,17 @@ var helpTopics = map[string]helpCommand{
 			{Name: "--approval-token <token>", Description: "One-shot approval token to attach to the request"},
 		},
 		Examples: []string{"or3-intern agent -m \"hello\"", "or3-intern agent -m \"summarize this repo\" -s review"},
+	},
+	"access": {
+		Usage:   "or3-intern access <show|defaults|default|channel> ...",
+		Summary: "Set Reader, Operator, or Admin access profiles for local channels and the service.",
+		Subcommands: []helpItem{
+			{Name: "show", Description: "Show configured access-profile defaults and channel overrides"},
+			{Name: "defaults [reader|operator|admin]", Description: "Enable built-in profiles and optionally set the default"},
+			{Name: "default <reader|operator|admin>", Description: "Set the default access level"},
+			{Name: "channel <channel> <reader|operator|admin>", Description: "Set an access level for one channel or service"},
+		},
+		Examples: []string{"or3-intern access show", "or3-intern access default operator", "or3-intern access channel slack reader"},
 	},
 	"doctor": {
 		Usage:   "or3-intern doctor [--strict] [--json] [--fix] [--interactive] [--probe] [--area name] [--severity level] [--fixable-only]",
@@ -236,7 +269,7 @@ var helpTopics = map[string]helpCommand{
 	},
 	"capabilities": {
 		Usage:   "or3-intern capabilities [--channel name] [--trigger name] [--json]",
-		Summary: "Inspect the effective runtime posture, ingress policy, approvals, and access profiles.",
+		Summary: "Inspect the effective runtime posture, runner model, ingress policy, approvals, and access profiles.",
 		Flags: []helpItem{
 			{Name: "--channel <name>", Description: "Filter report to a specific channel"},
 			{Name: "--trigger <name>", Description: "Filter report to a specific trigger"},
@@ -257,6 +290,17 @@ var helpTopics = map[string]helpCommand{
 			{Name: "rebuild [memory|docs|all]", Description: "Regenerate persisted embeddings for memory notes, indexed docs, or both"},
 		},
 		Examples: []string{"or3-intern embeddings status", "or3-intern embeddings rebuild memory", "or3-intern embeddings rebuild all"},
+	},
+	"memory": {
+		Usage:   "or3-intern memory <search|add-note|pinned> ...",
+		Summary: "Search, add, and manage pinned long-term memory entries.",
+		Subcommands: []helpItem{
+			{Name: "search --session <key> [--global] [--top-k N] <query>", Description: "Search stored memory"},
+			{Name: "add-note --session <key> [--global] [--tags a,b] <text>", Description: "Store a durable memory note"},
+			{Name: "pinned get --session <key> [--global] [--key <k>]", Description: "Read pinned memory entries"},
+			{Name: "pinned set --session <key> [--global] --key <k> <content>", Description: "Create or update a pinned entry"},
+		},
+		Examples: []string{"or3-intern memory search --session cli:default \"project goals\"", "or3-intern memory add-note --session cli:default --tags project \"Use UTC timestamps\"", "or3-intern memory pinned get --session cli:default"},
 	},
 	"secrets": {
 		Usage:   "or3-intern secrets <set|delete|list|check|export|migrate-config> ...",
@@ -519,26 +563,79 @@ var helpTopics = map[string]helpCommand{
 	},
 }
 
-func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, bool, bool, error) {
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	fs := flag.NewFlagSet("or3-intern", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {}
+func parseRootCLIArgs(argv []string, stderr io.Writer) (string, []string, bool, bool, error) {
 	var cfgPath string
 	var showHelp bool
 	var unsafeDev bool
-	var advanced bool
-	fs.StringVar(&cfgPath, "config", "", "path to config.json")
-	fs.BoolVar(&showHelp, "help", false, "show help")
-	fs.BoolVar(&showHelp, "h", false, "show help")
-	fs.BoolVar(&unsafeDev, "unsafe-dev", false, "bypass startup safety gates for local development")
-	fs.BoolVar(&advanced, "advanced", false, "accepted for compatibility; root help is always complete")
-	if err := fs.Parse(argv); err != nil {
-		return "", nil, false, false, false, err
+	args := make([]string, 0, len(argv))
+	commandSeen := false
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		if arg == "--" {
+			args = append(args, argv[i+1:]...)
+			break
+		}
+		switch {
+		case arg == "--config":
+			if i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "-") {
+				return "", nil, false, false, fmt.Errorf("flag needs an argument: --config")
+			}
+			i++
+			cfgPath = argv[i]
+		case strings.HasPrefix(arg, "--config="):
+			cfgPath = strings.TrimPrefix(arg, "--config=")
+			if cfgPath == "" {
+				return "", nil, false, false, fmt.Errorf("flag needs an argument: --config")
+			}
+		case rootBoolFlag(arg, "--help", "-h"):
+			value, err := parseRootBoolFlag(arg, "--help", "-h")
+			if err != nil {
+				return "", nil, false, false, err
+			}
+			showHelp = value
+		case rootBoolFlag(arg, "--unsafe-dev", ""):
+			value, err := parseRootBoolFlag(arg, "--unsafe-dev", "")
+			if err != nil {
+				return "", nil, false, false, err
+			}
+			unsafeDev = value
+		default:
+			if !commandSeen && strings.HasPrefix(arg, "-") {
+				return "", nil, false, false, fmt.Errorf("unknown global option: %s", arg)
+			}
+			args = append(args, arg)
+			if !commandSeen {
+				commandSeen = true
+			}
+		}
 	}
-	return cfgPath, fs.Args(), showHelp, unsafeDev, advanced, nil
+	return cfgPath, args, showHelp, unsafeDev, nil
+}
+
+func rootBoolFlag(arg, long, short string) bool {
+	return arg == long ||
+		(short != "" && arg == short) ||
+		strings.HasPrefix(arg, long+"=") ||
+		(short != "" && strings.HasPrefix(arg, short+"="))
+}
+
+func parseRootBoolFlag(arg, long, short string) (bool, error) {
+	for _, name := range []string{long, short} {
+		if name == "" {
+			continue
+		}
+		if arg == name {
+			return true, nil
+		}
+		if strings.HasPrefix(arg, name+"=") {
+			value, err := strconv.ParseBool(strings.TrimPrefix(arg, name+"="))
+			if err != nil {
+				return false, fmt.Errorf("invalid boolean value for %s", name)
+			}
+			return value, nil
+		}
+	}
+	return false, fmt.Errorf("invalid root option: %s", arg)
 }
 
 func maybeHandleHelpRequest(args []string, stdout io.Writer) (bool, error) {
@@ -608,14 +705,14 @@ func bestHelpTopicKey(path []string) (string, bool) {
 }
 
 func printRootHelp(w io.Writer) {
-	printRootHelpMode(w)
+	printRootHelpMode(w, rootHelpSections, []string{"or3-intern setup", "or3-intern chat", "or3-intern health", "or3-intern status", "or3-intern settings"})
 }
 
 func printAdvancedRootHelp(w io.Writer) {
-	printRootHelpMode(w)
+	printRootHelpMode(w, rootHelpSections[1:], []string{"or3-intern configure --section provider", "or3-intern memory search --session cli:default \"project goals\"", "or3-intern capabilities", "or3-intern doctor"})
 }
 
-func printRootHelpMode(w io.Writer) {
+func printRootHelpMode(w io.Writer, sections []rootHelpSection, examples []string) {
 	_, _ = fmt.Fprintln(w, "or3-intern is a local-first agent runtime with chat, channels, memory, approvals, and service APIs.")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Usage:")
@@ -624,17 +721,17 @@ func printRootHelpMode(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  or3-intern help [command]")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Without a command, or3-intern starts interactive chat.")
-	for _, section := range rootHelpSections {
+	for _, section := range sections {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintf(w, "%s:\n", section.Title)
 		printHelpItems(w, section.Items)
 	}
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Global flags:")
-	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "--advanced", Description: "Accepted for compatibility; root help is always complete"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
+	printHelpItems(w, []helpItem{{Name: "--config <path>", Description: "Path to config.json; accepted before or after a command"}, {Name: "--unsafe-dev", Description: "Bypass startup safety gates for local development"}, {Name: "-h, --help", Description: "Show help for the root command or a subcommand"}})
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
-	for _, example := range []string{"or3-intern setup", "or3-intern chat", "or3-intern health", "or3-intern status", "or3-intern settings"} {
+	for _, example := range examples {
 		_, _ = fmt.Fprintf(w, "  %s\n", example)
 	}
 }

@@ -632,6 +632,36 @@ func TestListTerminalSessionsReturnsMostRecentFirst(t *testing.T) {
 	}
 }
 
+func TestTerminalSessionCapacityCountsOnlyRunningSessions(t *testing.T) {
+	now := time.Now().UTC()
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{
+		"term-exited-1": {Status: "exited", ExpiresAt: now.Add(time.Minute)},
+		"term-exited-2": {Status: "exited", ExpiresAt: now.Add(time.Minute)},
+		"term-exited-3": {Status: "exited", ExpiresAt: now.Add(time.Minute)},
+		"term-exited-4": {Status: "exited", ExpiresAt: now.Add(time.Minute)},
+	}}}
+
+	if got := server.bootstrapActiveTerminalCount(); got != 0 {
+		t.Fatalf("expected exited sessions to be excluded from active count, got %d", got)
+	}
+	if !server.reserveTerminalSession() {
+		t.Fatal("expected a retained exited session to leave terminal capacity available")
+	}
+	server.releaseTerminalSessionReservation()
+
+	server.terminals().mu.Lock()
+	for _, session := range server.terminals().sessions {
+		session.Status = "running"
+	}
+	server.terminals().mu.Unlock()
+	if got := server.bootstrapActiveTerminalCount(); got != serviceTerminalMaxSessions {
+		t.Fatalf("expected %d running sessions, got %d", serviceTerminalMaxSessions, got)
+	}
+	if server.reserveTerminalSession() {
+		t.Fatal("expected a full running-session quota to reject a reservation")
+	}
+}
+
 func TestTerminalShellArgs(t *testing.T) {
 	tests := []struct {
 		shell string

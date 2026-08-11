@@ -121,7 +121,7 @@ func TestRunConfigureWithIO_InteractiveSelection(t *testing.T) {
 		"2",
 		"/tmp/or3.sqlite",
 		"/tmp/artifacts",
-		"14",
+		"13",
 	}, "\n"))
 	var out strings.Builder
 
@@ -322,7 +322,6 @@ func TestBuildSectionFields_CoversExpandedConfigAreas(t *testing.T) {
 	cfg := config.Default()
 	sections := map[string][]string{
 		"runtime":    {"runtime_default_session", "runtime_worker_count", "runtime_consolidation_enabled", "runtime_consolidation_model"},
-		"context":    {"context_mode", "context_retrieval_multiplier", "context_task_card_enabled"},
 		"skills":     {"skills_quarantine", "skills_global_dir", "skills_clawhub_registry"},
 		"security":   {"security_secret_store_enabled", "security_network_allowed_hosts"},
 		"hardening":  {"hardening_sandbox_enabled", "hardening_sandbox_bwrap"},

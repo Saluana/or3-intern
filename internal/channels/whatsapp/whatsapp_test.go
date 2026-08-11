@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,6 +64,85 @@ func TestChannel_StartPublishesInboundMessage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for inbound whatsapp message")
+	}
+}
+
+func TestChannel_ReconnectsAfterBridgeDisconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var connections atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if connections.Add(1) == 1 {
+			return
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "message", "id": "after-reconnect", "chat": "group1", "from": "123", "text": "hello again", "isGroup": true})
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	b := bus.New(1)
+	ch := &Channel{
+		Config:         config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true},
+		reconnectDelay: func(int) time.Duration { return time.Millisecond },
+	}
+	if err := ch.Start(context.Background(), b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mustStopChannel(t, ch)
+	select {
+	case event := <-b.Channel():
+		if event.Message != "hello again" || event.SessionKey != "whatsapp:group1" {
+			t.Fatalf("unexpected reconnected event: %#v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reconnected WhatsApp event")
+	}
+	if connections.Load() < 2 {
+		t.Fatalf("expected a second WhatsApp bridge connection, got %d", connections.Load())
+	}
+}
+
+func TestChannel_StopCancelsAnInitialBridgeDial(t *testing.T) {
+	dialStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		dialStarted <- struct{}{}
+		<-release
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	ch := &Channel{Config: config.WhatsAppBridgeConfig{BridgeURL: "ws" + server.URL[len("http"):], OpenAccess: true}}
+	startErr := make(chan error, 1)
+	go func() { startErr <- ch.Start(context.Background(), bus.New(1)) }()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("bridge dial did not start")
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := ch.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Fatal("expected cancelled initial Start to return an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not exit after Stop cancelled its dial")
+	}
+	if got := ch.ConnectionStatus(); got != "stopped" {
+		t.Fatalf("connection status = %q, want stopped", got)
 	}
 }
 

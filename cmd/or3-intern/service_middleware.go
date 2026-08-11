@@ -128,7 +128,7 @@ func (s *serviceServer) allowMutationRequest(r *http.Request) bool {
 	if s == nil || r == nil {
 		return true
 	}
-	limit := s.config.Service.MutationRateLimitPerMinute
+	limit := s.configSnapshot().Service.MutationRateLimitPerMinute
 	if limit <= 0 {
 		return true
 	}
@@ -703,7 +703,7 @@ func (s *serviceServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	writeServiceValue(w, http.StatusOK, s.control().GetHealth())
+	writeServiceValue(w, http.StatusOK, s.serviceHealth())
 }
 
 func (s *serviceServer) handleReadiness(w http.ResponseWriter, r *http.Request) {

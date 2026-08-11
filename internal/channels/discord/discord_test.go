@@ -3,11 +3,13 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,6 +78,116 @@ func TestChannel_StartReceivesMessage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for discord event")
+	}
+}
+
+func TestChannel_ReconnectsAfterGatewayDisconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var connections atomic.Int32
+	release := make(chan struct{})
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"op": 10, "d": map[string]any{"heartbeat_interval": 10000}})
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if connections.Add(1) == 1 {
+			return
+		}
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "READY", "d": map[string]any{"user": map[string]any{"id": "B1"}}})
+		_ = conn.WriteJSON(map[string]any{"op": 0, "t": "MESSAGE_CREATE", "d": map[string]any{"id": "after-reconnect", "channel_id": "C1", "content": "hello again", "author": map[string]any{"id": "U1", "bot": false}}})
+		<-release
+	}))
+	defer wsServer.Close()
+	defer close(release)
+
+	b := bus.New(1)
+	ch := &Channel{
+		Config:         config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), OpenAccess: true},
+		reconnectDelay: func(int) time.Duration { return time.Millisecond },
+	}
+	if err := ch.Start(context.Background(), b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+	select {
+	case event := <-b.Channel():
+		if event.Message != "hello again" || event.SessionKey != "discord:C1" {
+			t.Fatalf("unexpected reconnected event: %#v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reconnected Discord event")
+	}
+	if connections.Load() < 2 {
+		t.Fatalf("expected a second Discord connection, got %d", connections.Load())
+	}
+}
+
+func TestChannel_StopCancelsAnInitialGatewayDial(t *testing.T) {
+	dialStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	wsServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		dialStarted <- struct{}{}
+		<-release
+	}))
+	defer func() {
+		close(release)
+		wsServer.Close()
+	}()
+
+	ch := &Channel{Config: config.DiscordChannelConfig{Token: "token", GatewayURL: "ws" + strings.TrimPrefix(wsServer.URL, "http"), OpenAccess: true}}
+	startErr := make(chan error, 1)
+	go func() { startErr <- ch.Start(context.Background(), bus.New(1)) }()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("gateway dial did not start")
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := ch.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Fatal("expected cancelled initial Start to return an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not exit after Stop cancelled its dial")
+	}
+	if got := ch.ConnectionStatus(); got != "stopped" {
+		t.Fatalf("connection status = %q, want stopped", got)
+	}
+}
+
+func TestChannel_BoundsAndClearsGatewayNameCaches(t *testing.T) {
+	ch := &Channel{}
+	for i := 0; i < discordNameCacheMaxEntries+32; i++ {
+		id := fmt.Sprintf("id-%d", i)
+		ch.setGuildName(id, "guild")
+		ch.setChannelName(id, "channel")
+	}
+	ch.mu.Lock()
+	guilds := len(ch.guilds)
+	channels := len(ch.channels)
+	ch.mu.Unlock()
+	if guilds > discordNameCacheMaxEntries || channels > discordNameCacheMaxEntries {
+		t.Fatalf("expected bounded name caches, guilds=%d channels=%d", guilds, channels)
+	}
+	if err := ch.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	ch.mu.Lock()
+	guilds = len(ch.guilds)
+	channels = len(ch.channels)
+	ch.mu.Unlock()
+	if guilds != 0 || channels != 0 {
+		t.Fatalf("expected Stop to clear name caches, guilds=%d channels=%d", guilds, channels)
 	}
 }
 

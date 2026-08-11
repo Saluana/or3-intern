@@ -1,6 +1,8 @@
 # Configuration Reference
 
-`or3-intern` loads `config.json`, usually from `~/.or3-intern/config.json`. Environment overrides are applied after `.env` loading; already-exported shell variables win.
+`or3-intern` loads `config.json`, usually from `~/.or3-intern/config.json`.
+Process environment overrides are applied at runtime. Set `OR3_LOAD_DOTENV=true`
+to opt into loading a nearby `.env` file; already-exported shell variables win.
 
 Use `or3-intern settings` for normal edits and `or3-intern configure` for section-focused advanced edits.
 
@@ -12,7 +14,7 @@ Use `or3-intern settings` for normal edits and `or3-intern configure` for sectio
 | `provider` | Embeddings, memory consolidation, doctor flows, and provider credentials. |
 | `runners` | External runner selection, discovery, worker pool, timeouts, and isolation. |
 | `runtime` | Runtime memory and compaction settings. |
-| `context` | Runner prompt context packing. |
+| `context` | Legacy compatibility fields; runner prompt context is managed by the selected runner. |
 | `tools` | Web proxy, PATH additions, workspace read policy, and MCP servers. |
 | `hardening` | Program allowlists, sandboxing, child environment controls, and isolation. |
 | `skills` | Managed skill loading, trust policy, registry, and quarantine state. |
@@ -29,7 +31,6 @@ Use `or3-intern settings` for normal edits and `or3-intern configure` for sectio
   "provider": {},
   "runners": {},
   "runtime": {},
-  "context": {},
   "tools": {},
   "hardening": {},
   "skills": {},

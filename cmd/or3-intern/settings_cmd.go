@@ -127,20 +127,14 @@ func runSettingsSection(reader *bufio.Reader, out io.Writer, cfgPath, cwd string
 		}
 		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "channels")
 	case "tools":
-		if interactive {
-			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "tools"}, settingsConfigureOptions("Tools"))
-		}
-		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "tools")
+		return fmt.Errorf("tool permissions are managed by the selected runner; use `or3-intern capabilities` to inspect the effective posture")
 	case "memory":
 		if interactive {
 			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "runtime"}, settingsConfigureOptions("Memory"))
 		}
 		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "runtime")
 	case "context":
-		if interactive {
-			return runConfigureWithTUI(cfgPath, cwd, []string{"--section", "context"}, settingsConfigureOptions("Context"))
-		}
-		return runConfigureSectionAndSave(reader, out, cfgPath, cwd, &cfg, "context")
+		return fmt.Errorf("context packet settings are legacy and are now controlled by the selected runner")
 	case "safety":
 		if interactive {
 			return runSettingsSafetyWithTUI(cfgPath, cfg)

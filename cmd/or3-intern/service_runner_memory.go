@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"or3-intern/internal/approval"
+	"or3-intern/internal/config"
 	"or3-intern/internal/memorysvc"
 )
 
@@ -54,13 +55,22 @@ func (s *serviceServer) handleRunnerMemory(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *serviceServer) memoryService() *memorysvc.Service {
-	if s != nil && s.memorySvc != nil {
-		return s.memorySvc
-	}
-	if s == nil || s.serviceDB() == nil {
+	if s == nil {
 		return nil
 	}
-	return memorysvc.New(s.config, s.serviceDB(), s.serviceEmbedProvider(), currentEmbedFingerprint(s.config))
+	s.configMu.RLock()
+	memorySvc := s.memorySvc
+	cfg := config.Clone(s.config)
+	database := s.database
+	embedProvider := s.embedProvider
+	s.configMu.RUnlock()
+	if memorySvc != nil {
+		return memorySvc
+	}
+	if database == nil {
+		return nil
+	}
+	return memorysvc.New(cfg, database, embedProvider, currentEmbedFingerprint(cfg))
 }
 
 type runnerMemorySearchPayload struct {

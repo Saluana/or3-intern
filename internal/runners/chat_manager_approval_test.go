@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -383,10 +384,37 @@ func TestRespondToTurnApprovalDeadRuntimeFallback(t *testing.T) {
 	if res.Token == "" {
 		t.Fatalf("expected fallback token to be issued")
 	}
+	updated, err := d.GetRunnerChatTurn(ctx, turn.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatTurn: %v", err)
+	}
+	if updated.Status != db.RunnerChatTurnStatusFailed || !strings.Contains(updated.ErrorMessage, "retry") {
+		t.Fatalf("expected terminal retry-required turn, got %#v", updated)
+	}
 	// Broker should have resolved the request.
 	pending, _ := broker.CountApprovalRequests(ctx, approval.StatusPending, "")
 	if pending != 0 {
 		t.Fatalf("expected broker to resolve after fallback, pending=%d", pending)
+	}
+}
+
+func TestFindTurnWaitingForApproval(t *testing.T) {
+	d, cm, _, _ := setupChatManagerForApproval(t)
+	ctx := context.Background()
+	sess, turn := seedTurnWithApproval(t, d, 0)
+	payload := []byte(`{"status":"approval_required","approval_id":8181,"approval_request_id":8181}`)
+	if err := d.AppendRunnerChatEvent(ctx, db.RunnerChatEvent{
+		TurnID: turn.ID, SessionID: sess.ID, Seq: db.NowMS(), TS: db.NowMS(), Type: "approval_required", PayloadJSON: string(payload),
+	}); err != nil {
+		t.Fatalf("AppendRunnerChatEvent: %v", err)
+	}
+
+	found, ok, err := cm.FindTurnWaitingForApproval(ctx, 8181)
+	if err != nil {
+		t.Fatalf("FindTurnWaitingForApproval: %v", err)
+	}
+	if !ok || found.ID != turn.ID {
+		t.Fatalf("found=%#v ok=%t, want turn %q", found, ok, turn.ID)
 	}
 }
 

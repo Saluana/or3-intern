@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	discordchannel "or3-intern/internal/channels/discord"
+	"or3-intern/internal/config"
 )
 
 type serviceDiscordTargetCandidate struct {
@@ -29,7 +30,8 @@ func (s *serviceServer) handleConfigureDiscordTargets(w http.ResponseWriter, r *
 		return
 	}
 	limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
-	token := strings.TrimSpace(s.config.Channels.Discord.Token)
+	cfg := s.configSnapshot()
+	token := strings.TrimSpace(cfg.Channels.Discord.Token)
 	if r.Method == http.MethodPost {
 		var body struct {
 			Token string `json:"token"`
@@ -47,7 +49,7 @@ func (s *serviceServer) handleConfigureDiscordTargets(w http.ResponseWriter, r *
 		}
 	}
 	limit := serviceParsePositiveInt(r.URL.Query().Get("limit"), 20, 100)
-	items := s.knownDiscordTargetCandidates(token, limit)
+	items := s.knownDiscordTargetCandidates(cfg, token, limit)
 	if token == "" {
 		if len(items) > 0 {
 			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items, "warning": "Add and save a Discord bot token, then restart or3-intern to discover recent conversations."})
@@ -59,13 +61,13 @@ func (s *serviceServer) handleConfigureDiscordTargets(w http.ResponseWriter, r *
 	writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *serviceServer) knownDiscordTargetCandidates(token string, limit int) []serviceDiscordTargetCandidate {
+func (s *serviceServer) knownDiscordTargetCandidates(cfg config.Config, token string, limit int) []serviceDiscordTargetCandidate {
 	items := make([]serviceDiscordTargetCandidate, 0)
-	defaultID := strings.TrimSpace(s.config.Channels.Discord.DefaultChannelID)
+	defaultID := strings.TrimSpace(cfg.Channels.Discord.DefaultChannelID)
 	if defaultID != "" {
 		items = append(items, serviceDiscordTargetCandidate{ChannelID: defaultID, Kind: "saved", DisplayName: "Primary Discord destination", LastMessageText: "Saved in OR3 settings."})
 	}
-	for _, item := range discordchannel.RecentConversations(s.config.Channels.Discord.APIBase, token, limit) {
+	for _, item := range discordchannel.RecentConversations(cfg.Channels.Discord.APIBase, token, limit) {
 		items = append(items, serviceDiscordTargetCandidate{
 			ChannelID:       item.ChannelID,
 			UserID:          item.UserID,

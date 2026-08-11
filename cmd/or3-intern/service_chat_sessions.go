@@ -37,13 +37,14 @@ func (s *serviceServer) handleChatRunners(w http.ResponseWriter, r *http.Request
 		infoByID[info.ID] = info
 	}
 	specs := runners.SelectableRunners()
-	if s.runnerManager == nil {
+	if s.runtimeComponents().runnerManager == nil {
 		specs = nil
 	}
-	defaultRunner := string(runners.ResolveDefaultRunner(s.config))
-	defaultModel := strings.TrimSpace(s.config.Runners.DefaultModels[defaultRunner])
-	defaultMode := strings.TrimSpace(s.config.Runners.DefaultMode)
-	defaultIsolation := strings.TrimSpace(s.config.Runners.DefaultIsolation)
+	cfg := s.configSnapshot()
+	defaultRunner := string(runners.ResolveDefaultRunner(cfg))
+	defaultModel := strings.TrimSpace(cfg.Runners.DefaultModels[defaultRunner])
+	defaultMode := strings.TrimSpace(cfg.Runners.DefaultMode)
+	defaultIsolation := strings.TrimSpace(cfg.Runners.DefaultIsolation)
 	out := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
 		info := infoByID[string(spec.ID)]

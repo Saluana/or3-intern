@@ -28,13 +28,17 @@ func (s *serviceServer) effectiveServiceProfileName(requested string) string {
 	if requested = strings.TrimSpace(requested); requested != "" {
 		return requested
 	}
-	if s == nil || !s.config.Security.Profiles.Enabled {
+	if s == nil {
 		return ""
 	}
-	if profileName := strings.TrimSpace(s.config.Security.Profiles.Channels["service"]); profileName != "" {
+	cfg := s.configSnapshot()
+	if !cfg.Security.Profiles.Enabled {
+		return ""
+	}
+	if profileName := strings.TrimSpace(cfg.Security.Profiles.Channels["service"]); profileName != "" {
 		return profileName
 	}
-	return strings.TrimSpace(s.config.Security.Profiles.Default)
+	return strings.TrimSpace(cfg.Security.Profiles.Default)
 }
 
 func isApprovalExternalChannel(channel string) bool {

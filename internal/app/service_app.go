@@ -8,6 +8,7 @@ import (
 	"or3-intern/internal/requestctx"
 	"os"
 	"strings"
+	"sync"
 
 	"or3-intern/internal/approval"
 	"or3-intern/internal/auth"
@@ -23,11 +24,19 @@ import (
 )
 
 type ServiceApp struct {
+	runtimeMu        sync.RWMutex
 	cfg              config.Config
 	jobs             *jobs.Registry
 	runnerManager    *runners.Manager
 	turnOrchestrator *RunnerTurnOrchestrator
 	control          *controlplane.Service
+	auth             *auth.Service
+}
+
+type serviceAppRuntime struct {
+	cfg              config.Config
+	runnerManager    *runners.Manager
+	turnOrchestrator *RunnerTurnOrchestrator
 	auth             *auth.Service
 }
 
@@ -40,7 +49,7 @@ func NewServiceAppWithRunner(cfg config.Config, jobs *jobs.Registry, runnerManag
 }
 
 func NewServiceAppWithRunnerTurns(cfg config.Config, jobs *jobs.Registry, runnerManager *runners.Manager, turnOrchestrator *RunnerTurnOrchestrator, control *controlplane.Service) *ServiceApp {
-	app := &ServiceApp{cfg: cfg, jobs: jobs, runnerManager: runnerManager, turnOrchestrator: turnOrchestrator, control: control}
+	app := &ServiceApp{cfg: config.Clone(cfg), jobs: jobs, runnerManager: runnerManager, turnOrchestrator: turnOrchestrator, control: control}
 	if control != nil {
 		if authSvc, err := auth.NewService(cfg, control.DB, control.Audit); err == nil {
 			app.auth = authSvc
@@ -53,20 +62,48 @@ func (a *ServiceApp) SetConfig(cfg config.Config) {
 	if a == nil {
 		return
 	}
-	a.cfg = cfg
+	cfg = config.Clone(cfg)
+	var nextAuth *auth.Service
 	if a.control != nil {
 		if authSvc, err := auth.NewService(cfg, a.control.DB, a.control.Audit); err == nil {
-			a.auth = authSvc
+			nextAuth = authSvc
 		}
 	}
+	a.runtimeMu.Lock()
+	a.cfg = cfg
+	if nextAuth != nil {
+		a.auth = nextAuth
+	}
+	a.runtimeMu.Unlock()
 }
 
 func (a *ServiceApp) SetRunnerRuntime(runnerManager *runners.Manager, turnOrchestrator *RunnerTurnOrchestrator) {
 	if a == nil {
 		return
 	}
+	a.runtimeMu.Lock()
 	a.runnerManager = runnerManager
 	a.turnOrchestrator = turnOrchestrator
+	a.runtimeMu.Unlock()
+}
+
+func (a *ServiceApp) runtimeSnapshot() serviceAppRuntime {
+	if a == nil {
+		return serviceAppRuntime{}
+	}
+	a.runtimeMu.RLock()
+	runtime := serviceAppRuntime{
+		cfg:              config.Clone(a.cfg),
+		runnerManager:    a.runnerManager,
+		turnOrchestrator: a.turnOrchestrator,
+		auth:             a.auth,
+	}
+	a.runtimeMu.RUnlock()
+	return runtime
+}
+
+func (a *ServiceApp) authService() *auth.Service {
+	return a.runtimeSnapshot().auth
 }
 
 type TurnRequest struct {
@@ -108,7 +145,8 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, 
 	if a == nil {
 		return TurnResult{}, errors.New("service unavailable")
 	}
-	if a.turnOrchestrator == nil {
+	runtime := a.runtimeSnapshot()
+	if runtime.turnOrchestrator == nil {
 		return TurnResult{}, ErrRunnerRuntimeUnavailable
 	}
 	runnerReq := RunnerTurnRequest{
@@ -132,7 +170,7 @@ func (a *ServiceApp) RunTurn(ctx context.Context, req TurnRequest) (TurnResult, 
 		}
 	}
 	runCtx := a.serviceRunContext(ctx, req.SessionKey, req.ProfileName, req.ApprovalToken, req.Actor, req.Role, req.Capability, req.Observer, req.Streamer)
-	result, err := a.turnOrchestrator.StartTurn(runCtx, runnerReq)
+	result, err := runtime.turnOrchestrator.StartTurn(runCtx, runnerReq)
 	if err != nil {
 		return TurnResult{}, err
 	}
@@ -164,8 +202,8 @@ func (a *ServiceApp) AbortJob(ctx context.Context, jobID string) (bool, string, 
 	if a.jobs.Cancel(jobID) {
 		return true, "", nil
 	}
-	if a.runnerManager != nil {
-		if err := a.runnerManager.Abort(ctx, jobID); err == nil {
+	if runnerManager := a.runtimeSnapshot().runnerManager; runnerManager != nil {
+		if err := runnerManager.Abort(ctx, jobID); err == nil {
 			return true, "", nil
 		} else if strings.Contains(strings.ToLower(err.Error()), "not abortable") {
 			return false, "not_abortable", nil
@@ -186,26 +224,27 @@ func (a *ServiceApp) DetectRunnerRunners(ctx context.Context) ([]runners.RunnerI
 	if a == nil {
 		return nil, fmt.Errorf("service app is not available")
 	}
-	if a.runnerManager != nil {
-		if a.runnerManager.Registry == nil {
+	runtime := a.runtimeSnapshot()
+	if runtime.runnerManager != nil {
+		if runtime.runnerManager.Registry == nil {
 			return nil, fmt.Errorf("runner registry is not configured")
 		}
-		detected := a.runnerManager.Registry.DetectAll(ctx, a.runnerManager.DetectOptions())
-		return a.decorateRunnerRuntimeInfo(ctx, detected), nil
+		detected := runtime.runnerManager.Registry.DetectAll(ctx, runtime.runnerManager.DetectOptions())
+		return decorateRunnerRuntimeInfo(ctx, runtime, detected), nil
 	}
-	detectManager := &runners.Manager{Cfg: a.cfg.Runners}
+	detectManager := &runners.Manager{Cfg: runtime.cfg.Runners}
 	detected := runners.NewDefaultRegistry().DetectAll(ctx, detectManager.DetectOptions())
-	return a.decorateRunnerRuntimeInfo(ctx, detected), nil
+	return decorateRunnerRuntimeInfo(ctx, runtime, detected), nil
 }
 
-func (a *ServiceApp) decorateRunnerRuntimeInfo(ctx context.Context, detected []runners.RunnerInfo) []runners.RunnerInfo {
+func decorateRunnerRuntimeInfo(ctx context.Context, runtime serviceAppRuntime, detected []runners.RunnerInfo) []runners.RunnerInfo {
 	if len(detected) == 0 {
 		return detected
 	}
-	cfg := a.cfg.Runners
+	cfg := runtime.cfg.Runners
 	var runtimes *runners.RunnerRuntimeRegistry
-	if a.runnerManager != nil && a.runnerManager.Runtimes != nil {
-		runtimes = a.runnerManager.Runtimes
+	if runtime.runnerManager != nil && runtime.runnerManager.Runtimes != nil {
+		runtimes = runtime.runnerManager.Runtimes
 	} else {
 		runtimes = runners.NewDefaultRuntimeRegistry()
 	}
@@ -226,37 +265,41 @@ func (a *ServiceApp) decorateRunnerRuntimeInfo(ctx context.Context, detected []r
 
 // StartRunnerRun enqueues a new runner run.
 func (a *ServiceApp) StartRunnerRun(ctx context.Context, req runners.RunnerRunRequest) (db.RunnerRun, error) {
-	if a == nil || a.runnerManager == nil {
+	runtime := a.runtimeSnapshot()
+	if a == nil || runtime.runnerManager == nil {
 		return db.RunnerRun{}, fmt.Errorf("runner manager is not available")
 	}
-	if a.turnOrchestrator != nil {
-		req = a.turnOrchestrator.PrepareRunnerRunRequest(ctx, req)
+	if runtime.turnOrchestrator != nil {
+		req = runtime.turnOrchestrator.PrepareRunnerRunRequest(ctx, req)
 	}
-	return a.runnerManager.Enqueue(ctx, req)
+	return runtime.runnerManager.Enqueue(ctx, req)
 }
 
 // GetRunnerRun reads a persisted runner run by run ID or job ID.
 func (a *ServiceApp) GetRunnerRun(ctx context.Context, id string) (db.RunnerRun, bool, error) {
-	if a == nil || a.runnerManager == nil || a.runnerManager.DB == nil {
+	runtime := a.runtimeSnapshot()
+	if a == nil || runtime.runnerManager == nil || runtime.runnerManager.DB == nil {
 		return db.RunnerRun{}, false, fmt.Errorf("runner manager is not available")
 	}
-	return a.runnerManager.DB.GetRunnerRun(ctx, id)
+	return runtime.runnerManager.DB.GetRunnerRun(ctx, id)
 }
 
 // ListRunnerRunEvents lists persisted events for a job.
 func (a *ServiceApp) ListRunnerRunEvents(ctx context.Context, jobID string, afterSeq int64, limit int) ([]db.RunnerRunEvent, error) {
-	if a == nil || a.runnerManager == nil || a.runnerManager.DB == nil {
+	runtime := a.runtimeSnapshot()
+	if a == nil || runtime.runnerManager == nil || runtime.runnerManager.DB == nil {
 		return nil, fmt.Errorf("runner manager is not available")
 	}
-	return a.runnerManager.DB.ListRunnerRunEvents(ctx, jobID, afterSeq, limit)
+	return runtime.runnerManager.DB.ListRunnerRunEvents(ctx, jobID, afterSeq, limit)
 }
 
 // AbortRunnerRun cancels a runner run.
 func (a *ServiceApp) AbortRunnerRun(ctx context.Context, jobID string) error {
-	if a == nil || a.runnerManager == nil {
+	runtime := a.runtimeSnapshot()
+	if a == nil || runtime.runnerManager == nil {
 		return fmt.Errorf("runner manager is not available")
 	}
-	return a.runnerManager.Abort(ctx, jobID)
+	return runtime.runnerManager.Abort(ctx, jobID)
 }
 
 func (a *ServiceApp) WaitForJob(ctx context.Context, jobID string) (jobs.Snapshot, bool) {
@@ -386,87 +429,95 @@ func (a *ServiceApp) ListAllowlists(ctx context.Context, domain string, limit in
 }
 
 func (a *ServiceApp) Auth() *auth.Service {
-	if a == nil {
-		return nil
-	}
-	return a.auth
+	return a.authService()
 }
 
 func (a *ServiceApp) BeginPasskeyRegistration(ctx context.Context, req auth.BeginRegistrationRequest) (*auth.BeginCeremonyResponse, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return nil, auth.ErrAuthDisabled
 	}
-	return a.auth.BeginRegistration(ctx, req)
+	return authSvc.BeginRegistration(ctx, req)
 }
 
 func (a *ServiceApp) FinishPasskeyRegistration(ctx context.Context, req auth.FinishRegistrationRequest) (db.PasskeyCredentialRecord, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return db.PasskeyCredentialRecord{}, auth.ErrAuthDisabled
 	}
-	return a.auth.FinishRegistration(ctx, req)
+	return authSvc.FinishRegistration(ctx, req)
 }
 
 func (a *ServiceApp) BeginPasskeyLogin(ctx context.Context, req auth.BeginLoginRequest) (*auth.BeginCeremonyResponse, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return nil, auth.ErrAuthDisabled
 	}
-	return a.auth.BeginLogin(ctx, req)
+	return authSvc.BeginLogin(ctx, req)
 }
 
 func (a *ServiceApp) FinishPasskeyLogin(ctx context.Context, req auth.FinishLoginRequest) (auth.LoginResult, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return auth.LoginResult{}, auth.ErrAuthDisabled
 	}
-	return a.auth.FinishLogin(ctx, req)
+	return authSvc.FinishLogin(ctx, req)
 }
 
 func (a *ServiceApp) BeginStepUp(ctx context.Context, req auth.BeginStepUpRequest) (*auth.BeginCeremonyResponse, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return nil, auth.ErrAuthDisabled
 	}
-	return a.auth.BeginStepUp(ctx, req)
+	return authSvc.BeginStepUp(ctx, req)
 }
 
 func (a *ServiceApp) FinishStepUp(ctx context.Context, req auth.FinishStepUpRequest) (db.AuthSessionRecord, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return db.AuthSessionRecord{}, auth.ErrAuthDisabled
 	}
-	return a.auth.FinishStepUp(ctx, req)
+	return authSvc.FinishStepUp(ctx, req)
 }
 
 func (a *ServiceApp) ValidateAuthSession(ctx context.Context, token string) (auth.SessionClaims, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return auth.SessionClaims{}, auth.ErrAuthDisabled
 	}
-	return a.auth.ValidateSessionToken(ctx, token)
+	return authSvc.ValidateSessionToken(ctx, token)
 }
 
 func (a *ServiceApp) RevokeAuthSession(ctx context.Context, token, reason string) error {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return auth.ErrAuthDisabled
 	}
-	return a.auth.RevokeSessionToken(ctx, token, reason)
+	return authSvc.RevokeSessionToken(ctx, token, reason)
 }
 
 func (a *ServiceApp) ListPasskeys(ctx context.Context, userID string) ([]db.PasskeyCredentialRecord, error) {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return nil, auth.ErrAuthDisabled
 	}
-	return a.auth.ListPasskeys(ctx, userID)
+	return authSvc.ListPasskeys(ctx, userID)
 }
 
 func (a *ServiceApp) RenamePasskey(ctx context.Context, passkeyID, nickname string) error {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return auth.ErrAuthDisabled
 	}
-	return a.auth.RenamePasskey(ctx, passkeyID, nickname)
+	return authSvc.RenamePasskey(ctx, passkeyID, nickname)
 }
 
 func (a *ServiceApp) RevokePasskey(ctx context.Context, sessionToken, passkeyID, reason string) error {
-	if a == nil || a.auth == nil {
+	authSvc := a.authService()
+	if authSvc == nil {
 		return auth.ErrAuthDisabled
 	}
-	return a.auth.RevokePasskey(ctx, sessionToken, passkeyID, reason)
+	return authSvc.RevokePasskey(ctx, sessionToken, passkeyID, reason)
 }
 
 func (a *ServiceApp) AddAllowlist(ctx context.Context, domain string, scope approval.AllowlistScope, matcher any, actor string, expiresAt int64) (db.ApprovalAllowlistRecord, error) {

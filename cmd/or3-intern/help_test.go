@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseRootCLIArgs_RootHelp(t *testing.T) {
-	cfgPath, args, showHelp, unsafeDev, advanced, err := parseRootCLIArgs([]string{"--config", "/tmp/config.json", "--help", "approvals"}, &bytes.Buffer{})
+	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs([]string{"--config", "/tmp/config.json", "--help", "approvals"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseRootCLIArgs: %v", err)
 	}
@@ -20,11 +20,64 @@ func TestParseRootCLIArgs_RootHelp(t *testing.T) {
 	if unsafeDev {
 		t.Fatal("expected unsafeDev to default to false")
 	}
-	if advanced {
-		t.Fatal("expected advanced help to default to false")
-	}
 	if len(args) != 1 || args[0] != "approvals" {
 		t.Fatalf("expected approvals topic args, got %#v", args)
+	}
+}
+
+func TestParseRootCLIArgs_AcceptsGlobalFlagsBeforeOrAfterCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		argv       []string
+		wantPath   string
+		wantArgs   []string
+		wantUnsafe bool
+		wantHelp   bool
+	}{
+		{name: "before command", argv: []string{"--config", "/tmp/a.json", "config-path"}, wantPath: "/tmp/a.json", wantArgs: []string{"config-path"}},
+		{name: "after command", argv: []string{"config-path", "--config", "/tmp/a.json"}, wantPath: "/tmp/a.json", wantArgs: []string{"config-path"}},
+		{name: "equals form", argv: []string{"config-path", "--config=/tmp/a.json"}, wantPath: "/tmp/a.json", wantArgs: []string{"config-path"}},
+		{name: "unsafe after command", argv: []string{"serve", "--unsafe-dev"}, wantArgs: []string{"serve"}, wantUnsafe: true},
+		{name: "help after command", argv: []string{"skills", "--help"}, wantArgs: []string{"skills"}, wantHelp: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path, args, help, unsafe, err := parseRootCLIArgs(test.argv, &bytes.Buffer{})
+			if err != nil {
+				t.Fatalf("parseRootCLIArgs: %v", err)
+			}
+			if path != test.wantPath || unsafe != test.wantUnsafe || help != test.wantHelp {
+				t.Fatalf("unexpected flags: path=%q unsafe=%t help=%t", path, unsafe, help)
+			}
+			if strings.Join(args, "\x00") != strings.Join(test.wantArgs, "\x00") {
+				t.Fatalf("unexpected args: got %#v want %#v", args, test.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseRootCLIArgs_RejectsInvalidRootFlags(t *testing.T) {
+	for _, argv := range [][]string{
+		{"--unknown", "version"},
+		{"--config"},
+		{"config-path", "--config", "--unsafe-dev"},
+		{"--unsafe-dev=maybe", "version"},
+	} {
+		if _, _, _, _, err := parseRootCLIArgs(argv, &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected invalid root args %q to fail", argv)
+		}
+	}
+}
+
+func TestParseRootCLIArgs_PreservesCommandAdvancedFlags(t *testing.T) {
+	for _, argv := range [][]string{{"settings", "--advanced"}, {"status", "--advanced"}, {"health", "--advanced"}} {
+		_, args, _, _, err := parseRootCLIArgs(argv, &bytes.Buffer{})
+		if err != nil {
+			t.Fatalf("parseRootCLIArgs(%q): %v", argv, err)
+		}
+		if strings.Join(args, "\x00") != strings.Join(argv, "\x00") {
+			t.Fatalf("expected command flags to be preserved: got %#v want %#v", args, argv)
+		}
 	}
 }
 
@@ -79,8 +132,34 @@ func TestPrintHelpTopic_Root(t *testing.T) {
 	if !strings.Contains(got, "config-path") {
 		t.Fatalf("expected complete root help to include advanced commands, got %q", got)
 	}
-	if !strings.Contains(got, "doctor") || !strings.Contains(got, "approvals") || !strings.Contains(got, "devices") || !strings.Contains(got, "pairing") {
+	if !strings.Contains(got, "doctor") || !strings.Contains(got, "approvals") || !strings.Contains(got, "devices") || !strings.Contains(got, "pairing") || !strings.Contains(got, "memory") {
 		t.Fatalf("expected complete root help to include operator tools, got %q", got)
+	}
+}
+
+func TestRootHelpCommandsHaveTopicsAndNoDuplicates(t *testing.T) {
+	seen := map[string]struct{}{}
+	for _, command := range rootCommandCatalog {
+		if _, exists := seen[command.Name]; exists {
+			t.Fatalf("duplicate root-help command %q", command.Name)
+		}
+		seen[command.Name] = struct{}{}
+		if !isKnownRootCommand(command.Name) {
+			t.Fatalf("catalog command %q is not executable", command.Name)
+		}
+		if command.Name == "help" {
+			continue
+		}
+		if _, ok := helpTopics[command.Name]; !ok {
+			t.Fatalf("root-help command %q has no help topic", command.Name)
+		}
+	}
+	for _, section := range rootHelpSections {
+		for _, item := range section.Items {
+			if _, ok := seen[item.Name]; !ok {
+				t.Fatalf("root-help command %q is absent from the executable catalog", item.Name)
+			}
+		}
 	}
 }
 
@@ -125,8 +204,11 @@ func TestPrintHelpTopic_Configure(t *testing.T) {
 	if !strings.Contains(got, "or3-intern configure") {
 		t.Fatalf("expected configure usage, got %q", got)
 	}
-	if !strings.Contains(got, "provider, storage, runtime, context, workspace, skills, auth, security, hardening, session, automation, channels, service") {
+	if !strings.Contains(got, "provider, storage, runtime, workspace, skills, auth, security, hardening, session, automation, channels, service") {
 		t.Fatalf("expected section list, got %q", got)
+	}
+	if strings.Contains(got, "context") {
+		t.Fatalf("expected legacy context section to be omitted, got %q", got)
 	}
 	if !strings.Contains(got, "Bubble Tea setup UI") {
 		t.Fatalf("expected configure help to mention interactive TUI mode, got %q", got)

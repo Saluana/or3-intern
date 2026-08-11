@@ -120,6 +120,7 @@ func (s *serviceServer) handleActions(w http.ResponseWriter, r *http.Request) {
 
 func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapResponse {
 	var response serviceAppBootstrapResponse
+	cfg := s.configSnapshot()
 
 	identity := serviceAuthIdentityFromContext(r.Context())
 	authSvc := s.app().Auth()
@@ -140,16 +141,16 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 	response.Pairing.DeviceID = identity.Device
 	response.Pairing.Role = identity.Role
 
-	response.Auth.SessionRequired = s.config.Auth.EnforcementMode == config.AuthEnforcementSession
+	response.Auth.SessionRequired = cfg.Auth.EnforcementMode == config.AuthEnforcementSession
 	response.Auth.SessionActive = identity.Kind == "auth-session"
 	response.Auth.StepUpActive = identity.StepUpOK
 	response.Auth.Kind = identity.Kind
 	response.Auth.Role = identity.Role
 	response.Auth.ExecAllowed = serviceBootstrapExecAllowed(identity.Role)
 	response.Auth.Capabilities.PasskeysSupported = authSvc != nil && authSvc.Enabled()
-	response.Auth.Capabilities.StepUpSupported = s.config.Auth.Enabled && s.config.Auth.RequirePasskeyForSensitive
+	response.Auth.Capabilities.StepUpSupported = cfg.Auth.Enabled && cfg.Auth.RequirePasskeyForSensitive
 
-	health := s.control().GetHealth()
+	health := s.serviceHealth()
 	readiness := s.control().GetReadiness()
 	capabilities := s.control().GetCapabilities("", "")
 	response.Status.Health = &health
@@ -180,7 +181,7 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 			Severity: "warning",
 		})
 	}
-	for _, quarantined := range s.config.IntegrationWarnings {
+	for _, quarantined := range cfg.IntegrationWarnings {
 		name := strings.TrimSpace(quarantined.Name)
 		if name == "" {
 			name = "integration"
@@ -189,13 +190,6 @@ func (s *serviceServer) buildAppBootstrap(r *http.Request) serviceAppBootstrapRe
 			Code:     "integration_quarantined",
 			Message:  fmt.Sprintf("%s was disabled because its settings are incomplete: %s", name, serviceFirstNonEmpty(quarantined.Reason, "invalid configuration")),
 			Severity: "warning",
-		})
-	}
-	if !s.config.ContextConfigured {
-		warnings = append(warnings, serviceAppBootstrapWarning{
-			Code:     "legacy_context_mode",
-			Message:  "This host is using legacy context settings because the saved config has no context section.",
-			Severity: "info",
 		})
 	}
 	if embeddingStatus, err := s.control().GetEmbeddingStatus(r.Context()); err == nil && strings.EqualFold(embeddingStatus.Status, "mismatch") {
@@ -267,9 +261,10 @@ func (s *serviceServer) bootstrapActiveTerminalCount() int {
 		return 0
 	}
 	s.cleanupTerminalSessions()
-	s.terminals().mu.Lock()
-	defer s.terminals().mu.Unlock()
-	return len(s.terminals().sessions)
+	manager := s.terminals()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return terminalRunningSessionCount(manager.sessions)
 }
 
 func (s *serviceServer) restartActionDescriptor() serviceAppActionDescriptor {
@@ -279,7 +274,7 @@ func (s *serviceServer) restartActionDescriptor() serviceAppActionDescriptor {
 		SessionRequired: true,
 		StepUpRequired:  true,
 	}
-	if s != nil && s.broker != nil && strings.EqualFold(string(s.config.Security.Approvals.Exec.Mode), string(config.ApprovalModeAsk)) {
+	if s != nil && s.broker != nil && strings.EqualFold(string(s.configSnapshot().Security.Approvals.Exec.Mode), string(config.ApprovalModeAsk)) {
 		descriptor.ApprovalLikely = true
 	}
 	if !s.terminalAvailable() {

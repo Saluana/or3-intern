@@ -109,15 +109,13 @@ func BuildSettingsHomeView(cfg config.Config) SettingsHomeView {
 		settingsSection("workspace", workspaceSummary(cfg), "or3-intern settings --section workspace", false),
 		{Key: "safety", Title: "Safety", Summary: uxcopy.SafetyModeLabel(inference.Mode, inference.IsCustom, inference.BaseMode), Action: "or3-intern settings --section safety"},
 		settingsSection("channels", channelsSummary(cfg), "or3-intern settings --section channels", false),
-		settingsSection("tools", toolsSummary(cfg), "or3-intern settings --section tools", false),
 		settingsSection("memory", memorySummary(cfg), "or3-intern settings --section memory", false),
-		settingsSection("context", contextSummary(cfg), "or3-intern settings --section context", false),
 		settingsSection("advanced", "Raw config sections and export", "or3-intern settings --advanced", true),
 	}, Commands: []string{
 		"or3-intern settings --section provider",
 		"or3-intern settings --section workspace",
 		"or3-intern settings --section safety",
-		"or3-intern settings --section context",
+		"or3-intern capabilities",
 		"or3-intern settings --export config.json",
 	}}
 }
@@ -128,14 +126,11 @@ func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, device
 		fileRisk = "red"
 	}
 	commandRisk := "green"
-	execAvailable := len(cfg.Hardening.ExecAllowedPrograms) > 0 && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools
-	if execAvailable && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny {
+	terminalAvailable := cfg.Hardening.GuardedTools && cfg.Hardening.PrivilegedTools && cfg.Hardening.EnableExecShell && !config.ProfileSpec(cfg.RuntimeProfile).ForbidExecShell && !config.ProfileSpec(cfg.RuntimeProfile).ForbidPrivilegedTools && !config.ProfileSpec(cfg.RuntimeProfile).RequireSandboxForExec
+	if terminalAvailable && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny {
 		commandRisk = "green"
-	} else if execAvailable {
+	} else if terminalAvailable {
 		commandRisk = "yellow"
-		if !cfg.Hardening.GuardedTools && cfg.Security.Approvals.Exec.Mode == config.ApprovalModeTrusted {
-			commandRisk = "red"
-		}
 	}
 	internetRisk := "yellow"
 	if cfg.Security.Network.Enabled && cfg.Security.Network.DefaultDeny {
@@ -157,8 +152,8 @@ func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, device
 	}
 	return AccessDashboardView{Sections: []AccessSectionView{
 		{Name: "Files", Status: workspaceSummary(cfg), Risk: fileRisk, Detail: "Answers whether OR3 can see your whole computer or only one folder.", Action: "or3-intern settings --section workspace"},
-		{Name: "Commands", Status: commandSummary(cfg), Risk: commandRisk, Detail: "Shows whether local command execution is blocked, asks first, or follows tool defaults.", Action: "or3-intern settings --section safety"},
-		{Name: "Internet", Status: internetSummary(cfg), Risk: internetRisk, Detail: "Covers web/proxy/network-policy posture for outbound access.", Action: "or3-intern settings --section tools"},
+		{Name: "Commands", Status: commandSummary(cfg), Risk: commandRisk, Detail: "Runner permissions govern normal work. This only reports the optional service terminal, which is separate from runner execution.", Action: "or3-intern capabilities"},
+		{Name: "Internet", Status: internetSummary(cfg), Risk: internetRisk, Detail: "Covers web/proxy/network-policy posture for outbound access.", Action: "or3-intern configure --section security"},
 		{Name: "Connected Apps", Status: channelsSummary(cfg), Risk: channelsRisk(cfg), Detail: "External channel adapters stay optional and hidden until enabled.", Action: "or3-intern settings --section channels"},
 		{Name: "Secure Connections", Status: deviceSummary(cfg, deviceCount, pendingApprovals), Risk: deviceRisk, Detail: "Shows whether service clients can connect through the secure protocol.", Action: "or3-intern settings --section channels"},
 		{Name: "Memory", Status: memorySummary(cfg), Risk: "yellow", Detail: "Summarizes standing memory, document indexing, and prompt context packing.", Action: "or3-intern settings --section memory"},
@@ -169,6 +164,9 @@ func BuildAccessDashboardView(cfg config.Config, report intdoctor.Report, device
 func BuildProblemViews(findings []intdoctor.Finding) []ProblemView {
 	out := make([]ProblemView, 0, len(findings))
 	for _, finding := range findings {
+		if finding.Severity == intdoctor.SeverityInfo {
+			continue
+		}
 		copy := uxcopy.ProblemForFinding(finding.ID, finding.Summary)
 		out = append(out, ProblemView{
 			ID:                finding.ID,
@@ -294,33 +292,18 @@ func channelsRisk(cfg config.Config) string {
 	return "yellow"
 }
 
-func toolsSummary(cfg config.Config) string {
-	parts := []string{}
-	if len(cfg.Hardening.ExecAllowedPrograms) > 0 {
-		parts = append(parts, "commands enabled")
-	} else {
-		parts = append(parts, "commands off")
-	}
-	return strings.Join(parts, ", ")
-}
-
 func memorySummary(cfg config.Config) string {
 	return "Standing memory on"
 }
 
-func contextSummary(cfg config.Config) string {
-	mode := firstNonEmpty(strings.TrimSpace(cfg.Context.Mode), "quality")
-	return fmt.Sprintf("%s mode; %d max input tokens", mode, cfg.Context.MaxInputTokens)
-}
-
 func headline(report intdoctor.Report) string {
-	if len(report.Findings) == 0 {
-		return "Ready"
-	}
-	if report.HasBlockingFindings() {
+	if report.HasBlockingFindings() || report.Summary.ErrorCount > 0 {
 		return "Needs attention"
 	}
-	return "Review recommended"
+	if report.Summary.WarnCount > 0 {
+		return "Review recommended"
+	}
+	return "Ready"
 }
 
 func workspaceSummary(cfg config.Config) string {
@@ -331,13 +314,18 @@ func workspaceSummary(cfg config.Config) string {
 }
 
 func commandSummary(cfg config.Config) string {
+	spec := config.ProfileSpec(cfg.RuntimeProfile)
+	terminalAvailable := cfg.Hardening.GuardedTools && cfg.Hardening.PrivilegedTools && cfg.Hardening.EnableExecShell && !spec.ForbidExecShell && !spec.ForbidPrivilegedTools && !spec.RequireSandboxForExec
+	if !terminalAvailable {
+		return "Runner-managed permissions; local service terminal is off"
+	}
 	switch {
 	case cfg.Security.Approvals.Exec.Mode == config.ApprovalModeDeny:
-		return "Blocks direct commands by default"
+		return "Runner-managed permissions; service terminal requires a denial override"
 	case cfg.Security.Approvals.Exec.Mode == config.ApprovalModeAsk || cfg.Hardening.GuardedTools:
-		return "Ask before risky commands"
+		return "Runner-managed permissions; service terminal asks before use"
 	default:
-		return "Commands use the current local tool settings"
+		return "Runner-managed permissions; service terminal follows its local policy"
 	}
 }
 

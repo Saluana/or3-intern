@@ -8,9 +8,10 @@ import (
 )
 
 // LoadDotEnv loads simple KEY=value entries from local .env files before
-// normal environment overrides are applied. Existing environment variables win.
+// normal environment overrides are applied when explicitly enabled. Existing
+// environment variables win.
 func LoadDotEnv() {
-	if disabledByEnv("OR3_LOAD_DOTENV") {
+	if !enabledByEnv("OR3_LOAD_DOTENV") {
 		return
 	}
 	seen := map[string]struct{}{}
@@ -75,7 +76,7 @@ func parseDotEnvLine(line string) (string, string, bool) {
 	return key, value, true
 }
 
-func disabledByEnv(key string) bool {
+func enabledByEnv(key string) bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	return value == "0" || value == "false" || value == "no" || value == "off"
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }

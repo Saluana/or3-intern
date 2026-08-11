@@ -18,37 +18,36 @@ The beginner mental model is:
 - Folder — where OR3 is allowed to work
 - Safety Level — how careful OR3 should be
 - Connected Devices — who can talk to OR3
-- Allowed Actions — what OR3 can do without asking
+- Runner — the external CLI that executes agent turns
 - Activity Log — what OR3 records for later review
 
-### 0. Start without installing Go or editing your PATH
+### 0. Install the local CLI
+
+Without Go or a PATH edit:
 
 ```bash
-npx @or3/connect intern
+npx @or3/connect@0.1.2 intern
 ```
 
-This downloads the verified OR3 Intern release and opens guided setup when the
-matching package and release assets are published. Use
-`npx @or3/connect intern chat` for a later local conversation. Check
-[Connect release status](connect-release-status.md) first: the registry's
-current `@or3/connect` version predates this local subcommand, so do not
-silently substitute the older package.
-
-Remote Connect is withheld from managed Cloud. Do not run bare
-`npx @or3/connect` against the old `https://or3.chat` default. A verified
-staging or self-hosted operator may use the advanced `--cloud-url` path in
-[remote-connect.md](remote-connect.md).
-
-### Source contributors: install the bare `or3-intern` command
+From this source checkout:
 
 ```bash
 ./scripts/install-cli.sh
 or3-intern version
 ```
 
-If you prefer not to install anything yet, every example below also works with `go run ./cmd/or3-intern ...`.
+For a one-off run without installing, use `go run ./cmd/or3-intern ...`.
+See [Connect release status](connect-release-status.md) for the coordinated
+package and binary release contract.
 
-If a `.env` file exists in the current directory or its parent, OR3 loads it automatically before applying environment overrides. Existing shell variables are not replaced. Set `OR3_LOAD_DOTENV=false` when you want to disable `.env` loading for a run.
+Remote Connect is withheld from managed Cloud. Do not run bare
+`npx @or3/connect` against the old `https://or3.chat` default. A verified
+staging or self-hosted operator may use the advanced `--cloud-url` path in
+[remote-connect.md](remote-connect.md).
+
+Environment overrides come from the process environment. To opt into loading a
+nearby `.env` file, set `OR3_LOAD_DOTENV=true`; existing shell variables are
+not replaced, and dotenv values stay runtime-only.
 
 ### 1. Run guided setup
 
@@ -70,13 +69,13 @@ The setup review summarizes:
 
 Re-run `or3-intern settings` later when you want to review or change your setup.
 
-If you want the lower-level section-based editor, use `or3-intern configure` or commands like `or3-intern configure --section provider --section web`.
+If you want the lower-level section-based editor, use `or3-intern configure` or commands like `or3-intern configure --section provider --section channels`.
 
 When stdin and stdout are both terminals, `configure` opens the Bubble Tea setup UI. Use arrow keys to move, `enter` to select sections or fields, `space` to toggle booleans, `s` to save, and `q` to go back or quit.
 
 When input or output is redirected, piped, or otherwise non-interactive, `configure` falls back to the plain-text prompt flow. That keeps scripted installs and remote automation compatible with earlier behavior. Secret prompts stay single-step in plain-text mode: leave them blank to keep the current value, enter a new value to replace it, or type `clear` to remove the secret.
 
-`or3-intern init` follows the same activation rules, but starts with the original first-run sections: provider, storage, workspace, and web.
+`or3-intern init` is a compatibility alias for `or3-intern setup`.
 
 ### 2. Check readiness
 
@@ -108,7 +107,7 @@ Inside chat, `/new` archives the current conversation into long-term memory befo
 or3-intern settings
 ```
 
-`settings` opens a task-based home with AI Controls, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review.
+`settings` opens a task-based home with AI Provider, Workspace Folder, Safety, Channels, Memory, and Advanced options. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review. Runner-specific context and tool permissions are managed by the selected runner; use `or3-intern capabilities` to inspect the effective posture.
 
 ### 5. Connect another device
 

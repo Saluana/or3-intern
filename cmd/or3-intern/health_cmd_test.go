@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"or3-intern/internal/safetymode"
 )
 
 func TestHealthCommand_SafeBaseline(t *testing.T) {
@@ -65,6 +67,30 @@ func TestHealthCommand_ShowsWarnings(t *testing.T) {
 	text := out.String()
 	if !strings.Contains(text, "exec") {
 		t.Fatalf("expected exec warning in %q", text)
+	}
+}
+
+func TestHealthCommand_RelaxedLocalPostureDoesNotWarn(t *testing.T) {
+	cfg := safeDoctorConfig()
+	safetymode.Apply(&cfg, safetymode.ModeRelaxed)
+	cfg.Security.SecretStore.Enabled = false
+	cfg.Security.SecretStore.Required = false
+	cfg.Security.Profiles.Enabled = false
+	var out bytes.Buffer
+	if err := runHealthCommand("", cfg, "", []string{"--check", "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("runHealthCommand: %v", err)
+	}
+	var payload struct {
+		Summary struct {
+			Status    string `json:"status"`
+			WarnCount int    `json:"warnCount"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode health JSON: %v (%s)", err, out.String())
+	}
+	if payload.Summary.Status != "ok" || payload.Summary.WarnCount != 0 {
+		t.Fatalf("expected relaxed local posture to be acknowledged without warnings, got %#v", payload.Summary)
 	}
 }
 

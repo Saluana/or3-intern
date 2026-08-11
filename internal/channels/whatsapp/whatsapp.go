@@ -37,8 +37,12 @@ type Channel struct {
 	mu     sync.Mutex
 	conn   *websocket.Conn
 	cancel context.CancelFunc
-	closed bool
+	done   chan struct{}
+	state  string
 	dedupe *rootchannels.IngressDeduplicator
+
+	// reconnectDelay is test-only injection for prompt deterministic retries.
+	reconnectDelay func(int) time.Duration
 }
 
 // Name returns the registered channel name.
@@ -49,35 +53,99 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if strings.TrimSpace(c.Config.BridgeURL) == "" {
 		return fmt.Errorf("whatsapp bridge url not configured")
 	}
-	conn, err := c.connect(ctx)
-	if err != nil {
-		return err
+	c.mu.Lock()
+	alreadyRunning := c.cancel != nil
+	if alreadyRunning {
+		c.mu.Unlock()
+		return nil
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	c.conn = conn
+	done := make(chan struct{})
 	c.cancel = cancel
-	c.closed = false
+	c.done = done
+	c.state = "connecting"
 	c.mu.Unlock()
-	go c.readLoop(childCtx, eventBus)
+
+	conn, err := c.connect(childCtx)
+	if err != nil {
+		cancel()
+		c.finishStart(done)
+		return err
+	}
+	c.mu.Lock()
+	if c.done != done || childCtx.Err() != nil {
+		c.mu.Unlock()
+		cancel()
+		_ = conn.Close()
+		c.finishStart(done)
+		if err := childCtx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("whatsapp start interrupted")
+	}
+	c.conn = conn
+	c.state = "connected"
+	c.mu.Unlock()
+	go c.supervise(childCtx, eventBus, conn, done)
 	return nil
+}
+
+func (c *Channel) finishStart(done chan struct{}) {
+	c.mu.Lock()
+	if c.done == done {
+		c.conn = nil
+		c.cancel = nil
+		c.done = nil
+		if c.state != "stopped" {
+			c.state = "failed"
+		}
+	}
+	c.mu.Unlock()
+	close(done)
 }
 
 // Stop closes the bridge connection.
 func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
+	cancel := c.cancel
+	conn := c.conn
+	done := c.done
 	c.conn = nil
 	c.cancel = nil
-	c.closed = true
-	return nil
+	c.done = nil
+	c.state = "stopped"
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ConnectionStatus reports the current bridge state for diagnostics.
+func (c *Channel) ConnectionStatus() string {
+	if c == nil {
+		return "stopped"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == "" {
+		return "stopped"
+	}
+	return c.state
 }
 
 // Deliver sends a bridge command for a text or media message.
@@ -104,45 +172,111 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 		cmd[k] = v
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
 		return fmt.Errorf("whatsapp bridge not connected")
 	}
-	return c.conn.WriteJSON(cmd)
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return conn.WriteJSON(cmd)
 }
 
 func (c *Channel) connect(ctx context.Context) (*websocket.Conn, error) {
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
-	}
 	headers := http.Header{}
 	if token := strings.TrimSpace(c.Config.BridgeToken); token != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
-	conn, _, err := dialer.DialContext(ctx, c.Config.BridgeURL, headers)
+	conn, resp, err := shared.DialWebSocketContext(ctx, c.Dialer, c.Config.BridgeURL, headers)
 	if err != nil {
+		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			return nil, fmt.Errorf("whatsapp bridge authentication failed: %s", resp.Status)
+		}
 		return nil, err
 	}
 	return conn, nil
 }
 
-func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
-	for {
+func (c *Channel) supervise(ctx context.Context, eventBus *bus.Bus, conn *websocket.Conn, done chan struct{}) {
+	defer func() {
 		c.mu.Lock()
-		conn := c.conn
+		if c.done == done {
+			c.conn = nil
+			c.cancel = nil
+			c.done = nil
+			if c.state != "stopped" {
+				c.state = "failed"
+			}
+		}
 		c.mu.Unlock()
-		if conn == nil {
+		close(done)
+	}()
+
+	attempt := 0
+	for {
+		connectedAt := time.Now()
+		err := c.readConnection(ctx, eventBus, conn)
+		_ = conn.Close()
+		if ctx.Err() != nil {
 			return
 		}
-		var msg inboundMessage
-		if err := conn.ReadJSON(&msg); err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+		if time.Since(connectedAt) >= 5*time.Second {
+			attempt = 0
+		}
+		if !whatsappRetryable(err) {
+			log.Printf("whatsapp bridge stopped: %v", err)
+			return
+		}
+		c.setConnectionState(done, nil, "reconnecting")
+		for {
+			delay := c.nextReconnectDelay(attempt)
+			attempt++
+			log.Printf("whatsapp bridge disconnected: %v; reconnecting in %s", err, delay.Round(time.Millisecond))
+			if !shared.WaitForReconnect(ctx, delay) {
 				return
 			}
+			conn, err = c.connect(ctx)
+			if err == nil {
+				if !c.setConnectionState(done, conn, "connected") {
+					_ = conn.Close()
+					return
+				}
+				break
+			}
+			if !whatsappRetryable(err) {
+				log.Printf("whatsapp bridge stopped: %v", err)
+				return
+			}
+		}
+	}
+}
+
+func (c *Channel) setConnectionState(done chan struct{}, conn *websocket.Conn, state string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done != done || c.cancel == nil {
+		return false
+	}
+	c.conn = conn
+	c.state = state
+	return true
+}
+
+func (c *Channel) nextReconnectDelay(attempt int) time.Duration {
+	if c.reconnectDelay != nil {
+		return c.reconnectDelay(attempt)
+	}
+	return shared.ReconnectDelay(attempt)
+}
+
+func whatsappRetryable(err error) bool {
+	return err != nil && !shared.IsPermanentConnectionError(err)
+}
+
+func (c *Channel) readConnection(ctx context.Context, eventBus *bus.Bus, conn *websocket.Conn) error {
+	for {
+		var msg inboundMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			return err
 		}
 		if msg.Type != "message" {
 			continue
@@ -184,6 +318,9 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 			Meta:       meta,
 		}); !ok {
 			log.Printf("whatsapp event dropped: queue unavailable for target=%s from=%s", target, msg.From)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 }

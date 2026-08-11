@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -277,6 +278,28 @@ func TestChannel_DeliverDoesNotSuppressWhenAutoReplyDisabled(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected delivery to leave auto-reply policy to runtime")
+	}
+}
+
+func TestChannelThreadCacheIsBoundedAndClearedOnStop(t *testing.T) {
+	channel := &Channel{}
+	for i := 0; i < maxThreadCacheEntries+16; i++ {
+		channel.rememberThread(fmt.Sprintf("sender-%d@example.com", i), "Subject", "<message@example.com>")
+	}
+	channel.mu.Lock()
+	count := len(channel.threadBySender)
+	channel.mu.Unlock()
+	if count > maxThreadCacheEntries {
+		t.Fatalf("expected at most %d cached threads, got %d", maxThreadCacheEntries, count)
+	}
+	if err := channel.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	channel.mu.Lock()
+	count = len(channel.threadBySender)
+	channel.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("expected Stop to clear cached threads, got %d", count)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,6 +52,35 @@ func TestSecureRelayHubRejectsExpiredRoutes(t *testing.T) {
 	})
 	if result := hub.forward(false, "device-hash", secureRelayEnvelope{Type: "opaque_frame", RouteID: "route"}); result.Delivered || result.Code != "ROUTE_EXPIRED" {
 		t.Fatal("expected expired route not to forward")
+	}
+	hub.mu.RLock()
+	_, retained := hub.routes["route"]
+	hub.mu.RUnlock()
+	if retained {
+		t.Fatal("expected an expired route lookup to remove the route")
+	}
+}
+
+func TestSecureRelayHubPurgesExpiredRoutesAndBoundsLiveRoutes(t *testing.T) {
+	hub := newSecureConnectionRelayHub()
+	now := time.Now().UTC()
+	hub.registerRoute(secureRelayRoute{routeID: "expired", expiresAt: now.Add(-time.Second).UnixMilli()})
+	hub.registerRoute(secureRelayRoute{routeID: "live", expiresAt: now.Add(time.Hour).UnixMilli()})
+	hub.mu.RLock()
+	_, expiredRetained := hub.routes["expired"]
+	hub.mu.RUnlock()
+	if expiredRetained {
+		t.Fatal("expected route insertion to purge expired routes")
+	}
+
+	for i := 0; i < secureRelayMaxRoutes+8; i++ {
+		hub.registerRoute(secureRelayRoute{routeID: fmt.Sprintf("route-%d", i), expiresAt: now.Add(time.Duration(i+1) * time.Minute).UnixMilli()})
+	}
+	hub.mu.RLock()
+	count := len(hub.routes)
+	hub.mu.RUnlock()
+	if count > secureRelayMaxRoutes {
+		t.Fatalf("expected at most %d live routes, got %d", secureRelayMaxRoutes, count)
 	}
 }
 

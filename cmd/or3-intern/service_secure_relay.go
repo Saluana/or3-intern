@@ -15,7 +15,10 @@ import (
 	"or3-intern/internal/secureconn"
 )
 
-const secureRelayMaxFrameBytes = secureconn.MaxSecureFrameBodyBytes + 4096
+const (
+	secureRelayMaxFrameBytes = secureconn.MaxSecureFrameBodyBytes + 4096
+	secureRelayMaxRoutes     = 4096
+)
 
 type secureRelayEnvelope struct {
 	Type          string          `json:"type"`
@@ -90,15 +93,29 @@ func (h *secureConnectionRelayHub) unregisterDevice(deviceIDHash string, peer *s
 }
 
 func (h *secureConnectionRelayHub) registerRoute(route secureRelayRoute) {
+	now := time.Now().UTC().UnixMilli()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.purgeExpiredRoutesLocked(now)
+	if _, exists := h.routes[route.routeID]; !exists {
+		for len(h.routes) >= secureRelayMaxRoutes {
+			h.evictSoonestExpiringRouteLocked()
+		}
+	}
 	h.routes[route.routeID] = route
 }
 
 func (h *secureConnectionRelayHub) purgeExpiredRoutes() int {
-	now := time.Now().UTC().UnixMilli()
+	return h.purgeExpiredRoutesAt(time.Now().UTC().UnixMilli())
+}
+
+func (h *secureConnectionRelayHub) purgeExpiredRoutesAt(now int64) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.purgeExpiredRoutesLocked(now)
+}
+
+func (h *secureConnectionRelayHub) purgeExpiredRoutesLocked(now int64) int {
 	purged := 0
 	for id, route := range h.routes {
 		if route.expiresAt > 0 && route.expiresAt <= now {
@@ -109,6 +126,24 @@ func (h *secureConnectionRelayHub) purgeExpiredRoutes() int {
 	return purged
 }
 
+func (h *secureConnectionRelayHub) evictSoonestExpiringRouteLocked() {
+	var candidate string
+	var candidateExpiry int64
+	for id, route := range h.routes {
+		expiresAt := route.expiresAt
+		if expiresAt <= 0 {
+			expiresAt = 1<<63 - 1
+		}
+		if candidate == "" || expiresAt < candidateExpiry {
+			candidate = id
+			candidateExpiry = expiresAt
+		}
+	}
+	if candidate != "" {
+		delete(h.routes, candidate)
+	}
+}
+
 func (h *secureConnectionRelayHub) host(hostIDHash string) *secureRelayPeer {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -116,10 +151,15 @@ func (h *secureConnectionRelayHub) host(hostIDHash string) *secureRelayPeer {
 }
 
 func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env secureRelayEnvelope) secureRelayForwardResult {
-	h.mu.RLock()
-	route, ok := h.routes[strings.TrimSpace(env.RouteID)]
-	if !ok || (route.expiresAt > 0 && route.expiresAt <= time.Now().UTC().UnixMilli()) {
-		h.mu.RUnlock()
+	now := time.Now().UTC().UnixMilli()
+	routeID := strings.TrimSpace(env.RouteID)
+	h.mu.Lock()
+	route, ok := h.routes[routeID]
+	if !ok || (route.expiresAt > 0 && route.expiresAt <= now) {
+		if ok {
+			delete(h.routes, routeID)
+		}
+		h.mu.Unlock()
 		if ok {
 			return secureRelayForwardResult{Code: "ROUTE_EXPIRED", Message: "relay route expired"}
 		}
@@ -127,11 +167,11 @@ func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env sec
 	}
 	peerID = strings.TrimSpace(peerID)
 	if fromHost && peerID != route.hostIDHash {
-		h.mu.RUnlock()
+		h.mu.Unlock()
 		return secureRelayForwardResult{Code: "SENDER_MISMATCH", Message: "sender did not match the relay route host"}
 	}
 	if !fromHost && peerID != route.deviceIDHash {
-		h.mu.RUnlock()
+		h.mu.Unlock()
 		return secureRelayForwardResult{Code: "SENDER_MISMATCH", Message: "sender did not match the relay route device"}
 	}
 	var target *secureRelayPeer
@@ -140,7 +180,7 @@ func (h *secureConnectionRelayHub) forward(fromHost bool, peerID string, env sec
 	} else {
 		target = h.hosts[route.hostIDHash]
 	}
-	h.mu.RUnlock()
+	h.mu.Unlock()
 	if target == nil {
 		return secureRelayForwardResult{Code: "TARGET_UNAVAILABLE", Message: "target peer is not connected"}
 	}

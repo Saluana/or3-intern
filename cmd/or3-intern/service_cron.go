@@ -27,7 +27,7 @@ func (s *serviceServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		status := map[string]any{"enabled": s.config.Cron.Enabled, "available": s.cronSvc != nil}
+		status := map[string]any{"enabled": s.configSnapshot().Cron.Enabled, "available": s.cronSvc != nil}
 		if s.cronSvc != nil {
 			schedulerStatus, err := s.cronSvc.Status()
 			if err != nil {
@@ -101,7 +101,7 @@ func (s *serviceServer) handleCron(w http.ResponseWriter, r *http.Request) {
 
 func (s *serviceServer) requireCronService(w http.ResponseWriter) *cron.Service {
 	if s.cronSvc == nil {
-		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "cron service unavailable", "enabled": s.config.Cron.Enabled})
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "cron service unavailable", "enabled": s.configSnapshot().Cron.Enabled})
 		return nil
 	}
 	return s.cronSvc

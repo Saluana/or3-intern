@@ -24,7 +24,6 @@ var configureSections = []struct {
 	{Key: "provider", Label: "Providers", Description: "Provider profiles, model routing, favorites, fallbacks, embeddings, and secrets"},
 	{Key: "storage", Label: "Storage", Description: "Database, artifacts, and bootstrap file locations"},
 	{Key: "runtime", Label: "Runtime", Description: "Session defaults, memory retrieval, workers, and consolidation"},
-	{Key: "context", Label: "Context", Description: "Token budgets, packet mode, retrieval, and task card"},
 	{Key: "workspace", Label: "Workspace", Description: "Workspace directory and file-tool boundaries"},
 	{Key: "skills", Label: "Skills", Description: "Managed skills, trust policy, watch settings, and ClawHub"},
 	{Key: "auth", Label: "Auth", Description: "Passkeys, WebAuthn origins, sessions, step-up, and fallback policy"},
@@ -270,7 +269,7 @@ func runConfigureSection(reader *bufio.Reader, out io.Writer, cfg *config.Config
 	switch section {
 	case "channels":
 		return configureChannelsSection(reader, out, cfg)
-	case "provider", "storage", "runtime", "context", "workspace", "skills", "auth", "security", "hardening", "session", "automation", "service":
+	case "provider", "storage", "runtime", "workspace", "skills", "auth", "security", "hardening", "session", "automation", "service":
 		return configureGenericSection(reader, out, cfg, section, cwd)
 	default:
 		return fmt.Errorf("unknown configure section %q", section)
@@ -626,7 +625,7 @@ func printConfigureSummary(out io.Writer, cfg config.Config) {
 	fmt.Fprintf(out, "  Provider: %s (%s)\n", providerLabel, providerSummary)
 	fmt.Fprintf(out, "  Storage: db=%s artifacts=%s\n", cfg.DBPath, cfg.ArtifactsDir)
 	fmt.Fprintf(out, "  Runtime: session=%s workers=%d history=%d consolidation=%t model=%s\n", cfg.DefaultSessionKey, cfg.WorkerCount, cfg.HistoryMax, cfg.ConsolidationEnabled, emptyAsNone(cfg.ConsolidationModel))
-	fmt.Fprintf(out, "  Context: mode=%s maxInput=%d taskCard=%t\n", cfg.Context.Mode, cfg.Context.MaxInputTokens, cfg.Context.TaskCard.Enabled)
+	fmt.Fprintln(out, "  Runner context: managed by the selected external runner")
 	fmt.Fprintf(out, "  Workspace: dir=%s\n", workspaceSummary)
 	fmt.Fprintf(out, "  Skills: exec=%t watch=%t dir=%s\n", cfg.Skills.EnableExec, cfg.Skills.Load.Watch, emptyAsNone(cfg.Skills.ManagedDir))
 	fmt.Fprintf(out, "  Auth: enabled=%t mode=%s stepUp=%ds fallback=%s\n", cfg.Auth.Enabled, cfg.Auth.EnforcementMode, cfg.Auth.StepUpTTLSeconds, emptyAsNone(cfg.Auth.FallbackPolicy))

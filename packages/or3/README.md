@@ -6,20 +6,22 @@ old `https://or3.chat` default is intentionally disabled. See the [Connect
 release status](https://github.com/Saluana/or3-intern/blob/main/docs/connect-release-status.md)
 page for the immutable package and binary-asset contract.
 
-When the matching package and Intern release are published, start local OR3
-Intern without Go or a PATH edit:
+Start local OR3 Intern without Go or a PATH edit with the coordinated immutable
+package and binary release:
 
 ```sh
-npx @or3/connect intern
+npx @or3/connect@0.1.2 intern
 ```
 
-The source tree currently targets `@or3/connect@0.1.1`, while npm serves only
-the immutable `0.1.0` package. Do not claim the `intern` subcommand is
-available from npm until the exact package and matching `or3-intern` release
-asset resolve.
+For a source checkout, you can install the same CLI directly:
 
-For a source checkout today, use `go run ./cmd/or3-intern setup` and
-`go run ./cmd/or3-intern chat` instead.
+```sh
+./scripts/install-cli.sh
+or3-intern setup
+or3-intern chat
+```
+
+For a one-off source run, `go run ./cmd/or3-intern ...` remains available.
 
 To connect an installed external agent, choose its runtime and an explicitly
 verified staging or self-hosted endpoint:

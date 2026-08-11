@@ -36,6 +36,7 @@ type serviceTerminalWebSocketTicket struct {
 type serviceTerminalManager struct {
 	mu       sync.Mutex
 	sessions map[string]*serviceTerminalSession
+	pending  int
 }
 
 type serviceTerminalWebSocketTicketStore struct {
@@ -87,6 +88,10 @@ type serviceTerminalSession struct {
 func (s *serviceTerminalSession) snapshot() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+func (s *serviceTerminalSession) snapshotLocked() map[string]any {
 	return map[string]any{
 		"session_id":     s.ID,
 		"root_id":        s.RootID,
@@ -104,6 +109,33 @@ func (s *serviceTerminalSession) snapshot() map[string]any {
 		"approval_state": s.ApprovalState,
 		"event_count":    len(s.events),
 	}
+}
+
+func (s *serviceTerminalSession) isRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Status == "running"
+}
+
+type serviceTerminalSessionListItem struct {
+	snapshot     map[string]any
+	lastActiveAt time.Time
+	createdAt    time.Time
+	id           string
+}
+
+func (s *serviceTerminalSession) listItem() (serviceTerminalSessionListItem, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Status != "running" {
+		return serviceTerminalSessionListItem{}, false
+	}
+	return serviceTerminalSessionListItem{
+		snapshot:     s.snapshotLocked(),
+		lastActiveAt: s.LastActiveAt,
+		createdAt:    s.CreatedAt,
+		id:           s.ID,
+	}, true
 }
 
 func (s *serviceTerminalSession) subscribe() ([]serviceTerminalEvent, chan serviceTerminalEvent, func()) {
@@ -250,57 +282,56 @@ func (s *serviceServer) listTerminalSessions(w http.ResponseWriter, _ *http.Requ
 		writeServiceJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
 		return
 	}
-	s.terminals().mu.Lock()
-	sessions := make([]*serviceTerminalSession, 0, len(s.terminals().sessions))
-	for _, session := range s.terminals().sessions {
-		if session != nil && session.Status == "running" {
+	manager := s.terminals()
+	manager.mu.Lock()
+	sessions := make([]*serviceTerminalSession, 0, len(manager.sessions))
+	for _, session := range manager.sessions {
+		if session != nil {
 			sessions = append(sessions, session)
 		}
 	}
-	s.terminals().mu.Unlock()
-	slices.SortFunc(sessions, func(left, right *serviceTerminalSession) int {
-		if left == nil && right == nil {
-			return 0
-		}
-		if left == nil {
-			return 1
-		}
-		if right == nil {
-			return -1
-		}
-		if left.LastActiveAt.After(right.LastActiveAt) {
-			return -1
-		}
-		if left.LastActiveAt.Before(right.LastActiveAt) {
-			return 1
-		}
-		if left.CreatedAt.After(right.CreatedAt) {
-			return -1
-		}
-		if left.CreatedAt.Before(right.CreatedAt) {
-			return 1
-		}
-		return strings.Compare(left.ID, right.ID)
-	})
-	items := make([]map[string]any, 0, len(sessions))
+	manager.mu.Unlock()
+	items := make([]serviceTerminalSessionListItem, 0, len(sessions))
 	for _, session := range sessions {
-		items = append(items, session.snapshot())
+		if item, ok := session.listItem(); ok {
+			items = append(items, item)
+		}
 	}
-	writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
+	slices.SortFunc(items, func(left, right serviceTerminalSessionListItem) int {
+		if left.lastActiveAt.After(right.lastActiveAt) {
+			return -1
+		}
+		if left.lastActiveAt.Before(right.lastActiveAt) {
+			return 1
+		}
+		if left.createdAt.After(right.createdAt) {
+			return -1
+		}
+		if left.createdAt.Before(right.createdAt) {
+			return 1
+		}
+		return strings.Compare(left.id, right.id)
+	})
+	responseItems := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		responseItems = append(responseItems, item.snapshot)
+	}
+	writeServiceJSON(w, http.StatusOK, map[string]any{"items": responseItems})
 }
 
 func (s *serviceServer) terminalAvailable() bool {
 	if s == nil {
 		return false
 	}
-	spec := config.ProfileSpec(s.config.RuntimeProfile)
+	cfg := s.configSnapshot()
+	spec := config.ProfileSpec(cfg.RuntimeProfile)
 	if spec.ForbidExecShell || spec.ForbidPrivilegedTools {
 		return false
 	}
 	if spec.RequireSandboxForExec {
 		return false
 	}
-	return s.config.Hardening.GuardedTools && s.config.Hardening.PrivilegedTools && s.config.Hardening.EnableExecShell
+	return cfg.Hardening.GuardedTools && cfg.Hardening.PrivilegedTools && cfg.Hardening.EnableExecShell
 }
 
 func (s *serviceServer) cleanupTerminalSessions() {
@@ -369,7 +400,51 @@ func (s *serviceServer) allocateTerminalSessionID() (string, error) {
 	return "", fmt.Errorf("failed to allocate unique terminal session id")
 }
 
+func terminalRunningSessionCount(sessions map[string]*serviceTerminalSession) int {
+	count := 0
+	for _, session := range sessions {
+		if session != nil && session.isRunning() {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *serviceServer) reserveTerminalSession() bool {
+	manager := s.terminals()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if terminalRunningSessionCount(manager.sessions)+manager.pending >= serviceTerminalMaxSessions {
+		return false
+	}
+	manager.pending++
+	return true
+}
+
+func (s *serviceServer) releaseTerminalSessionReservation() {
+	manager := s.terminals()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.pending > 0 {
+		manager.pending--
+	}
+}
+
+func (s *serviceServer) storeReservedTerminalSession(session *serviceTerminalSession) {
+	manager := s.terminals()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.pending > 0 {
+		manager.pending--
+	}
+	if manager.sessions == nil {
+		manager.sessions = map[string]*serviceTerminalSession{}
+	}
+	manager.sessions[session.ID] = session
+}
+
 func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Request) {
+	cfg := s.configSnapshot()
 	limitServiceRequestBody(w, r, serviceTerminalBodyLimit)
 	var body struct {
 		RootID        string `json:"root_id"`
@@ -386,13 +461,6 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 	root, workingDir, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-	s.terminals().mu.Lock()
-	activeSessions := len(s.terminals().sessions)
-	s.terminals().mu.Unlock()
-	if activeSessions >= serviceTerminalMaxSessions {
-		writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many active terminal sessions"})
 		return
 	}
 	shellPath, err := resolveTerminalShell(strings.TrimSpace(body.Shell))
@@ -423,6 +491,16 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": reason})
 		return
 	}
+	if !s.reserveTerminalSession() {
+		writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many active terminal sessions"})
+		return
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			s.releaseTerminalSessionReservation()
+		}
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	shellArgs := terminalShellArgs(shellPath)
 	cmd := exec.CommandContext(ctx, shellPath, shellArgs...)
@@ -459,7 +537,7 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 		Status:        "running",
 		Rows:          rows,
 		Cols:          cols,
-		ApprovalMode:  string(s.config.Security.Approvals.Exec.Mode),
+		ApprovalMode:  string(cfg.Security.Approvals.Exec.Mode),
 		ApprovalState: approvalDecision.Reason,
 		ApprovalID:    approvalDecision.RequestID,
 		cmd:           cmd,
@@ -470,12 +548,8 @@ func (s *serviceServer) createTerminalSession(w http.ResponseWriter, r *http.Req
 	}
 	session.appendEvent("status", map[string]any{"status": "running"})
 	session.appendEvent("snapshot", session.snapshot())
-	s.terminals().mu.Lock()
-	if s.terminals().sessions == nil {
-		s.terminals().sessions = map[string]*serviceTerminalSession{}
-	}
-	s.terminals().sessions[session.ID] = session
-	s.terminals().mu.Unlock()
+	s.storeReservedTerminalSession(session)
+	reserved = false
 	go s.collectTerminalOutput(session, ptyFile, "pty")
 	go s.waitForTerminalSession(session)
 	writeServiceJSON(w, http.StatusCreated, session.snapshot())

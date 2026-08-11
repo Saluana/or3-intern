@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"or3-intern/internal/approval"
@@ -37,12 +38,13 @@ const (
 var processStartedAt = time.Now().UTC()
 
 type Service struct {
-	Config   config.Config
-	Broker   *approval.Broker
-	Jobs     *jobs.Registry
-	DB       *db.DB
-	Provider *providers.Client
-	Audit    *security.AuditLogger
+	runtimeMu sync.RWMutex
+	Config    config.Config
+	Broker    *approval.Broker
+	Jobs      *jobs.Registry
+	DB        *db.DB
+	Provider  *providers.Client
+	Audit     *security.AuditLogger
 }
 
 type ApprovalFilter struct {
@@ -69,6 +71,11 @@ type CapabilitiesReport struct {
 	RuntimeProfile     string                       `json:"runtimeProfile"`
 	Hosted             bool                         `json:"hosted"`
 	HostID             string                       `json:"hostId"`
+	ExecutionModel     string                       `json:"executionModel"`
+	DefaultRunner      string                       `json:"defaultRunner"`
+	RunnerMode         string                       `json:"runnerMode"`
+	RunnerIsolation    string                       `json:"runnerIsolation"`
+	TerminalAvailable  bool                         `json:"terminalAvailable"`
 	ApprovalBroker     map[string]any               `json:"approvalBroker"`
 	Approvals          map[string]string            `json:"approvals"`
 	SkillExecEnabled   bool                         `json:"skillExecEnabled"`
@@ -84,12 +91,13 @@ type CapabilitiesReport struct {
 }
 
 type HealthReport struct {
-	Status                  string `json:"status"`
-	RuntimeAvailable        bool   `json:"runtimeAvailable"`
-	JobRegistryAvailable    bool   `json:"jobRegistryAvailable"`
-	ApprovalBrokerAvailable bool   `json:"approvalBrokerAvailable"`
-	ProcessID               int    `json:"processId"`
-	StartedAt               string `json:"startedAt"`
+	Status                  string            `json:"status"`
+	RuntimeAvailable        bool              `json:"runtimeAvailable"`
+	JobRegistryAvailable    bool              `json:"jobRegistryAvailable"`
+	ApprovalBrokerAvailable bool              `json:"approvalBrokerAvailable"`
+	ProcessID               int               `json:"processId"`
+	StartedAt               string            `json:"startedAt"`
+	ChannelStatuses         map[string]string `json:"channelStatuses,omitempty"`
 }
 
 type ReadinessReport struct {
@@ -162,7 +170,7 @@ type ScopeLinkResult struct {
 // New builds a control-plane service from explicit runtime dependencies.
 func New(cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker, jobRegistry *jobs.Registry) *Service {
 	return &Service{
-		Config:   cfg,
+		Config:   config.Clone(cfg),
 		DB:       database,
 		Provider: provider,
 		Audit:    audit,
@@ -173,12 +181,41 @@ func New(cfg config.Config, database *db.DB, provider *providers.Client, audit *
 
 func NewLocal(cfg config.Config, database *db.DB, provider *providers.Client, audit *security.AuditLogger, broker *approval.Broker) *Service {
 	return &Service{
-		Config:   cfg,
+		Config:   config.Clone(cfg),
 		DB:       database,
 		Provider: provider,
 		Audit:    audit,
 		Broker:   broker,
 	}
+}
+
+// SetRuntimeConfig publishes the configuration-dependent control-plane
+// dependencies as one snapshot. Database, audit, approval, and job
+// dependencies are process-lifetime values and remain unchanged.
+func (s *Service) SetRuntimeConfig(cfg config.Config, provider *providers.Client) {
+	if s == nil {
+		return
+	}
+	s.runtimeMu.Lock()
+	s.Config = config.Clone(cfg)
+	s.Provider = provider
+	s.runtimeMu.Unlock()
+}
+
+func (s *Service) runtimeSnapshot() (config.Config, *providers.Client) {
+	if s == nil {
+		return config.Config{}, nil
+	}
+	s.runtimeMu.RLock()
+	cfg := config.Clone(s.Config)
+	provider := s.Provider
+	s.runtimeMu.RUnlock()
+	return cfg, provider
+}
+
+func (s *Service) configSnapshot() config.Config {
+	cfg, _ := s.runtimeSnapshot()
+	return cfg
 }
 
 func (s *Service) GetHealth() HealthReport {
@@ -197,10 +234,7 @@ func (s *Service) GetHealth() HealthReport {
 }
 
 func (s *Service) GetReadiness() ReadinessReport {
-	cfg := config.Config{}
-	if s != nil {
-		cfg = s.Config
-	}
+	cfg := s.configSnapshot()
 	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeStartupService})
 	return ReadinessReport{
 		Status:   report.Summary.Status,
@@ -214,7 +248,7 @@ func (s *Service) GetCapabilities(channelFilter, triggerFilter string) Capabilit
 	cfg := config.Config{}
 	var broker *approval.Broker
 	if s != nil {
-		cfg = s.Config
+		cfg = s.configSnapshot()
 		broker = s.Broker
 	}
 	return CollectCapabilitiesReport(cfg, broker, channelFilter, triggerFilter)
@@ -376,6 +410,7 @@ func (s *Service) GetJob(jobID string) (jobs.Snapshot, error) {
 }
 
 func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatusReport, error) {
+	cfg := s.configSnapshot()
 	database, err := s.requireDB()
 	if err != nil {
 		return EmbeddingStatusReport{}, err
@@ -388,15 +423,15 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatusReport
 	if err != nil {
 		return EmbeddingStatusReport{}, err
 	}
-	currentFingerprint := providers.EmbeddingFingerprint(s.Config.Provider.APIBase, s.Config.Provider.EmbedModel, s.Config.Provider.EmbedDimensions)
+	currentFingerprint := providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions)
 	health, err := database.CollectMemoryEmbeddingHealth(ctx, currentFingerprint)
 	if err != nil {
 		return EmbeddingStatusReport{}, err
 	}
 	docSync := memory.LatestDocSyncState()
-	status := deriveEmbeddingStatus(dims, storedFingerprint, currentFingerprint, health, strings.TrimSpace(s.Config.Provider.EmbedModel))
+	status := deriveEmbeddingStatus(dims, storedFingerprint, currentFingerprint, health, strings.TrimSpace(cfg.Provider.EmbedModel))
 	searchMode := "fts"
-	if strings.TrimSpace(s.Config.Provider.EmbedModel) != "" {
+	if strings.TrimSpace(cfg.Provider.EmbedModel) != "" {
 		searchMode = "hybrid"
 	}
 	lastDocSync := health.LastDocSyncAt
@@ -460,13 +495,13 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (s *Service) RebuildEmbeddings(ctx context.Context, target string) (EmbeddingRebuildResult, error) {
+	cfg, provider := s.runtimeSnapshot()
 	database, err := s.requireDB()
 	if err != nil {
 		return EmbeddingRebuildResult{}, err
 	}
-	provider, err := s.requireProvider()
-	if err != nil {
-		return EmbeddingRebuildResult{}, err
+	if provider == nil {
+		return EmbeddingRebuildResult{}, ErrProviderUnavailable
 	}
 	target = strings.ToLower(strings.TrimSpace(target))
 	if target == "" {
@@ -475,34 +510,34 @@ func (s *Service) RebuildEmbeddings(ctx context.Context, target string) (Embeddi
 	result := EmbeddingRebuildResult{
 		Status:      "ok",
 		Target:      target,
-		Fingerprint: providers.EmbeddingFingerprint(s.Config.Provider.APIBase, s.Config.Provider.EmbedModel, s.Config.Provider.EmbedDimensions),
+		Fingerprint: providers.EmbeddingFingerprint(cfg.Provider.APIBase, cfg.Provider.EmbedModel, cfg.Provider.EmbedDimensions),
 	}
-	if strings.TrimSpace(s.Config.Provider.EmbedModel) == "" {
+	if strings.TrimSpace(cfg.Provider.EmbedModel) == "" {
 		return EmbeddingRebuildResult{}, fmt.Errorf("provider.embedModel is not configured")
 	}
 	switch target {
 	case "memory":
-		count, skipped, err := rebuildMemoryEmbeddings(ctx, database, provider, s.Config.Provider.EmbedModel, result.Fingerprint)
+		count, skipped, err := rebuildMemoryEmbeddings(ctx, database, provider, cfg.Provider.EmbedModel, result.Fingerprint)
 		if err != nil {
 			return EmbeddingRebuildResult{}, err
 		}
 		result.MemoryNotesRebuilt = count
 		result.Skipped = append(result.Skipped, skipped...)
 	case "docs":
-		docsRebuilt, skipped, err := rebuildDocEmbeddings(ctx, s.Config, database, provider, result.Fingerprint)
+		docsRebuilt, skipped, err := rebuildDocEmbeddings(ctx, cfg, database, provider, result.Fingerprint)
 		if err != nil {
 			return EmbeddingRebuildResult{}, err
 		}
 		result.DocsRebuilt = docsRebuilt
 		result.Skipped = append(result.Skipped, skipped...)
 	case "all":
-		count, skipped, err := rebuildMemoryEmbeddings(ctx, database, provider, s.Config.Provider.EmbedModel, result.Fingerprint)
+		count, skipped, err := rebuildMemoryEmbeddings(ctx, database, provider, cfg.Provider.EmbedModel, result.Fingerprint)
 		if err != nil {
 			return EmbeddingRebuildResult{}, err
 		}
 		result.MemoryNotesRebuilt = count
 		result.Skipped = append(result.Skipped, skipped...)
-		docsRebuilt, skipped, err := rebuildDocEmbeddings(ctx, s.Config, database, provider, result.Fingerprint)
+		docsRebuilt, skipped, err := rebuildDocEmbeddings(ctx, cfg, database, provider, result.Fingerprint)
 		if err != nil {
 			return EmbeddingRebuildResult{}, err
 		}
@@ -515,10 +550,11 @@ func (s *Service) RebuildEmbeddings(ctx context.Context, target string) (Embeddi
 }
 
 func (s *Service) GetAuditStatus(ctx context.Context) (AuditStatusReport, error) {
+	cfg := s.configSnapshot()
 	report := AuditStatusReport{
-		Enabled:       s.Config.Security.Audit.Enabled,
-		Strict:        s.Config.Security.Audit.Strict,
-		VerifyOnStart: s.Config.Security.Audit.VerifyOnStart,
+		Enabled:       cfg.Security.Audit.Enabled,
+		Strict:        cfg.Security.Audit.Strict,
+		VerifyOnStart: cfg.Security.Audit.VerifyOnStart,
 	}
 	audit, ok := s.auditLogger()
 	if !ok {
@@ -651,11 +687,9 @@ func (s *Service) requireDB() (*db.DB, error) {
 }
 
 func (s *Service) requireProvider() (*providers.Client, error) {
-	if s == nil {
-		return nil, ErrProviderUnavailable
-	}
-	if s.Provider != nil {
-		return s.Provider, nil
+	_, provider := s.runtimeSnapshot()
+	if provider != nil {
+		return provider, nil
 	}
 	return nil, ErrProviderUnavailable
 }
@@ -712,10 +746,20 @@ func rebuildDocEmbeddings(ctx context.Context, cfg config.Config, database *db.D
 
 func CollectCapabilitiesReport(cfg config.Config, broker *approval.Broker, channelFilter, triggerFilter string) CapabilitiesReport {
 	spec := config.ProfileSpec(cfg.RuntimeProfile)
+	defaultRunner := strings.TrimSpace(cfg.Runners.Default)
+	if defaultRunner == "" {
+		defaultRunner = "opencode"
+	}
+	terminalAvailable := cfg.Hardening.GuardedTools && cfg.Hardening.PrivilegedTools && cfg.Hardening.EnableExecShell && !spec.ForbidExecShell && !spec.ForbidPrivilegedTools && !spec.RequireSandboxForExec
 	report := CapabilitiesReport{
 		RuntimeProfile:     string(cfg.RuntimeProfile),
 		Hosted:             spec.Hosted,
 		HostID:             cfg.Security.Approvals.HostID,
+		ExecutionModel:     "runner-managed",
+		DefaultRunner:      defaultRunner,
+		RunnerMode:         cfg.Runners.DefaultMode,
+		RunnerIsolation:    cfg.Runners.DefaultIsolation,
+		TerminalAvailable:  terminalAvailable,
 		Approvals:          ApprovalModes(cfg),
 		SkillExecEnabled:   false,
 		ExecAvailable:      false,

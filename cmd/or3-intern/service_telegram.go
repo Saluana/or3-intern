@@ -12,6 +12,7 @@ import (
 	"time"
 
 	telegramchannel "or3-intern/internal/channels/telegram"
+	"or3-intern/internal/config"
 )
 
 type serviceTelegramChatCandidate struct {
@@ -58,7 +59,8 @@ func (s *serviceServer) handleConfigureTelegramChats(w http.ResponseWriter, r *h
 		return
 	}
 	limitServiceRequestBody(w, r, serviceConfigureBodyLimit)
-	token := strings.TrimSpace(s.config.Channels.Telegram.Token)
+	cfg := s.configSnapshot()
+	token := strings.TrimSpace(cfg.Channels.Telegram.Token)
 	if r.Method == http.MethodPost {
 		var body struct {
 			Token string `json:"token"`
@@ -76,7 +78,7 @@ func (s *serviceServer) handleConfigureTelegramChats(w http.ResponseWriter, r *h
 		}
 	}
 	limit := serviceParsePositiveInt(r.URL.Query().Get("limit"), 20, 100)
-	items := s.knownTelegramChatCandidates(token, limit)
+	items := s.knownTelegramChatCandidates(cfg, token, limit)
 	if token == "" {
 		if len(items) > 0 {
 			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items, "warning": "Add a Telegram bot token to refresh recent chats."})
@@ -85,7 +87,7 @@ func (s *serviceServer) handleConfigureTelegramChats(w http.ResponseWriter, r *h
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "Paste a Telegram bot token first, then message the bot and try discovery again."})
 		return
 	}
-	apiItems, err := s.discoverTelegramChats(r.Context(), token, s.config.Channels.Telegram.APIBase, limit)
+	apiItems, err := s.discoverTelegramChats(r.Context(), token, cfg.Channels.Telegram.APIBase, limit)
 	if err != nil {
 		if len(items) > 0 {
 			writeServiceJSON(w, http.StatusOK, map[string]any{"items": items, "warning": "Could not refresh from Telegram, showing chats OR3 already knows."})
@@ -98,20 +100,20 @@ func (s *serviceServer) handleConfigureTelegramChats(w http.ResponseWriter, r *h
 	writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *serviceServer) knownTelegramChatCandidates(token string, limit int) []serviceTelegramChatCandidate {
+func (s *serviceServer) knownTelegramChatCandidates(cfg config.Config, token string, limit int) []serviceTelegramChatCandidate {
 	items := make([]serviceTelegramChatCandidate, 0)
-	defaultID := strings.TrimSpace(s.config.Channels.Telegram.DefaultChatID)
+	defaultID := strings.TrimSpace(cfg.Channels.Telegram.DefaultChatID)
 	if defaultID != "" {
 		items = append(items, serviceTelegramChatCandidate{ID: defaultID, Type: "saved", DisplayName: "Primary Telegram chat", LastMessageText: "Saved in OR3 settings."})
 	}
-	for _, id := range s.config.Channels.Telegram.AllowedChatIDs {
+	for _, id := range cfg.Channels.Telegram.AllowedChatIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
 		}
 		items = append(items, serviceTelegramChatCandidate{ID: id, Type: "saved", DisplayName: "Trusted Telegram chat", LastMessageText: "Saved in OR3 settings."})
 	}
-	for _, item := range telegramchannel.RecentChats(s.config.Channels.Telegram.APIBase, token, limit) {
+	for _, item := range telegramchannel.RecentChats(cfg.Channels.Telegram.APIBase, token, limit) {
 		items = append(items, serviceTelegramChatCandidate{ID: item.ID, Type: item.Type, Title: item.Title, Username: item.Username, DisplayName: item.DisplayName, LastMessageAt: item.LastMessageAt, LastMessageText: item.LastMessageText})
 	}
 	return mergeTelegramChatCandidates(nil, items, limit)

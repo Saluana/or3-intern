@@ -5,10 +5,21 @@ import (
 	"strings"
 
 	"or3-intern/internal/config"
+	"or3-intern/internal/safetymode"
 )
 
 func securityFindings(cfg config.Config, opts Options) []Finding {
 	findings := []Finding{}
+	if isIntentionalLocalRelaxedPosture(cfg) {
+		return append(findings, Finding{
+			ID:       "security.relaxed_local_posture",
+			Area:     "security",
+			Severity: SeverityInfo,
+			Summary:  "relaxed local posture intentionally leaves audit logging, encrypted secret storage, and access profiles off",
+			Detail:   "This is expected while OR3 is used only on this computer. Choose Balanced or Locked Down before enabling service access, channels, or webhooks.",
+			FixMode:  FixModeNone,
+		})
+	}
 	if !cfg.Security.Audit.Enabled {
 		findings = append(findings, Finding{
 			ID:       "security.audit_disabled",
@@ -89,6 +100,14 @@ func securityFindings(cfg config.Config, opts Options) []Finding {
 		})
 	}
 	return findings
+}
+
+func isIntentionalLocalRelaxedPosture(cfg config.Config) bool {
+	if cfg.Service.Enabled || hasExternalIntegrations(cfg) {
+		return false
+	}
+	inference := safetymode.Infer(cfg)
+	return !inference.IsCustom && inference.Mode == safetymode.ModeRelaxed
 }
 
 func keyFileFinding(id, area, path, summary string, fixMode FixMode) *Finding {

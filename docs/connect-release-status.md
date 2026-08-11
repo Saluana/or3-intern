@@ -16,30 +16,36 @@ must not be presented as the managed Cloud setup.
 
 ## Immutable package and asset contract
 
-The registry check on 2026-08-07 returned:
+The coordinated 2026-08-11 release target is:
 
-| Artifact | Published immutable version | Current source version | Launch status |
+| Artifact | Coordinated version | Current source version | Required outcome |
 | --- | --- | --- | --- |
-| `@or3/intern-client` | `0.1.1` | `0.1.1` | Keep; never republish this version. |
-| `@or3/connect` | `0.1.0` only | `0.1.1` | The `0.1.1` source package is not published yet. |
-| `or3-intern` GitHub release assets | `v0.1.0` only | Bootstrap source targets `v0.1.1` | A matching `v0.1.1` asset release is still required. |
+| `@or3/intern-client` | `0.1.2` | `0.1.2` | Publish once from tag `v0.1.2`; never republish. |
+| `@or3/connect` | `0.1.2` | `0.1.2` | Publish once from tag `v0.1.2`; never republish. |
+| `or3-intern` GitHub release assets | `v0.1.2` | Bootstrap targets `v0.1.2` | Produce all platform archives and checksums from the same tag. |
 
-Consequently, do not claim that `npx @or3/connect@0.1.1 intern` is available
-until both the exact npm package and the matching GitHub release assets resolve.
-Do not republish `@or3/intern-client@0.1.1`. Any release that contains the
-pending bootstrap changes must use one new coordinated version for the package,
-source tag, and binary assets, then verify exact `npm view` and `npx` results
-after registry propagation.
+The release is complete only when the GitHub Actions run succeeds, both exact
+npm versions resolve, the matching GitHub release assets resolve, and a clean
+`npx @or3/connect@0.1.2 intern --help` smoke passes. A successful workflow and
+npm propagation are separate checks.
 
 ## Supported commands today
 
-From an `or3-intern` source checkout, local setup does not use Connect or a
-central endpoint:
+Local setup does not use remote Connect or a central endpoint:
 
 ```bash
-go run ./cmd/or3-intern setup
-go run ./cmd/or3-intern chat
+npx @or3/connect@0.1.2 intern
 ```
+
+From an `or3-intern` source checkout:
+
+```bash
+./scripts/install-cli.sh
+or3-intern setup
+or3-intern chat
+```
+
+For a one-off source run, use `go run ./cmd/or3-intern setup` instead.
 
 For a verified staging or self-hosted endpoint only, an operator can opt into
 the advanced flow explicitly:
@@ -50,4 +56,3 @@ or3-intern connect --cloud-url https://staging.example.test
 
 Never paste a token, edit generated `.env` files, or use the old bare
 `npx @or3/connect` command as the managed Cloud recommendation.
-

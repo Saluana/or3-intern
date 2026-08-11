@@ -485,9 +485,15 @@ func (cm *ChatManager) RespondToTurnApproval(ctx context.Context, turnID string,
 	}
 
 	// Fallback: issue an approval token. The next turn submission carries
-	// it via ApprovalToken and the broker will accept it inline.
+	// it via ApprovalToken and the broker will accept it inline. The paused
+	// native request cannot continue after its runtime has disappeared, so
+	// close this turn rather than leaving it falsely marked as running.
 	cm.appendApprovalResponseEvent(ctx, turn, sess, "approve", RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID, FallbackToToken: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession})
-	_ = cm.DB.MarkRunnerChatTurnApprovalResumed(ctx, turn.ID, db.NowMS())
+	_ = cm.DB.FinalizeRunnerChatTurn(ctx, turn.ID, db.RunnerChatTurnFinalize{
+		Status:       db.RunnerChatTurnStatusFailed,
+		ErrorMessage: "approval accepted but runner continuation is unavailable; retry the turn",
+		CompletedAt:  db.NowMS(),
+	})
 	return RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID, FallbackToToken: true, Token: issued.Token, AllowlistID: issued.AllowlistID, AllowlistSession: opts.AllowSession}, nil
 }
 
@@ -539,6 +545,26 @@ func (cm *ChatManager) lastApprovalRef(ctx context.Context, turn db.RunnerChatTu
 		}
 	}
 	return approvalID, ref, hasRef
+}
+
+// FindTurnWaitingForApproval finds the durable runner-chat turn associated
+// with an approval request. Approval ids live in the persisted event payload,
+// so inspect the bounded set of turns that are currently paused.
+func (cm *ChatManager) FindTurnWaitingForApproval(ctx context.Context, approvalID int64) (db.RunnerChatTurn, bool, error) {
+	if cm == nil || cm.DB == nil || approvalID <= 0 {
+		return db.RunnerChatTurn{}, false, nil
+	}
+	turns, err := cm.DB.ListRunnerChatTurnsAwaitingApproval(ctx, 0)
+	if err != nil {
+		return db.RunnerChatTurn{}, false, err
+	}
+	for _, turn := range turns {
+		turnApprovalID, _, _ := cm.lastApprovalRef(ctx, turn)
+		if turnApprovalID == approvalID {
+			return turn, true, nil
+		}
+	}
+	return db.RunnerChatTurn{}, false, nil
 }
 
 func nativeRequestRefFromMap(raw map[string]any) NativeRequestRef {

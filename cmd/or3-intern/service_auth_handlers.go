@@ -15,6 +15,7 @@ import (
 func (s *serviceServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 	relative := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/auth"), "/")
 	api := s.app()
+	cfg := s.configSnapshot()
 	identity := serviceAuthIdentityFromContext(r.Context())
 	sessionToken := serviceAuthSessionToken(r)
 	switch relative {
@@ -24,15 +25,15 @@ func (s *serviceServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeServiceValue(w, http.StatusOK, map[string]any{
-			"passkeysEnabled":            s.config.Auth.Enabled,
-			"passkeyMode":                string(s.config.Auth.EnforcementMode),
-			"rpId":                       s.config.Auth.RPID,
-			"origins":                    append([]string{}, s.config.Auth.AllowedOrigins...),
+			"passkeysEnabled":            cfg.Auth.Enabled,
+			"passkeyMode":                string(cfg.Auth.EnforcementMode),
+			"rpId":                       cfg.Auth.RPID,
+			"origins":                    append([]string{}, cfg.Auth.AllowedOrigins...),
 			"webauthnAvailable":          api.Auth() != nil && api.Auth().Enabled(),
-			"sessionRequired":            s.config.Auth.EnforcementMode == config.AuthEnforcementSession,
-			"stepUpRequiredForSensitive": s.config.Auth.RequirePasskeyForSensitive,
+			"sessionRequired":            cfg.Auth.EnforcementMode == config.AuthEnforcementSession,
+			"stepUpRequiredForSensitive": cfg.Auth.RequirePasskeyForSensitive,
 			"secureStorageRecommended":   true,
-			"fallbackPolicy":             s.config.Auth.FallbackPolicy,
+			"fallbackPolicy":             cfg.Auth.FallbackPolicy,
 			"sessionHeader":              "X-Or3-Session",
 		})
 		return

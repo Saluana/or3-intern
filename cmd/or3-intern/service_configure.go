@@ -15,6 +15,8 @@ import (
 	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
+	"or3-intern/internal/memorysvc"
+	"or3-intern/internal/providers"
 	"or3-intern/internal/runners"
 )
 
@@ -124,7 +126,11 @@ func applyServiceConfigureSetValue(cfg *config.Config, section, channel, fieldKe
 	if cfg == nil {
 		return false, nil
 	}
-	if field, ok := serviceConfigureFieldDefinition(*cfg, section, channel, fieldKey); ok && field.Kind == configureFieldToggle {
+	field, ok := serviceConfigureFieldDefinition(*cfg, section, channel, fieldKey)
+	if !ok {
+		return false, nil
+	}
+	if field.Kind == configureFieldToggle {
 		if toggleValue, ok := serviceConfigureBoolValue(value); ok {
 			if setToggleFieldValue(cfg, section, channel, fieldKey, toggleValue) {
 				return true, nil
@@ -157,6 +163,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/configure"), "/")
+	cfg := s.configSnapshot()
 	switch {
 	case path == "" || path == "sections":
 		if r.Method != http.MethodGet {
@@ -169,7 +176,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 				"key":         section.Key,
 				"label":       section.Label,
 				"description": section.Description,
-				"status":      sectionStatus(s.config, section.Key),
+				"status":      sectionStatus(cfg, section.Key),
 			})
 		}
 		writeServiceJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -190,9 +197,9 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "channel is required for channels section"})
 				return
 			}
-			fields = buildChannelFields(s.config, channel)
+			fields = buildChannelFields(cfg, channel)
 		} else {
-			fields = buildSectionFields(s.config, section, "")
+			fields = buildSectionFields(cfg, section, "")
 		}
 		writeServiceValue(w, http.StatusOK, map[string]any{
 			"section": section,
@@ -206,7 +213,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 	case path == "providers":
 		switch r.Method {
 		case http.MethodGet:
-			writeServiceValue(w, http.StatusOK, serviceProviderStatus(s.config))
+			writeServiceValue(w, http.StatusOK, serviceProviderStatus(cfg))
 		case http.MethodPost:
 			s.handleConfigureProviderSave(w, r, "")
 		default:
@@ -257,13 +264,20 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "changes are required"})
 			return
 		}
-		next := s.config
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+		next := config.Clone(s.config)
 		for _, change := range body.Changes {
 			section := normalizeConfigureSectionKey(change.Section)
 			channel := strings.TrimSpace(change.Channel)
 			field := strings.TrimSpace(change.Field)
 			if section == "" || field == "" {
 				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "section and field are required for each change"})
+				return
+			}
+			definition, supported := serviceConfigureFieldDefinition(next, section, channel, field)
+			if !supported {
+				writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported field update: " + section + "." + field})
 				return
 			}
 			switch strings.ToLower(strings.TrimSpace(change.Op)) {
@@ -278,11 +292,15 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 					return
 				}
 			case "toggle":
-				if !toggleFieldValue(&next, section, channel, field) {
+				if definition.Kind != configureFieldToggle || !toggleFieldValue(&next, section, channel, field) {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported toggle field: " + section + "." + field})
 					return
 				}
 			case "choose":
+				if definition.Kind != configureFieldChoice {
+					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported choice field: " + section + "." + field})
+					return
+				}
 				changed, err := applyChoiceSelection(&next, section, channel, field, change.Value.String())
 				if err != nil {
 					writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -298,7 +316,7 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		normalizeDiscordInboundDefaults(&next)
-		path, err := s.saveConfigureConfig(next)
+		path, err := s.saveConfigureConfigLocked(next)
 		if err != nil {
 			writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 			return
@@ -309,7 +327,9 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (s *serviceServer) saveConfigureConfig(next config.Config) (string, error) {
+// saveConfigureConfigLocked persists and publishes a config update. The caller
+// must hold s.configMu's write lock across the read-modify-write transaction.
+func (s *serviceServer) saveConfigureConfigLocked(next config.Config) (string, error) {
 	path := s.configPath
 	if strings.TrimSpace(path) == "" {
 		path = cfgPathOrDefault("")
@@ -317,7 +337,7 @@ func (s *serviceServer) saveConfigureConfig(next config.Config) (string, error) 
 	if err := config.Save(path, next); err != nil {
 		return path, err
 	}
-	s.applyLiveConfig(next)
+	s.applyLiveConfigLocked(next)
 	return path, nil
 }
 
@@ -325,21 +345,38 @@ func (s *serviceServer) applyLiveConfig(next config.Config) {
 	if s == nil {
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	s.applyLiveConfigLocked(next)
+}
+
+func (s *serviceServer) applyLiveConfigLocked(next config.Config) {
+	if s == nil {
+		return
+	}
+	next = config.Clone(next)
+	embedProvider := newEmbeddingProviderClient(next)
 	s.config = next
-	s.applyLiveRunnerConfig(next)
-	if s.controlSvc != nil {
-		s.controlSvc.Config = next
-		s.controlSvc.Provider = newProviderClient(next)
+	s.embedProvider = embedProvider
+	if database := s.runtimeDB(); database != nil {
+		s.memorySvc = memorysvc.New(next, database, embedProvider, currentEmbedFingerprint(next))
+	} else {
+		s.memorySvc = nil
 	}
-	if s.appSvc != nil {
-		s.appSvc.SetConfig(next)
+	s.applyLiveRunnerConfig(next, embedProvider)
+	s.controlWithConfig(next, embedProvider).SetRuntimeConfig(next, embedProvider)
+	components := serviceRuntimeComponents{
+		runnerManager:    s.runnerManager,
+		chatManager:      s.chatManager,
+		turnOrchestrator: s.turnOrchestrator,
 	}
+	s.appWithRuntime(next, components, embedProvider).SetConfig(next)
 	if s.modelCatalog != nil {
 		s.modelCatalog.Clear()
 	}
 }
 
-func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
+func (s *serviceServer) applyLiveRunnerConfig(next config.Config, embedProvider *providers.Client) {
 	if s == nil {
 		return
 	}
@@ -362,21 +399,24 @@ func (s *serviceServer) applyLiveRunnerConfig(next config.Config) {
 	}
 	database := s.runtimeDB()
 	s.chatManager = buildRuntimeChatManager(next, database, s.runnerManager, s.jobs, s.broker)
-	s.turnOrchestrator = s.rebuildRunnerTurnOrchestrator(next, database)
-	if s.appSvc != nil {
-		s.appSvc.SetRunnerRuntime(s.runnerManager, s.turnOrchestrator)
+	s.turnOrchestrator = s.rebuildRunnerTurnOrchestrator(next, database, embedProvider)
+	components := serviceRuntimeComponents{
+		runnerManager:    s.runnerManager,
+		chatManager:      s.chatManager,
+		turnOrchestrator: s.turnOrchestrator,
 	}
+	s.appWithRuntime(next, components, embedProvider).SetRunnerRuntime(s.runnerManager, s.turnOrchestrator)
 }
 
 func (s *serviceServer) runtimeDB() *db.DB {
 	return s.serviceDB()
 }
 
-func (s *serviceServer) rebuildRunnerTurnOrchestrator(next config.Config, database *db.DB) *app.RunnerTurnOrchestrator {
+func (s *serviceServer) rebuildRunnerTurnOrchestrator(next config.Config, database *db.DB, embedProvider *providers.Client) *app.RunnerTurnOrchestrator {
 	if s == nil || s.chatManager == nil {
 		return nil
 	}
-	return buildRunnerTurnOrchestrator(next, s.chatManager, database, s.serviceMemRetriever(), s.serviceDocRetriever(), s.serviceEmbedProvider())
+	return buildRunnerTurnOrchestrator(next, s.chatManager, database, s.serviceMemRetriever(), s.serviceDocRetriever(), embedProvider)
 }
 
 func serviceNormalizeProviderKey(value string) string {
@@ -431,7 +471,9 @@ func (s *serviceServer) handleConfigureProviderSave(w http.ResponseWriter, r *ht
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "apiBase must be a valid URL"})
 		return
 	}
-	next := s.config
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	next := config.Clone(s.config)
 	if next.Providers == nil {
 		next.Providers = config.ProviderProfiles{}
 	}
@@ -453,7 +495,7 @@ func (s *serviceServer) handleConfigureProviderSave(w http.ResponseWriter, r *ht
 		profile.DefaultDimensions = body.DefaultDimensions
 	}
 	next.Providers[key] = profile
-	path, err := s.saveConfigureConfig(next)
+	path, err := s.saveConfigureConfigLocked(next)
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 		return
@@ -471,14 +513,16 @@ func (s *serviceServer) handleConfigureProviderDelete(w http.ResponseWriter, r *
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "built-in providers cannot be deleted"})
 		return
 	}
-	next := s.config
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	next := config.Clone(s.config)
 	if next.Providers != nil {
 		delete(next.Providers, key)
 	}
 	if next.FavoriteModels != nil {
 		delete(next.FavoriteModels, key)
 	}
-	path, err := s.saveConfigureConfig(next)
+	path, err := s.saveConfigureConfigLocked(next)
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 		return
@@ -571,7 +615,9 @@ func (s *serviceServer) handleConfigureFavoriteModel(w http.ResponseWriter, r *h
 	if body.Favorite != nil {
 		favorite = *body.Favorite
 	}
-	next := s.config
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	next := config.Clone(s.config)
 	if next.FavoriteModels == nil {
 		next.FavoriteModels = config.FavoriteModelsConfig{}
 	}
@@ -587,7 +633,7 @@ func (s *serviceServer) handleConfigureFavoriteModel(w http.ResponseWriter, r *h
 		out = append([]config.FavoriteModelConfig{{Model: model, Label: strings.TrimSpace(body.Label)}}, out...)
 	}
 	next.FavoriteModels[provider] = out
-	path, err := s.saveConfigureConfig(next)
+	path, err := s.saveConfigureConfigLocked(next)
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 		return

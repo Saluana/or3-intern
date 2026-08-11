@@ -33,8 +33,8 @@ const SUPPORTED_CONNECT_SUBCOMMANDS = new Set([
     'run',
     'setup',
 ]);
-const CONNECT_USAGE = 'Usage: npx @or3/connect intern [command] | npx @or3/connect [status|doctor|disconnect|uninstall] [options]\n';
-const CONNECT_WITHHELD_MESSAGE = 'Remote OR3 Connect is not enabled by default. Use `npx @or3/connect intern` for local Intern, or pass an explicitly verified staging/self-hosted `--cloud-url` to the advanced Connect command.\n';
+const CONNECT_USAGE = 'Usage: npx @or3/connect [status|doctor|disconnect|uninstall] [options]\nLocal Intern: npx @or3/connect intern\n';
+const CONNECT_WITHHELD_MESSAGE = 'Remote OR3 Connect is not enabled by default. Run `npx @or3/connect intern` for local Intern, or pass an explicitly verified staging/self-hosted `--cloud-url` to the advanced Connect command.\n';
 
 const DEFAULT_REQUEST_POLICY = Object.freeze({
     timeoutMs: 20_000,

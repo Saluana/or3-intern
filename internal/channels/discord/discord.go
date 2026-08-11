@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -32,6 +33,7 @@ const (
 	discordGatewayIntentDirectMessages = 1 << 12
 	discordGatewayIntentMessageContent = 1 << 15
 	discordGatewayIntents              = discordGatewayIntentGuilds | discordGatewayIntentGuildMessages | discordGatewayIntentDirectMessages | discordGatewayIntentMessageContent
+	discordNameCacheMaxEntries         = 2048
 )
 
 // Channel receives Discord gateway events and sends outbound messages.
@@ -47,10 +49,15 @@ type Channel struct {
 	mu       sync.Mutex
 	conn     *websocket.Conn
 	cancel   context.CancelFunc
+	done     chan struct{}
+	state    string
 	botID    string
 	dedupe   *rootchannels.IngressDeduplicator
 	guilds   map[string]string
 	channels map[string]string
+
+	// reconnectDelay is test-only injection for prompt deterministic retries.
+	reconnectDelay func(int) time.Duration
 }
 
 // Name returns the registered channel name.
@@ -61,50 +68,100 @@ func (c *Channel) Start(ctx context.Context, eventBus *bus.Bus) error {
 	if strings.TrimSpace(c.Config.Token) == "" {
 		return fmt.Errorf("discord token not configured")
 	}
-	url := strings.TrimSpace(c.Config.GatewayURL)
-	if url == "" {
-		var resp struct {
-			URL string `json:"url"`
-		}
-		if err := c.getJSON(ctx, c.apiBase()+"/gateway/bot", &resp); err != nil {
-			return err
-		}
-		url = resp.URL
-	}
-	if url == "" {
-		return fmt.Errorf("discord gateway url missing")
-	}
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
-	}
-	conn, _, err := dialer.DialContext(ctx, url, nil)
-	if err != nil {
-		return err
+	c.mu.Lock()
+	alreadyRunning := c.cancel != nil
+	if alreadyRunning {
+		c.mu.Unlock()
+		return nil
 	}
 	childCtx, cancel := context.WithCancel(ctx)
-	c.mu.Lock()
-	c.conn = conn
+	done := make(chan struct{})
 	c.cancel = cancel
+	c.done = done
+	c.state = "connecting"
 	c.mu.Unlock()
-	go c.readLoop(childCtx, eventBus)
+
+	conn, err := c.connectGateway(childCtx)
+	if err != nil {
+		cancel()
+		c.finishStart(done)
+		return err
+	}
+	c.mu.Lock()
+	if c.done != done || childCtx.Err() != nil {
+		c.mu.Unlock()
+		cancel()
+		_ = conn.Close()
+		c.finishStart(done)
+		if err := childCtx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("discord start interrupted")
+	}
+	c.conn = conn
+	c.state = "connected"
+	c.mu.Unlock()
+	go c.supervise(childCtx, eventBus, conn, done)
 	return nil
+}
+
+func (c *Channel) finishStart(done chan struct{}) {
+	c.mu.Lock()
+	if c.done == done {
+		c.conn = nil
+		c.cancel = nil
+		c.done = nil
+		if c.state != "stopped" {
+			c.state = "failed"
+		}
+	}
+	c.mu.Unlock()
+	close(done)
 }
 
 // Stop closes the Discord gateway connection.
 func (c *Channel) Stop(ctx context.Context) error {
-	_ = ctx
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
+	cancel := c.cancel
+	conn := c.conn
+	done := c.done
 	c.conn = nil
 	c.cancel = nil
-	return nil
+	c.done = nil
+	c.state = "stopped"
+	c.clearGatewayMetadataLocked()
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ConnectionStatus reports the current inbound gateway state for diagnostics.
+func (c *Channel) ConnectionStatus() string {
+	if c == nil {
+		return "stopped"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == "" {
+		return "stopped"
+	}
+	return c.state
 }
 
 // Deliver posts a Discord message or multipart media payload.
@@ -127,23 +184,157 @@ func (c *Channel) Deliver(ctx context.Context, to, text string, meta map[string]
 	return c.postJSON(ctx, c.apiBase()+"/channels/"+channelID+"/messages", payload, nil)
 }
 
-func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
-	var heartbeatTicker *time.Ticker
-	defer func() {
-		if heartbeatTicker != nil {
-			heartbeatTicker.Stop()
+func (c *Channel) connectGateway(ctx context.Context) (*websocket.Conn, error) {
+	url := strings.TrimSpace(c.Config.GatewayURL)
+	if url == "" {
+		var resp struct {
+			URL string `json:"url"`
 		}
-	}()
-	for {
+		if err := c.getJSON(ctx, c.apiBase()+"/gateway/bot", &resp); err != nil {
+			return nil, err
+		}
+		url = resp.URL
+	}
+	if url == "" {
+		return nil, fmt.Errorf("discord gateway url missing")
+	}
+	conn, _, err := shared.DialWebSocketContext(ctx, c.Dialer, url, nil)
+	return conn, err
+}
+
+func (c *Channel) supervise(ctx context.Context, eventBus *bus.Bus, conn *websocket.Conn, done chan struct{}) {
+	defer func() {
 		c.mu.Lock()
-		conn := c.conn
+		if c.done == done {
+			c.conn = nil
+			c.cancel = nil
+			c.done = nil
+			c.clearGatewayMetadataLocked()
+			if c.state != "stopped" {
+				c.state = "failed"
+			}
+		}
 		c.mu.Unlock()
-		if conn == nil {
+		close(done)
+	}()
+
+	attempt := 0
+	for {
+		connectedAt := time.Now()
+		err := c.readConnection(ctx, eventBus, conn)
+		_ = conn.Close()
+		if ctx.Err() != nil {
 			return
 		}
+		if time.Since(connectedAt) >= 5*time.Second {
+			attempt = 0
+		}
+		if !discordRetryable(err) {
+			log.Printf("discord gateway stopped: %v", err)
+			return
+		}
+		c.setConnectionState(done, nil, "reconnecting")
+		for {
+			delay := c.nextReconnectDelay(attempt)
+			attempt++
+			log.Printf("discord gateway disconnected: %v; reconnecting in %s", err, delay.Round(time.Millisecond))
+			if !shared.WaitForReconnect(ctx, delay) {
+				return
+			}
+			conn, err = c.connectGateway(ctx)
+			if err == nil {
+				if !c.setConnectionState(done, conn, "connected") {
+					_ = conn.Close()
+					return
+				}
+				break
+			}
+			if !discordRetryable(err) {
+				log.Printf("discord gateway stopped: %v", err)
+				return
+			}
+		}
+	}
+}
+
+func (c *Channel) setConnectionState(done chan struct{}, conn *websocket.Conn, state string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done != done || c.cancel == nil {
+		return false
+	}
+	c.conn = conn
+	c.state = state
+	return true
+}
+
+func (c *Channel) nextReconnectDelay(attempt int) time.Duration {
+	if c.reconnectDelay != nil {
+		return c.reconnectDelay(attempt)
+	}
+	return shared.ReconnectDelay(attempt)
+}
+
+func discordRetryable(err error) bool {
+	if err == nil || shared.IsPermanentConnectionError(err) {
+		return false
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case 4004, 4010, 4011, 4012, 4013, 4014:
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Channel) readConnection(ctx context.Context, eventBus *bus.Bus, conn *websocket.Conn) error {
+	var stopHeartbeat context.CancelFunc
+	var heartbeatDone chan struct{}
+	stop := func() {
+		if stopHeartbeat == nil {
+			return
+		}
+		stopHeartbeat()
+		<-heartbeatDone
+		stopHeartbeat = nil
+		heartbeatDone = nil
+	}
+	defer stop()
+
+	startHeartbeat := func(interval time.Duration) {
+		stop()
+		if interval <= 0 {
+			return
+		}
+		heartbeatCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		stopHeartbeat = cancel
+		heartbeatDone = done
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatCtx.Done():
+					return
+				case <-ticker.C:
+					_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+					if err := conn.WriteJSON(map[string]any{"op": 1, "d": nil}); err != nil {
+						_ = conn.Close()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			return
+			return err
 		}
 		var frame gatewayFrame
 		if err := json.Unmarshal(raw, &frame); err != nil {
@@ -155,21 +346,11 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				HeartbeatInterval float64 `json:"heartbeat_interval"`
 			}
 			_ = json.Unmarshal(frame.D, &hello)
-			_ = conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": discordGatewayIntents, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}})
-			interval := time.Duration(int64(hello.HeartbeatInterval)) * time.Millisecond
-			if interval > 0 {
-				heartbeatTicker = time.NewTicker(interval)
-				go func() {
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-heartbeatTicker.C:
-							_ = conn.WriteJSON(map[string]any{"op": 1, "d": nil})
-						}
-					}
-				}()
+			if err := conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": c.Config.Token, "intents": discordGatewayIntents, "properties": map[string]string{"$os": "linux", "$browser": "or3-intern", "$device": "or3-intern"}}}); err != nil {
+				return err
 			}
+			interval := time.Duration(int64(hello.HeartbeatInterval)) * time.Millisecond
+			startHeartbeat(interval)
 		case 0:
 			switch frame.T {
 			case "READY":
@@ -243,10 +424,8 @@ func (c *Channel) readLoop(ctx context.Context, eventBus *bus.Bus) {
 				}
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return
-		default:
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 }
@@ -342,6 +521,9 @@ func (c *Channel) setGuildName(id, name string) {
 	if c.guilds == nil {
 		c.guilds = map[string]string{}
 	}
+	if _, exists := c.guilds[id]; !exists {
+		trimDiscordNameCache(c.guilds)
+	}
 	c.guilds[id] = name
 }
 
@@ -356,7 +538,28 @@ func (c *Channel) setChannelName(id, name string) {
 	if c.channels == nil {
 		c.channels = map[string]string{}
 	}
+	if _, exists := c.channels[id]; !exists {
+		trimDiscordNameCache(c.channels)
+	}
 	c.channels[id] = name
+}
+
+// trimDiscordNameCache makes room for one new display-name entry. These names
+// are optional UI metadata, so arbitrary eviction is safe: callers fall back
+// to the stable Discord IDs when an entry has aged out of the bounded cache.
+func trimDiscordNameCache(cache map[string]string) {
+	for len(cache) >= discordNameCacheMaxEntries {
+		for id := range cache {
+			delete(cache, id)
+			break
+		}
+	}
+}
+
+func (c *Channel) clearGatewayMetadataLocked() {
+	c.botID = ""
+	c.guilds = nil
+	c.channels = nil
 }
 
 func (c *Channel) lookupGuildName(id string) string {

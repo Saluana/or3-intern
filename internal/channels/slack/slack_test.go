@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +90,131 @@ func TestChannel_StartReceivesEventAndAcks(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for slack event")
+	}
+}
+
+func TestChannel_ReconnectsAfterSocketModeDisconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var connections atomic.Int32
+	release := make(chan struct{})
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if connections.Add(1) == 1 {
+			return
+		}
+		_ = conn.WriteJSON(map[string]any{
+			"envelope_id": "after-reconnect",
+			"type":        "events_api",
+			"payload": map[string]any{
+				"event": map[string]any{"type": "message", "text": "hello again", "user": "U1", "channel": "C1"},
+			},
+		})
+		var ack map[string]any
+		if err := conn.ReadJSON(&ack); err != nil || ack["envelope_id"] != "after-reconnect" {
+			return
+		}
+		<-release
+	}))
+	defer wsServer.Close()
+	defer close(release)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps.connections.open" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
+	}))
+	defer apiServer.Close()
+
+	b := bus.New(1)
+	ch := &Channel{
+		Config:         config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, OpenAccess: true},
+		reconnectDelay: func(int) time.Duration { return time.Millisecond },
+	}
+	if err := ch.Start(context.Background(), b); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ch.Stop(context.Background()) }()
+	select {
+	case event := <-b.Channel():
+		if event.Message != "hello again" || event.SessionKey != "slack:C1" {
+			t.Fatalf("unexpected reconnected event: %#v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reconnected Slack event")
+	}
+	if connections.Load() < 2 {
+		t.Fatalf("expected a second Slack connection, got %d", connections.Load())
+	}
+}
+
+func TestChannel_StopCancelsAnInitialSocketModeDial(t *testing.T) {
+	dialStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	wsServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		dialStarted <- struct{}{}
+		<-release
+	}))
+	defer func() {
+		close(release)
+		wsServer.Close()
+	}()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps.connections.open" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": "ws" + strings.TrimPrefix(wsServer.URL, "http")})
+	}))
+	defer apiServer.Close()
+
+	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "app", BotToken: "bot", APIBase: apiServer.URL, OpenAccess: true}}
+	startErr := make(chan error, 1)
+	go func() { startErr <- ch.Start(context.Background(), bus.New(1)) }()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Socket Mode dial did not start")
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := ch.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Fatal("expected cancelled initial Start to return an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not exit after Stop cancelled its dial")
+	}
+	if got := ch.ConnectionStatus(); got != "stopped" {
+		t.Fatalf("connection status = %q, want stopped", got)
+	}
+}
+
+func TestChannel_OpenSocketURLStopsOnSlackAuthenticationFailure(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps.connections.open" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_auth"})
+	}))
+	defer apiServer.Close()
+
+	ch := &Channel{Config: config.SlackChannelConfig{AppToken: "invalid", BotToken: "bot", APIBase: apiServer.URL}}
+	_, err := ch.openSocketURL(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("expected explicit Slack authentication error, got %v", err)
+	}
+	if slackRetryable(err) {
+		t.Fatalf("expected invalid Slack credentials to be non-retryable: %v", err)
 	}
 }
 

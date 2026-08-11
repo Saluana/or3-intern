@@ -61,8 +61,6 @@ func configureFormScreenForSection(section string) configureScreenAdapter {
 		return configureWorkspaceScreen{}
 	case "channels":
 		return configureChannelsScreen{}
-	case "context":
-		return configureContextScreen{}
 	case "hardening", "security", "session":
 		return configureSafetyScreen{}
 	case "service":

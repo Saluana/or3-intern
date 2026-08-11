@@ -46,7 +46,7 @@ test('rejects an unsupported nested connect runtime before bootstrap side effect
     });
 
     assert.equal(code, 2);
-    assert.match(output, /intern \[command\]/);
+    assert.match(output, /Local Intern: npx @or3\/connect intern/);
 });
 
 test('routes explicitly configured external runtime commands through connect', async (t) => {
@@ -140,7 +140,7 @@ test('all cached management commands start offline without a shell PATH install'
     const binary = join(installDir, 'or3-intern');
     await writeFile(binary, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(binary, 0o755);
-    await writeFile(`${binary}.version`, 'v0.1.1\n', { mode: 0o600 });
+    await writeFile(`${binary}.version`, 'v0.1.2\n', { mode: 0o600 });
     const cloudflared = join(installDir, 'cloudflared');
     await writeFile(cloudflared, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(cloudflared, 0o755);

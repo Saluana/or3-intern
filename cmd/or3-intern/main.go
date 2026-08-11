@@ -166,16 +166,12 @@ func roleProviderVision(cfg config.Config, provider string) bool {
 }
 
 func main() {
-	cfgPath, args, showHelp, unsafeDev, advancedHelp, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
+	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	if showHelp {
-		if len(helpTopicPath(args)) == 0 && advancedHelp {
-			printAdvancedRootHelp(os.Stdout)
-			return
-		}
 		if err := printHelpTopic(os.Stdout, helpTopicPath(args)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -195,25 +191,37 @@ func main() {
 		cmd = args[0]
 	}
 	if isHelpToken(cmd) {
-		if advancedHelp {
-			printAdvancedRootHelp(os.Stdout)
-		} else {
-			printRootHelp(os.Stdout)
-		}
+		printRootHelp(os.Stdout)
 		return
+	}
+	if !isKnownRootCommand(cmd) {
+		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
+		os.Exit(2)
 	}
 	if commandHandledBeforeConfigLoad(cmd) {
 		switch cmd {
 		case "config-path":
+			if err := requireExactArgs(args[1:], 0, "or3-intern config-path"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
 			fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
 		case "version":
-			fmt.Println("or3-intern v1")
+			if err := requireExactArgs(args[1:], 0, "or3-intern version"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			fmt.Println(buildVersionString())
 		case "configure":
 			if err := runConfigure(cfgPath, args[1:]); err != nil {
 				fmt.Fprintln(os.Stderr, "configure error:", err)
 				os.Exit(1)
 			}
 		case "init":
+			if err := requireExactArgs(args[1:], 0, "or3-intern init"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
 			if err := runInit(cfgPath); err != nil {
 				fmt.Fprintln(os.Stderr, "init error:", err)
 				os.Exit(1)
@@ -226,6 +234,10 @@ func main() {
 				os.Exit(1)
 			}
 		case "setup":
+			if err := requireExactArgs(args[1:], 0, "or3-intern setup"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
 			result, err := runSetup(cfgPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "setup error:", err)
@@ -301,7 +313,7 @@ func main() {
 				defer database.Close()
 			}
 		}
-		statusOptions, err := parseStatusCommandArgs(args[1:], advancedHelp)
+		statusOptions, err := parseStatusCommandArgs(args[1:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "status error:", err)
 			os.Exit(2)
@@ -483,16 +495,16 @@ func main() {
 		DocRetriever:  docRetriever,
 		EmbedProvider: embedProv,
 	}
-	serviceJobs := buildServiceJobRegistry(cmd)
+	runtimeJobs := buildRuntimeJobRegistry()
 
-	runnerManager = buildRuntimeRunnerManager(cfg, d, serviceJobs)
+	runnerManager = buildRuntimeRunnerManager(cfg, d, runtimeJobs)
 	if runnerManager != nil && cmd != "service" {
 		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
 			fmt.Fprintln(os.Stderr, "runner manager error:", err)
 			os.Exit(1)
 		}
 	}
-	chatManager := buildRuntimeChatManager(cfg, d, runnerManager, serviceJobs, approvalBroker)
+	chatManager := buildRuntimeChatManager(cfg, d, runnerManager, runtimeJobs, approvalBroker)
 	turnOrchestrator := buildRunnerTurnOrchestrator(cfg, chatManager, d, ret, docRetriever, embedProv)
 
 	cronSvc = buildRuntimeCronService(cfg, b, runnerManager, turnOrchestrator)
@@ -519,7 +531,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: runtimeJobs, Broker: approvalBroker, Channels: channelManager, ChatManager: chatManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
@@ -544,12 +556,12 @@ func main() {
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
 		<-ctx.Done()
 	case "service":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: serviceJobs, Broker: approvalBroker, Channels: channelManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
+		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: runtimeJobs, Broker: approvalBroker, Channels: channelManager, ChatManager: chatManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
 			os.Exit(1)
 		}
-		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHost, runnerManager, chatManager, turnOrchestrator, serviceJobs, approvalBroker, unsafeDev, cronSvc, channelManager); err != nil {
+		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHost, runnerManager, chatManager, turnOrchestrator, runtimeJobs, approvalBroker, unsafeDev, cronSvc, channelManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
 			os.Exit(1)
 		}
@@ -567,14 +579,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "missing -m message")
 			os.Exit(2)
 		}
-		fmt.Fprintln(os.Stderr, "note: `or3-intern agent` now enqueues a runner chat turn; use `or3-intern chat` for interactive sessions")
 		agentCtx := requestctx.ContextWithApprovalToken(ctx, approvalToken)
 		agentCtx = requestctx.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
 		if turnOrchestrator == nil {
 			fmt.Fprintln(os.Stderr, "agent error: runner orchestration unavailable; enable runners and configure a default runner")
 			os.Exit(1)
 		}
-		_, err := turnOrchestrator.StartTurn(agentCtx, app.RunnerTurnRequest{
+		result, err := turnOrchestrator.StartTurn(agentCtx, app.RunnerTurnRequest{
 			SessionKey:    session,
 			Channel:       "cli",
 			From:          "local",
@@ -586,6 +597,27 @@ func main() {
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "agent error:", err)
+			os.Exit(1)
+		}
+		var abort func(context.Context, string) error
+		if chatManager != nil {
+			abort = chatManager.AbortTurn
+		}
+		final, err := waitForForegroundAgentTurn(
+			agentCtx,
+			time.Duration(cfg.Runners.DefaultTimeoutSeconds)*time.Second,
+			result,
+			turnOrchestrator.WaitForTurnResult,
+			abort,
+		)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "agent error:", err)
+			os.Exit(1)
+		}
+		if text := channelTurnDeliveryText(final); strings.TrimSpace(text) != "" {
+			fmt.Fprintln(os.Stdout, text)
+		}
+		if !foregroundAgentTurnSucceeded(final) {
 			os.Exit(1)
 		}
 	case "migrate-jsonl":

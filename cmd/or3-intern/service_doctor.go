@@ -62,7 +62,7 @@ func (s *serviceServer) handleDoctor(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		writeServiceValue(w, http.StatusOK, map[string]any{"fields": configmeta.ListForConfig(s.config)})
+		writeServiceValue(w, http.StatusOK, map[string]any{"fields": configmeta.ListForConfig(s.configSnapshot())})
 	case path == "logs":
 		if r.Method != http.MethodGet {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -75,7 +75,7 @@ func (s *serviceServer) handleDoctor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) handleDoctorStatus(w http.ResponseWriter, r *http.Request, clientFindings []doctor.Finding) {
-	report := doctor.Evaluate(s.config, doctor.Options{Mode: doctor.ModeAdvisory})
+	report := doctor.Evaluate(s.configSnapshot(), doctor.Options{Mode: doctor.ModeAdvisory})
 	if len(clientFindings) > 0 {
 		combined := append(append([]doctor.Finding{}, report.Findings...), clientFindings...)
 		report = doctor.NewReport(doctor.ModeAdvisory, combined)
@@ -133,14 +133,15 @@ func (s *serviceServer) buildDoctorStatusResponse(r *http.Request, report doctor
 	if r != nil {
 		ctx = r.Context()
 	}
-	inventory := s.serviceSkillsInventory(ctx, s.config)
+	cfg := s.configSnapshot()
+	inventory := s.serviceSkillsInventory(ctx, cfg)
 	recentLogs := []db.DiagnosticLogEvent{}
 	if store := s.doctorDB(); store != nil {
 		if items, err := store.QueryDiagnosticLogEvents(ctx, db.DiagnosticLogQuery{Limit: 25}); err == nil {
 			recentLogs = items
 		}
 	}
-	health := s.control().GetHealth()
+	health := s.serviceHealth()
 	readiness := s.control().GetReadiness()
 	var bootstrap any
 	if r != nil {
@@ -155,7 +156,7 @@ func (s *serviceServer) buildDoctorStatusResponse(r *http.Request, report doctor
 		"finding_cards":          serviceDoctorFindingCards(report.Findings),
 		"skills": map[string]any{
 			"count": len(inventory.Skills),
-			"items": serviceSkillItems(inventory, s.config.Skills),
+			"items": serviceSkillItems(inventory, cfg.Skills),
 		},
 		"recent_logs": recentLogs,
 	}

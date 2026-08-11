@@ -95,8 +95,11 @@ func (p *ProcessManager) Run(ctx context.Context, spec CommandSpec, onEvent func
 		readStream(stderrPipe, "stderr", p.ChunkMaxBytes, &seq, collector, onEvent, OutputPlain)
 	}()
 
-	waitErr := cmd.Wait()
 	wg.Wait()
+	// Let the readers drain the pipes before Wait closes their parent-side
+	// descriptors. Calling Wait first can discard trailing structured output
+	// from a fast runner and surface spurious "file already closed" errors.
+	waitErr := cmd.Wait()
 
 	var exitCode int
 	if waitErr != nil {

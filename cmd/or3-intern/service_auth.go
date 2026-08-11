@@ -30,6 +30,7 @@ const (
 	serviceAuthFailureWindow     = 10 * time.Minute
 	serviceAuthFailureThreshold  = 5
 	serviceAuthFailureMaxBackoff = 5 * time.Minute
+	serviceAuthFailureMaxEntries = 4096
 )
 
 type serviceTokenClaims struct {
@@ -245,20 +246,39 @@ func (t *serviceAuthFailureTracker) RetryAfter(keys []string, now time.Time) int
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.sweepExpiredLocked(now)
 	for _, key := range keys {
 		state, ok := t.failures[key]
 		if !ok {
 			continue
 		}
-		if now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
-			delete(t.failures, key)
-			continue
-		}
 		if state.BlockedUntil.After(now) {
-			return int(time.Until(state.BlockedUntil).Seconds()) + 1
+			return int(state.BlockedUntil.Sub(now).Seconds()) + 1
 		}
 	}
 	return 0
+}
+
+func (t *serviceAuthFailureTracker) sweepExpiredLocked(now time.Time) {
+	for key, state := range t.failures {
+		if state.FirstAttempt.IsZero() || now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
+			delete(t.failures, key)
+		}
+	}
+}
+
+func (t *serviceAuthFailureTracker) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	for key, state := range t.failures {
+		if oldestKey == "" || state.FirstAttempt.Before(oldest) {
+			oldestKey = key
+			oldest = state.FirstAttempt
+		}
+	}
+	if oldestKey != "" {
+		delete(t.failures, oldestKey)
+	}
 }
 
 func (s *serviceServer) recordServiceAuthFailure(r *http.Request, scope string) {
@@ -277,8 +297,12 @@ func (t *serviceAuthFailureTracker) Record(keys []string, now time.Time) {
 	if t.failures == nil {
 		t.failures = map[string]serviceAuthFailureState{}
 	}
+	t.sweepExpiredLocked(now)
 	for _, key := range keys {
-		state := t.failures[key]
+		state, exists := t.failures[key]
+		if !exists && len(t.failures) >= serviceAuthFailureMaxEntries {
+			t.evictOldestLocked()
+		}
 		if state.FirstAttempt.IsZero() || now.Sub(state.FirstAttempt) > serviceAuthFailureWindow {
 			state = serviceAuthFailureState{FirstAttempt: now}
 		}

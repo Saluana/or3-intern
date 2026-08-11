@@ -8,9 +8,10 @@ staging smoke, so this guide does not provide a bare `npx @or3/connect`
 command. Local/offline Intern remains account-free.
 
 Read [Connect release status](connect-release-status.md) before choosing a
-package version. The registry currently serves `@or3/connect@0.1.0`, while the
-source `intern` bootstrap is `0.1.1` and its matching `or3-intern` release
-asset is not published yet.
+package version. Install local Intern with
+`npx @or3/connect@0.1.2 intern`, from this checkout with
+`./scripts/install-cli.sh`, or use `go run ./cmd/or3-intern ...` for a one-off
+source run.
 
 ## Advanced staging or self-hosted path
 
@@ -73,7 +74,7 @@ leaving the local OR3 workspace and agent configuration untouched.
 Run:
 
 ```bash
-npx @or3/connect doctor
+or3-intern connect doctor
 ```
 
 It checks saved state, the tunnel client, and authenticated remote health

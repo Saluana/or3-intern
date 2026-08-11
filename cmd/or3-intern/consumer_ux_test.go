@@ -390,6 +390,16 @@ func TestRunSettingsWithIO_HomeExportAndSafetySection(t *testing.T) {
 		t.Fatalf("unexpected settings home: %s", out.String())
 	}
 	out.Reset()
+	if err := runSettingsWithIO(strings.NewReader(""), &out, cfgPath, tmp, []string{"--advanced"}); err != nil {
+		t.Fatalf("advanced settings home: %v", err)
+	}
+	if !strings.Contains(out.String(), "Advanced") {
+		t.Fatalf("expected advanced settings section, got %s", out.String())
+	}
+	if err := runSettingsWithIO(strings.NewReader(""), &out, cfgPath, tmp, []string{"--section", "tools"}); err == nil || !strings.Contains(err.Error(), "managed by the selected runner") {
+		t.Fatalf("expected runner-managed tools guidance, got %v", err)
+	}
+	out.Reset()
 	if err := runSettingsWithIO(strings.NewReader(""), &out, cfgPath, tmp, []string{"--export", "-"}); err != nil {
 		t.Fatalf("settings export: %v", err)
 	}
@@ -430,7 +440,7 @@ func TestPrintSetupReview_UsesActualSafetySummary(t *testing.T) {
 }
 
 func TestParseStatusArgs_AcceptsSubcommandAdvancedFlag(t *testing.T) {
-	detailed, err := parseStatusArgs([]string{"--advanced"}, false)
+	detailed, err := parseStatusArgs([]string{"--advanced"})
 	if err != nil {
 		t.Fatalf("parseStatusArgs: %v", err)
 	}

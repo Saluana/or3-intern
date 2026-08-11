@@ -36,6 +36,22 @@ func TestCommandBootstrapBoundaries(t *testing.T) {
 	}
 }
 
+func TestFixedRootCommandsRejectUnexpectedArguments(t *testing.T) {
+	for _, test := range []struct {
+		args  []string
+		usage string
+	}{
+		{args: []string{"extra"}, usage: "or3-intern version"},
+		{args: []string{"extra"}, usage: "or3-intern config-path"},
+		{args: []string{"extra"}, usage: "or3-intern init"},
+		{args: []string{"extra"}, usage: "or3-intern setup"},
+	} {
+		if err := requireExactArgs(test.args, 0, test.usage); err == nil {
+			t.Fatalf("expected %s to reject unexpected args", test.usage)
+		}
+	}
+}
+
 func assertErr(text string) error {
 	return testError(text)
 }

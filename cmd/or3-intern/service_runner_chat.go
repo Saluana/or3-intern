@@ -23,7 +23,11 @@ const serviceRunnerChatPromptCompileTimeout = 8 * time.Second
 const serviceRunnerChatAppSessionKeyPrefixMaxBytes = 256
 
 func (s *serviceServer) runnerChatWriteUnavailable() bool {
-	return s == nil || s.chatManager == nil || s.chatManager.Manager == nil
+	if s == nil {
+		return true
+	}
+	chatManager := s.runtimeComponents().chatManager
+	return chatManager == nil || chatManager.Manager == nil
 }
 
 // runnerChatCreateSessionRequest is the body for POST /runner-chat/sessions.
@@ -74,7 +78,8 @@ type runnerChatStartTurnRequest struct {
 //	GET  /internal/v1/runner-chat/sessions/:id/turns/:turn_id/stream  (SSE)
 //	POST /internal/v1/runner-chat/sessions/:id/turns/:turn_id/abort
 func (s *serviceServer) handleRunnerChatSessions(w http.ResponseWriter, r *http.Request) {
-	if s.chatManager == nil || s.chatManager.DB == nil {
+	chatManager := s.runtimeComponents().chatManager
+	if chatManager == nil || chatManager.DB == nil {
 		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "chat manager unavailable"})
 		return
 	}
@@ -233,7 +238,12 @@ func (s *serviceServer) handleRunnerChatSessionCreate(w http.ResponseWriter, r *
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "runner_id required"})
 		return
 	}
-	sess, err := s.chatManager.EnsureSession(r.Context(), runners.StartTurnRequest{
+	chatManager := s.runtimeComponents().chatManager
+	if chatManager == nil || chatManager.Manager == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
+		return
+	}
+	sess, err := chatManager.EnsureSession(r.Context(), runners.StartTurnRequest{
 		AppSessionKey:    req.AppSessionKey,
 		RunnerID:         req.RunnerID,
 		ContinuationMode: runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode)),
@@ -354,7 +364,8 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 	promptMessage := strings.TrimSpace(req.UserMessage)
 	promptMessageFinal := false
 	var compiled app.RunnerPromptCompileResult
-	if s.turnOrchestrator != nil {
+	runtime := s.runtimeComponents()
+	if runtime.turnOrchestrator != nil {
 		continuation := runners.ContinuationMode(strings.TrimSpace(req.ContinuationMode))
 		if continuation == "" {
 			continuation = runners.ContinuationMode(sess.ContinuationMode)
@@ -367,7 +378,7 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 		}
 		compileCtx, cancelCompile := context.WithTimeout(r.Context(), serviceRunnerChatPromptCompileTimeout)
 		var compileErr error
-		compiled, compileErr = s.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
+		compiled, compileErr = runtime.turnOrchestrator.CompileRunnerChatPromptForSession(compileCtx, sess.ID, sess.AppSessionKey, req.UserMessage, "user_message", req.Meta, continuation)
 		cancelCompile()
 		if compileErr != nil {
 			if r.Context().Err() != nil {
@@ -424,7 +435,11 @@ func (s *serviceServer) handleRunnerChatTurnStart(w http.ResponseWriter, r *http
 	}); ok {
 		startReq.RunnerPermission = &permission
 	}
-	result, err := s.chatManager.StartTurn(r.Context(), sessionID, startReq)
+	if runtime.chatManager == nil || runtime.chatManager.Manager == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
+		return
+	}
+	result, err := runtime.chatManager.StartTurn(r.Context(), sessionID, startReq)
 	if err != nil {
 		var approvalErr *tools.ApprovalRequiredError
 		switch {
@@ -657,7 +672,12 @@ func (s *serviceServer) handleRunnerChatTurnAbort(w http.ResponseWriter, r *http
 	if _, ok := s.loadRunnerChatTurnForSession(w, r, store, sessionID, turnID); !ok {
 		return
 	}
-	if err := s.chatManager.AbortTurn(r.Context(), turnID); err != nil {
+	chatManager := s.runtimeComponents().chatManager
+	if chatManager == nil || chatManager.Manager == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
+		return
+	}
+	if err := chatManager.AbortTurn(r.Context(), turnID); err != nil {
 		if errors.Is(err, db.ErrRunnerChatTurnNotFound) {
 			writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "runner chat turn not found", "code": "runner_chat_turn_not_found"})
 			return
@@ -688,7 +708,12 @@ func (s *serviceServer) handleRunnerChatTurnDecision(w http.ResponseWriter, r *h
 		}
 	}
 	actor := serviceAuthIdentityFromContext(r.Context()).Actor
-	result, err := s.chatManager.RespondToTurnApproval(r.Context(), turnID, runners.RespondToTurnApprovalOpts{
+	chatManager := s.runtimeComponents().chatManager
+	if chatManager == nil || chatManager.Manager == nil {
+		writeServiceJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "runner manager is disabled", "code": "runner_disabled"})
+		return
+	}
+	result, err := chatManager.RespondToTurnApproval(r.Context(), turnID, runners.RespondToTurnApprovalOpts{
 		Decision:     decision,
 		Note:         body.Note,
 		AllowSession: body.AllowSession,

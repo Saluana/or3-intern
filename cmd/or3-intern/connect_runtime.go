@@ -92,7 +92,7 @@ func setupExternalRuntimeConnection(
 			if current == "" {
 				current = "a legacy Connect host"
 			}
-			fmt.Fprintf(stdout, "This computer is already connected as %s. Use `npx @or3/connect status` to inspect it or `npx @or3/connect disconnect` to remove it safely before continuing.\n", current)
+			fmt.Fprintf(stdout, "This computer is already connected as %s. Use `or3-intern connect status` to inspect it or `or3-intern connect disconnect` to remove it safely before continuing.\n", current)
 			if !confirmRuntimeAction(options.PromptReader, stdout, fmt.Sprintf("Replace the existing %s connection with %s? This disconnects the current host, stops its tunnel, revokes its cloud access, and restores its OR3 configuration.", current, runtimeName)) {
 				return errors.New("external runtime replacement was declined")
 			}
@@ -416,11 +416,11 @@ func waitForRuntimePreparation(
 	interval := 3 * time.Second
 	for {
 		if waitErr := waitCtx.Err(); waitErr != nil {
-			return externalRuntimePlan{}, fmt.Errorf("wait for %s readiness: %w; run `npx @or3/connect %s` to resume", adapter.ID(), waitErr, adapter.ID())
+			return externalRuntimePlan{}, fmt.Errorf("wait for %s readiness: %w; run `or3-intern connect %s` to resume", adapter.ID(), waitErr, adapter.ID())
 		}
 		select {
 		case <-waitCtx.Done():
-			return externalRuntimePlan{}, fmt.Errorf("wait for %s readiness: %w; run `npx @or3/connect %s` to resume", adapter.ID(), waitCtx.Err(), adapter.ID())
+			return externalRuntimePlan{}, fmt.Errorf("wait for %s readiness: %w; run `or3-intern connect %s` to resume", adapter.ID(), waitCtx.Err(), adapter.ID())
 		case <-time.After(interval):
 		}
 		plan, retryErr := prepareExternalRuntimeWithAdapter(waitCtx, adapter, input)
@@ -1232,7 +1232,7 @@ func runtimeSnapshotForPreparation(stateDir, runtimeName, runtimeBinary, configP
 			return runtimeFileSnapshot{}, fmt.Errorf("read runtime configuration backup: %w", err)
 		}
 		if backup.Version != runtimeConfigBackupVersion || backup.Runtime != runtimeName || backup.ConfigPath != configPath {
-			return runtimeFileSnapshot{}, errors.New("saved runtime configuration backup does not match this connection; run `npx @or3/connect disconnect` to restore it before connecting a runtime")
+			return runtimeFileSnapshot{}, errors.New("saved runtime configuration backup does not match this connection; run `or3-intern connect disconnect` to restore it before connecting a runtime")
 		}
 		return runtimeFileSnapshot{
 			path:   backup.ConfigPath,
@@ -1403,7 +1403,7 @@ func externalRuntimeSetupErrorWithCleanup(cause, cleanupErr error) error {
 	if cleanupErr == nil {
 		return cause
 	}
-	return fmt.Errorf("%w; automatic cleanup is incomplete: %v; the saved connection was preserved so run `npx @or3/connect disconnect` to retry", cause, cleanupErr)
+	return fmt.Errorf("%w; automatic cleanup is incomplete: %v; the saved connection was preserved so run `or3-intern connect disconnect` to retry", cause, cleanupErr)
 }
 
 func cleanupExternalRuntimeEnrollment(ctx context.Context, stateDir string, state remoteconnect.State, plan externalRuntimePlan) error {

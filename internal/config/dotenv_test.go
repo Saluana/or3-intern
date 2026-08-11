@@ -82,3 +82,37 @@ func TestLoadDotEnvCanBeDisabled(t *testing.T) {
 		t.Fatalf("expected disabled dotenv load, got %q", got)
 	}
 }
+
+func TestLoadDotEnvRequiresExplicitOptIn(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("OR3_MODEL=from-dotenv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldLoad, hadLoad := os.LookupEnv("OR3_LOAD_DOTENV")
+	oldModel, hadModel := os.LookupEnv("OR3_MODEL")
+	defer func() {
+		if hadLoad {
+			_ = os.Setenv("OR3_LOAD_DOTENV", oldLoad)
+		} else {
+			_ = os.Unsetenv("OR3_LOAD_DOTENV")
+		}
+		if hadModel {
+			_ = os.Setenv("OR3_MODEL", oldModel)
+		} else {
+			_ = os.Unsetenv("OR3_MODEL")
+		}
+	}()
+	_ = os.Unsetenv("OR3_LOAD_DOTENV")
+	_ = os.Unsetenv("OR3_MODEL")
+	wd, _ := os.Getwd()
+	defer os.Chdir(wd)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	LoadDotEnv()
+
+	if got := os.Getenv("OR3_MODEL"); got != "" {
+		t.Fatalf("expected dotenv to be ignored by default, got %q", got)
+	}
+}

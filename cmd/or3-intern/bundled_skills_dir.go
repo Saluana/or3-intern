@@ -20,7 +20,15 @@ func ensureMemorySkillRegistered(cfgPath string, cfg *config.Config) (bool, erro
 	if !policyChanged {
 		return changed, nil
 	}
-	if err := config.Save(cfgPathOrDefault(cfgPath), *cfg); err != nil {
+	path := cfgPathOrDefault(cfgPath)
+	persisted, err := config.LoadPersisted(path)
+	if err != nil {
+		return changed, err
+	}
+	if !skills.EnsureMemorySkillPolicy(&persisted) {
+		return changed, nil
+	}
+	if err := config.Save(path, persisted); err != nil {
 		return changed, err
 	}
 	return changed, nil

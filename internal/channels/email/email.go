@@ -35,12 +35,13 @@ import (
 )
 
 const (
-	defaultPollInterval = 30 * time.Second
-	defaultNetTimeout   = 30 * time.Second
-	maxFetchBatch       = 20
-	maxProcessedKeys    = 4096
-	dedupeMessageLimit  = 200
-	lookupMessageLimit  = 50
+	defaultPollInterval   = 30 * time.Second
+	defaultNetTimeout     = 30 * time.Second
+	maxFetchBatch         = 20
+	maxProcessedKeys      = 4096
+	maxThreadCacheEntries = 512
+	dedupeMessageLimit    = 200
+	lookupMessageLimit    = 50
 )
 
 // InboundMessage is a normalized email fetched from IMAP.
@@ -65,6 +66,7 @@ type OutboundMessage struct {
 type threadState struct {
 	Subject   string
 	MessageID string
+	lastUsed  time.Time
 }
 
 // Channel polls inbound email and sends outbound replies.
@@ -128,6 +130,7 @@ func (c *Channel) Stop(ctx context.Context) error {
 	}
 	c.cancel = nil
 	c.running = false
+	c.threadBySender = nil
 	return nil
 }
 
@@ -828,13 +831,36 @@ func (c *Channel) rememberThread(sender, subject, messageID string) {
 	if strings.TrimSpace(messageID) != "" {
 		state.MessageID = strings.TrimSpace(messageID)
 	}
+	state.lastUsed = time.Now().UTC()
 	c.threadBySender[sender] = state
+	c.trimThreadCacheLocked()
+}
+
+func (c *Channel) trimThreadCacheLocked() {
+	for len(c.threadBySender) > maxThreadCacheEntries {
+		var oldestSender string
+		var oldest time.Time
+		for sender, state := range c.threadBySender {
+			if oldestSender == "" || state.lastUsed.Before(oldest) {
+				oldestSender = sender
+				oldest = state.lastUsed
+			}
+		}
+		if oldestSender == "" {
+			return
+		}
+		delete(c.threadBySender, oldestSender)
+	}
 }
 
 func (c *Channel) lookupThread(ctx context.Context, recipient string) (threadState, bool, error) {
 	recipient = normalizeAddress(recipient)
 	c.mu.Lock()
 	state, ok := c.threadBySender[recipient]
+	if ok {
+		state.lastUsed = time.Now().UTC()
+		c.threadBySender[recipient] = state
+	}
 	c.mu.Unlock()
 	if ok && (state.Subject != "" || state.MessageID != "") {
 		return state, true, nil

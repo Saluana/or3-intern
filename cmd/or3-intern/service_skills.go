@@ -68,12 +68,13 @@ func (s *serviceServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 			return
 		}
-		inv := s.serviceSkillsInventory(r.Context(), s.config)
+		cfg := s.configSnapshot()
+		inv := s.serviceSkillsInventory(r.Context(), cfg)
 		writeServiceValue(w, http.StatusOK, map[string]any{
-			"items":                 serviceSkillItems(inv, s.config.Skills),
-			"roots":                 serviceSkillRoots(s.config),
-			"global_dir":            s.config.Skills.Load.GlobalDir,
-			"global_skills_enabled": !s.config.Skills.Load.DisableGlobalDir,
+			"items":                 serviceSkillItems(inv, cfg.Skills),
+			"roots":                 serviceSkillRoots(cfg),
+			"global_dir":            cfg.Skills.Load.GlobalDir,
+			"global_skills_enabled": !cfg.Skills.Load.DisableGlobalDir,
 		})
 		return
 	}
@@ -109,13 +110,16 @@ func (s *serviceServer) handleSkillSettingsUpdate(w http.ResponseWriter, r *http
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	inv := s.serviceSkillsInventory(r.Context(), s.config)
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	current := config.Clone(s.config)
+	inv := s.serviceSkillsInventory(r.Context(), current)
 	skill, ok := inv.Get(name)
 	if !ok {
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "skill not found"})
 		return
 	}
-	next := s.config
+	next := config.Clone(current)
 	if next.Skills.Entries == nil {
 		next.Skills.Entries = map[string]config.SkillEntryConfig{}
 	}
@@ -135,15 +139,11 @@ func (s *serviceServer) handleSkillSettingsUpdate(w http.ResponseWriter, r *http
 		entry.Config = mergeServiceSkillConfig(entry.Config, body.Config)
 	}
 	next.Skills.Entries[entryKey] = entry
-	path := s.configPath
-	if strings.TrimSpace(path) == "" {
-		path = cfgPathOrDefault("")
-	}
-	if err := config.Save(path, next); err != nil {
+	path, err := s.saveConfigureConfigLocked(next)
+	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "skill settings save failed", err)
 		return
 	}
-	s.config = next
 	updated := s.serviceSkillsInventory(r.Context(), next)
 	s.applyServiceSkillsInventory(updated)
 	itemSkill, _ := updated.Get(skill.Name)
@@ -164,12 +164,13 @@ func (s *serviceServer) handleSkillInstallBundled(w http.ResponseWriter, r *http
 		body.Target = "global"
 	}
 	target := strings.TrimSpace(body.Target)
+	cfg := s.configSnapshot()
 	var targetDir string
 	switch target {
 	case "global":
-		targetDir = strings.TrimSpace(s.config.Skills.Load.GlobalDir)
+		targetDir = strings.TrimSpace(cfg.Skills.Load.GlobalDir)
 	case "workspace":
-		targetDir = filepath.Join(strings.TrimSpace(s.config.WorkspaceDir), "skills")
+		targetDir = filepath.Join(strings.TrimSpace(cfg.WorkspaceDir), "skills")
 	default:
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown install target: %q", target)})
 		return
@@ -203,10 +204,6 @@ func (s *serviceServer) serviceBundledSkillsDir() string {
 	cfgPath := strings.TrimSpace(s.configPath)
 	if cfgPath == "" {
 		cfgPath = cfgPathOrDefault("")
-	}
-	cfg := s.config
-	if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err == nil {
-		s.config = cfg
 	}
 	dir, err := resolveBundledSkillsDir(cfgPath)
 	if err != nil {

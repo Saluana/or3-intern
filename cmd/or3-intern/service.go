@@ -31,6 +31,7 @@ import (
 )
 
 type serviceServer struct {
+	configMu            sync.RWMutex
 	config              config.Config
 	configPath          string
 	database            *db.DB
@@ -60,6 +61,68 @@ type serviceServer struct {
 	modelCatalog        *serviceModelCatalogCache
 	secureRelayHub      *secureConnectionRelayHub
 	memorySvc           *memorysvc.Service
+}
+
+type serviceRuntimeComponents struct {
+	runnerManager    *runners.Manager
+	chatManager      *runners.ChatManager
+	turnOrchestrator *app.RunnerTurnOrchestrator
+}
+
+type serviceChannelConnectionStatusProvider interface {
+	ConnectionStatuses() map[string]string
+}
+
+// configSnapshot returns an immutable-in-practice copy for callers that need
+// to retain configuration after releasing the service read lock.
+func (s *serviceServer) configSnapshot() config.Config {
+	if s == nil {
+		return config.Config{}
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return config.Clone(s.config)
+}
+
+// runtimeComponents returns one coherent set of mutable runtime pointers.
+// The pointers themselves own their own synchronization; this lock only
+// coordinates publication when a configuration update rebuilds the runtime.
+func (s *serviceServer) runtimeComponents() serviceRuntimeComponents {
+	if s == nil {
+		return serviceRuntimeComponents{}
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return serviceRuntimeComponents{
+		runnerManager:    s.runnerManager,
+		chatManager:      s.chatManager,
+		turnOrchestrator: s.turnOrchestrator,
+	}
+}
+
+// serviceHealth reports the core control-plane state plus the live inbound
+// channel state when this service owns a channel manager. A reconnecting or
+// failed external channel keeps the process alive, but it should still be
+// visible to operators as a degraded service.
+func (s *serviceServer) serviceHealth() controlplane.HealthReport {
+	report := s.control().GetHealth()
+	provider, ok := s.channelDeliverer.(serviceChannelConnectionStatusProvider)
+	if !ok {
+		return report
+	}
+	statuses := provider.ConnectionStatuses()
+	if len(statuses) == 0 {
+		return report
+	}
+	report.ChannelStatuses = statuses
+	for _, status := range statuses {
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "connecting", "reconnecting", "failed":
+			report.Status = "degraded"
+			return report
+		}
+	}
+	return report
 }
 
 func (s *serviceServer) initComponents() {
@@ -172,7 +235,7 @@ func runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx context.Context, c
 	if jobRegistry == nil {
 		jobRegistry = jobs.NewRegistry(0, 0)
 	}
-	server := &serviceServer{config: cfg, configPath: cfgPathOrDefault(""), cronSvc: cronSvc, runnerManager: runnerManager, chatManager: nil, turnOrchestrator: turnOrchestrator, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
+	server := &serviceServer{config: config.Clone(cfg), configPath: cfgPathOrDefault(""), cronSvc: cronSvc, runnerManager: runnerManager, chatManager: nil, turnOrchestrator: turnOrchestrator, jobs: jobRegistry, channelDeliverer: channelDeliverer, broker: broker, unsafeDev: unsafeDev}
 	server.applyHostDeps(host)
 	if db := server.serviceDB(); db != nil {
 		server.memorySvc = memorysvc.New(cfg, db, server.serviceEmbedProvider(), currentEmbedFingerprint(cfg))
@@ -314,15 +377,42 @@ func newServiceMux(server *serviceServer) *http.ServeMux {
 }
 
 func (s *serviceServer) control() *controlplane.Service {
+	if s == nil {
+		return nil
+	}
+	cfg, embedProvider := s.configAndEmbedProviderSnapshot()
+	return s.controlWithConfig(cfg, embedProvider)
+}
+
+func (s *serviceServer) controlWithConfig(cfg config.Config, embedProvider *providers.Client) *controlplane.Service {
+	if s == nil {
+		return nil
+	}
 	s.controlOnce.Do(func() {
-		s.controlSvc = controlplane.New(s.config, s.serviceDB(), s.serviceEmbedProvider(), s.serviceAudit(), s.broker, s.jobs)
+		if s.controlSvc == nil {
+			s.controlSvc = controlplane.New(cfg, s.serviceDB(), embedProvider, s.serviceAudit(), s.broker, s.jobs)
+		}
 	})
 	return s.controlSvc
 }
 
 func (s *serviceServer) app() *app.ServiceApp {
+	if s == nil {
+		return nil
+	}
+	cfg, embedProvider := s.configAndEmbedProviderSnapshot()
+	components := s.runtimeComponents()
+	return s.appWithRuntime(cfg, components, embedProvider)
+}
+
+func (s *serviceServer) appWithRuntime(cfg config.Config, components serviceRuntimeComponents, embedProvider *providers.Client) *app.ServiceApp {
+	if s == nil {
+		return nil
+	}
 	s.appOnce.Do(func() {
-		s.appSvc = app.NewServiceAppWithRunnerTurns(s.config, s.jobs, s.runnerManager, s.turnOrchestrator, s.control())
+		if s.appSvc == nil {
+			s.appSvc = app.NewServiceAppWithRunnerTurns(cfg, s.jobs, components.runnerManager, components.turnOrchestrator, s.controlWithConfig(cfg, embedProvider))
+		}
 	})
 	return s.appSvc
 }

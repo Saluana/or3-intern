@@ -43,7 +43,6 @@ func TestBuildApprovalPromptRepresentativeSubjects(t *testing.T) {
 func TestBuildAccessDashboardViewLocalAndHostedStates(t *testing.T) {
 	local := config.Default()
 	local.WorkspaceDir = t.TempDir()
-	local.Hardening.ExecAllowedPrograms = nil
 	local.Service.Enabled = false
 	view := BuildAccessDashboardView(local, intdoctor.Report{}, 0, 0)
 	if len(view.Sections) != 7 {
@@ -55,10 +54,16 @@ func TestBuildAccessDashboardViewLocalAndHostedStates(t *testing.T) {
 	if view.Sections[1].Name != "Commands" || view.Sections[1].Risk != "green" {
 		t.Fatalf("expected disabled command execution to be green, got %#v", view.Sections[1])
 	}
-	local.Hardening.ExecAllowedPrograms = []string{"git"}
+	local.Hardening.GuardedTools = true
+	local.Hardening.PrivilegedTools = true
+	local.Hardening.EnableExecShell = true
+	local.Security.Approvals.Exec.Mode = config.ApprovalModeAsk
 	view = BuildAccessDashboardView(local, intdoctor.Report{}, 0, 0)
-	if view.Sections[1].Risk != "red" {
-		t.Fatalf("expected trusted available command execution to be red, got %#v", view.Sections[1])
+	if view.Sections[1].Risk != "yellow" || view.Sections[1].Action != "or3-intern capabilities" {
+		t.Fatalf("expected an approval-gated service terminal to be yellow, got %#v", view.Sections[1])
+	}
+	if view.Sections[2].Action != "or3-intern configure --section security" {
+		t.Fatalf("expected security configuration action for internet posture, got %#v", view.Sections[2])
 	}
 	hosted := config.Default()
 	hosted.Service.Enabled = true
@@ -90,13 +95,15 @@ func TestBuildDeviceViewsFormatsLastUsed(t *testing.T) {
 func TestBuildSettingsHomeView(t *testing.T) {
 	cfg := config.Default()
 	view := BuildSettingsHomeView(cfg)
-	if len(view.Sections) != 8 {
+	if len(view.Sections) != 6 {
 		t.Fatalf("expected settings sections, got %#v", view.Sections)
 	}
 	if view.Sections[0].Title != "AI Provider" {
 		t.Fatalf("expected provider first, got %#v", view.Sections[0])
 	}
-	if view.Sections[6].Title != "Context" || view.Sections[6].Advanced || !strings.Contains(view.Sections[6].Action, "--section context") {
-		t.Fatalf("expected visible context settings section, got %#v", view.Sections[6])
+	for _, section := range view.Sections {
+		if section.Title == "Context" || section.Title == "Tools" {
+			t.Fatalf("expected legacy settings to be hidden, got %#v", view.Sections)
+		}
 	}
 }

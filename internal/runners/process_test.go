@@ -67,15 +67,21 @@ func TestProcessManager_ExtractsCodexFinalText(t *testing.T) {
 	writeFakeBinary(t, dir, "fake-codex", `printf '%s\n' '{"type":"thread.started","thread_id":"t1"}' && printf '%s\n' '{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Repo contains docs and examples."}}'`)
 
 	pm := NewProcessManager(1024, 4096)
+	var events []RunnerRunEvent
 	out := pm.Run(context.Background(), CommandSpec{
 		RunnerID:   RunnerCodex,
 		Binary:     "fake-codex",
 		Env:        []string{"PATH=" + dir},
 		OutputMode: OutputJSONL,
-	}, nil)
+	}, func(event RunnerRunEvent) {
+		events = append(events, event)
+	})
 
 	if out.FinalTextPreview != "Repo contains docs and examples." {
 		t.Fatalf("expected codex final text, got %q", out.FinalTextPreview)
+	}
+	if len(events) != 2 || events[0].Type != "structured" || events[1].Type != "structured" {
+		t.Fatalf("expected both structured events, got %#v", events)
 	}
 }
 

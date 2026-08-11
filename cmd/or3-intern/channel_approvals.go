@@ -12,13 +12,20 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
+	"or3-intern/internal/runners"
 )
 
+type channelApprovalTurnManager interface {
+	FindTurnWaitingForApproval(context.Context, int64) (db.RunnerChatTurn, bool, error)
+	RespondToTurnApproval(context.Context, string, runners.RespondToTurnApprovalOpts) (runners.RespondToTurnApprovalResult, error)
+}
+
 type channelApprovalHandler struct {
-	Config   config.Config
-	Jobs     *jobs.Registry
-	Broker   *approval.Broker
-	Channels *rootchannels.Manager
+	Config      config.Config
+	Jobs        *jobs.Registry
+	Broker      *approval.Broker
+	Channels    *rootchannels.Manager
+	ChatManager channelApprovalTurnManager
 }
 
 type parsedApprovalCommand struct {
@@ -48,6 +55,16 @@ func (h *channelApprovalHandler) Handle(ctx context.Context, ev bus.Event) (bool
 		return true, nil
 	}
 	actor := channelApprovalActor(ev)
+	if h.ChatManager != nil {
+		turn, found, findErr := h.ChatManager.FindTurnWaitingForApproval(ctx, req.ID)
+		if findErr != nil {
+			h.deliver(ctx, ev, channelApprovalMessage("Approval update failed", findErr.Error()))
+			return true, findErr
+		}
+		if found {
+			return h.resolveRunnerTurnApproval(ctx, ev, cmd, req.ID, turn.ID, actor)
+		}
+	}
 	switch cmd.Action {
 	case "deny":
 		if err := h.Broker.DenyRequest(ctx, req.ID, actor, "denied from "+ev.Channel); err != nil {
@@ -57,17 +74,42 @@ func (h *channelApprovalHandler) Handle(ctx context.Context, ev bus.Event) (bool
 		h.deliver(ctx, ev, fmt.Sprintf("Request #%d was denied. I will not continue that action.", req.ID))
 		return true, nil
 	case "approve":
-		issued, err := h.Broker.ApproveRequest(ctx, req.ID, actor, false, "approved from "+ev.Channel)
+		_, err := h.Broker.ApproveRequest(ctx, req.ID, actor, false, "approved from "+ev.Channel)
 		if err != nil {
 			h.deliver(ctx, ev, channelApprovalMessage("Approval failed", err.Error()))
 			return true, err
 		}
-		h.deliver(ctx, ev, fmt.Sprintf("Request #%d was approved. Continuing now.", req.ID))
-		go h.resumeApprovedRequest(withDetachedContext(ctx), issued, actor)
+		h.deliver(ctx, ev, fmt.Sprintf("Request #%d was approved. This request cannot resume automatically; send the request again to retry.", req.ID))
 		return true, nil
 	default:
 		return false, nil
 	}
+}
+
+func (h *channelApprovalHandler) resolveRunnerTurnApproval(ctx context.Context, ev bus.Event, cmd parsedApprovalCommand, requestID int64, turnID, actor string) (bool, error) {
+	result, err := h.ChatManager.RespondToTurnApproval(ctx, turnID, runners.RespondToTurnApprovalOpts{
+		Decision: cmd.Action,
+		Actor:    actor,
+		Note:     cmd.Action + " from " + ev.Channel,
+	})
+	if err != nil {
+		h.deliver(ctx, ev, channelApprovalMessage("Approval update failed", err.Error()))
+		return true, err
+	}
+	if cmd.Action == "deny" {
+		h.deliver(ctx, ev, fmt.Sprintf("Request #%d was denied. I will not continue that action.", requestID))
+		return true, nil
+	}
+	if result.NativeContinued {
+		h.deliver(ctx, ev, fmt.Sprintf("Request #%d was approved. Continuing now.", requestID))
+		return true, nil
+	}
+	if result.FallbackToToken {
+		h.deliver(ctx, ev, fmt.Sprintf("Request #%d was approved, but the runner connection is no longer available. Send the request again to retry.", requestID))
+		return true, nil
+	}
+	h.deliver(ctx, ev, fmt.Sprintf("Request #%d was approved.", requestID))
+	return true, nil
 }
 
 func (h *channelApprovalHandler) resolveApprovalCommandRequest(ctx context.Context, cmd parsedApprovalCommand, ev bus.Event) (db.ApprovalRequestRecord, bool, error) {
@@ -95,17 +137,6 @@ func (h *channelApprovalHandler) resolveApprovalCommandRequest(ctx context.Conte
 		return db.ApprovalRequestRecord{}, false, nil
 	}
 	return matches[0], true, nil
-}
-
-func (h *channelApprovalHandler) resumeApprovedRequest(ctx context.Context, issued approval.IssuedApproval, actor string) {
-	if h == nil {
-		return
-	}
-	requester := approval.RequesterContextFromJSON(issued.Request.RequesterContextJSON)
-	text := "Built-in tool execution resume is no longer supported in runner-first mode. Retry the turn or use a dedicated runner."
-	if h.Channels != nil && isApprovalExternalChannel(requester.Channel) && strings.TrimSpace(requester.ReplyTarget) != "" {
-		_ = h.Channels.DeliverWithMeta(ctx, requester.Channel, requester.ReplyTarget, text, approvalDeliveryMeta(requester))
-	}
 }
 
 func parseChannelApprovalCommand(message string) (parsedApprovalCommand, bool) {

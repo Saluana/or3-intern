@@ -6,31 +6,22 @@ The README now stays focused on orientation and quick start. Detailed guides and
 
 ## Quick start
 
-For the simplest local setup, with no Go install or PATH change:
+Install the supported local CLI without Go or a PATH edit:
 
 ```bash
-npx @or3/connect intern
+npx @or3/connect@0.1.2 intern
 ```
 
-This is the local-first bootstrap path when the matching Connect package and
-Intern release assets are published. Run later commands the same way, for
-example `npx @or3/connect intern chat`. Check [Connect release status](docs/connect-release-status.md)
-before copying a versioned command: the currently published `@or3/connect`
-package is older than the source that added the `intern` subcommand, and remote
-Connect is withheld from managed Cloud.
-
-If you are contributing from this source checkout and want the bare
-`or3-intern` command, install it once:
+From a source checkout, you can instead install it directly:
 
 ```bash
 ./scripts/install-cli.sh
-```
-
-Then verify the binary is available:
-
-```bash
 or3-intern version
 ```
+
+For a one-off source run without installing, use `go run ./cmd/or3-intern ...`.
+See [Connect release status](docs/connect-release-status.md) for the immutable
+package and binary-asset contract.
 
 1. Run guided setup:
 
@@ -69,7 +60,7 @@ or3-intern version
 
 The `setup` command is the recommended first-run flow. It asks for a provider, workspace folder, scenario, and safety mode, then translates those choices into the existing runtime profile, approvals, audit, service, and hardening settings.
 
-Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Controls, Workspace Folder, Connected Devices, Safety Level, Connected Apps, Tools, Memory, and Advanced:
+Use `settings` when you want to revisit your setup later. It opens a task-based home for AI Provider, Workspace Folder, Safety, Channels, Memory, and Advanced options:
 
 ```bash
 or3-intern settings
@@ -79,7 +70,10 @@ The advanced `configure` command still exists and supports re-running specific s
 
 On an interactive terminal, `configure` and `init` launch the Bubble Tea setup UI with arrow-key navigation, `enter` to open/select, `space` to toggle booleans, `s` to save, and `q` to back out or quit. If stdin or stdout is not a terminal, both commands automatically stay in the plain-text prompt flow so scripts and redirected input remain stable. In plain-text mode, existing secrets stay hidden: leave the field blank to keep the current value, enter a new value to replace it, or type `clear` to remove it. The provider section now also exposes an optional embedding-dimensions override for models/providers that support configurable vector sizes.
 
-Environment overrides are loaded from `.env` in the current directory or parent directory before config is read. Already-exported shell variables win. Set `OR3_LOAD_DOTENV=false` to disable this behavior.
+Environment overrides come from the process environment. To opt into loading a
+nearby `.env` file, set `OR3_LOAD_DOTENV=true`; already-exported shell
+variables still win. dotenv values are runtime-only and are not written back to
+`config.json` automatically.
 
 Use `go run ./cmd/or3-intern ...` for ad hoc local runs, or install the binary first if you want every command in the reference to work exactly as `or3-intern ...`.
 
@@ -111,10 +105,12 @@ Root help shows the full command catalog by default:
 - `or3-intern serve` run enabled connected apps and automation
 - `or3-intern service` run the internal authenticated HTTP API for OR3 Net
 - `scripts/restart-service.sh [restart|start|stop|status]` manage a repo-run `or3-intern service` process without retyping the full command
-- `or3-intern agent -m "hello"` run a one-shot turn
+- `or3-intern agent -m "hello"` run and wait for a one-shot foreground turn
+- `or3-intern access <show|defaults|default|channel>` manage Reader, Operator, and Admin access profiles
 - `or3-intern doctor [--strict|--json|--fix]` advanced diagnostics, filters, and guided repair
 - `or3-intern embeddings <status|rebuild>` inspect or rebuild stored memory/doc embeddings after provider or embedding-model changes
-- `or3-intern capabilities [--channel name|--trigger name|--json]` inspect the effective runtime posture, ingress policy, approvals, and access profiles
+- `or3-intern memory <search|add-note|pinned>` search, add, and pin long-term memory entries
+- `or3-intern capabilities [--channel name|--trigger name|--json]` inspect runner, terminal, ingress, approval, and access posture
 - `or3-intern secrets <set|delete|list>` manage encrypted secret refs stored in SQLite
 - `or3-intern audit [verify]` inspect or verify the append-only audit chain
 - `or3-intern skills ...` list, inspect, search, install, update, check, and remove skills

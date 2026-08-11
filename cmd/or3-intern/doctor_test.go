@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"or3-intern/internal/config"
+	intdoctor "or3-intern/internal/doctor"
+	"or3-intern/internal/safetymode"
 	"or3-intern/internal/security"
 )
 
@@ -163,6 +165,32 @@ func TestDoctorFindings_ExpandedWarnings(t *testing.T) {
 				t.Fatalf("expected finding %q in area %q, got %#v", tt.expectMatch, tt.expectArea, findings)
 			}
 		})
+	}
+}
+
+func TestDoctorFindings_RelaxedLocalPostureIsInformational(t *testing.T) {
+	cfg := safeDoctorConfig()
+	safetymode.Apply(&cfg, safetymode.ModeRelaxed)
+	cfg.Security.SecretStore.Enabled = false
+	cfg.Security.SecretStore.Required = false
+	cfg.Security.Profiles.Enabled = false
+	cfg.Service.Enabled = false
+	report := intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave})
+	if report.Summary.WarnCount != 0 || report.Summary.ErrorCount != 0 || report.Summary.BlockCount != 0 {
+		t.Fatalf("expected no unresolved relaxed-local warnings, got %#v", report.Findings)
+	}
+	if !findingContains(doctorFindings(cfg), "security", "relaxed local posture intentionally") {
+		t.Fatalf("expected relaxed-local posture info, got %#v", report.Findings)
+	}
+
+	cfg.Service.Enabled = true
+	cfg.Service.Secret = strings.Repeat("s", 32)
+	report = intdoctor.Evaluate(cfg, intdoctor.Options{Mode: intdoctor.ModeConfigurePostSave})
+	if report.Summary.WarnCount == 0 {
+		t.Fatalf("expected service exposure to restore security warnings, got %#v", report.Findings)
+	}
+	if !findingContains(doctorFindings(cfg), "security", "audit logging is disabled") {
+		t.Fatalf("expected audit warning for exposed relaxed config, got %#v", report.Findings)
 	}
 }
 

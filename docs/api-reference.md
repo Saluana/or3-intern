@@ -67,7 +67,7 @@ after the original approval event so replay cannot create a second prompt.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/internal/v1/health` | Service health. |
+| `GET` | `/internal/v1/health` | Service health, including live `channelStatuses` when the service owns enabled channels. Reconnecting or failed channels make the overall status `degraded` while recovery continues. |
 | `GET` | `/internal/v1/jobs` | List current jobs. |
 | `GET` | `/internal/v1/jobs/{id}` | Read job state. |
 | `GET` | `/internal/v1/jobs/{id}/stream` | Stream job events. |

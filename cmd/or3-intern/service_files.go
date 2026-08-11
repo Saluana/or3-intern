@@ -122,6 +122,7 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
+	cfg := s.configSnapshot()
 	var roots []serviceFileRoot
 	add := func(id, label, path string, writable bool) {
 		path = strings.TrimSpace(path)
@@ -132,13 +133,13 @@ func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 			roots = append(roots, serviceFileRoot{ID: id, Label: label, Path: abs, Writable: writable})
 		}
 	}
-	add("allowed", "Allowed Folder", s.config.AllowedDir, true)
-	add("workspace", "Workspace", s.config.WorkspaceDir, true)
-	add("artifacts", "Artifacts", s.config.ArtifactsDir, false)
+	add("allowed", "Allowed Folder", cfg.AllowedDir, true)
+	add("workspace", "Workspace", cfg.WorkspaceDir, true)
+	add("artifacts", "Artifacts", cfg.ArtifactsDir, false)
 	if home, err := os.UserHomeDir(); err == nil {
 		add("home", "Home", home, false)
 	}
-	if s.config.FilesystemBrowsing {
+	if cfg.FilesystemBrowsing {
 		add("filesystem", "Full Filesystem", "/", false)
 	}
 	if len(roots) == 0 {

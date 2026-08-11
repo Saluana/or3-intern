@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -774,6 +776,76 @@ func TestSave_ExistingFilePermissionsAreTightened(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("expected config permissions 0600 after save, got %o", info.Mode().Perm())
+	}
+}
+
+func TestSave_DoesNotMutateCallerConfig(t *testing.T) {
+	cfg := Default()
+	cfg.Providers[" Custom Provider "] = ProviderProfileConfig{APIBase: "https://example.test/v1"}
+	if err := Save(filepath.Join(t.TempDir(), "config.json"), cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, ok := cfg.Providers[" Custom Provider "]; !ok {
+		t.Fatalf("Save normalized the caller's nested provider map: %#v", cfg.Providers)
+	}
+	if _, ok := cfg.Providers["custom-provider"]; ok {
+		t.Fatalf("Save added normalized state to the caller's nested provider map: %#v", cfg.Providers)
+	}
+}
+
+func TestSave_ConcurrentReadersOnlySeeCompleteJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	stop := make(chan struct{})
+	readDone := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				readDone <- nil
+				return
+			default:
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				readDone <- err
+				return
+			}
+			var snapshot Config
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				readDone <- err
+				return
+			}
+		}
+	}()
+
+	var writers sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		writers.Add(1)
+		go func(i int) {
+			defer writers.Done()
+			cfg := Default()
+			cfg.Provider.Model = "test-model-" + strconv.Itoa(i)
+			if err := Save(path, cfg); err != nil {
+				t.Errorf("Save(%d): %v", i, err)
+			}
+		}(i)
+	}
+	writers.Wait()
+	close(stop)
+	if err := <-readDone; err != nil {
+		t.Fatalf("reader observed invalid config: %v", err)
+	}
+	if leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".config-*.tmp")); err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	} else if len(leftovers) != 0 {
+		t.Fatalf("unexpected temporary config files: %v", leftovers)
+	}
+	if _, err := LoadPersisted(path); err != nil {
+		t.Fatalf("final config should be valid: %v", err)
 	}
 }
 
@@ -1610,7 +1682,7 @@ func TestValidateProfile(t *testing.T) {
 
 }
 
-func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
+func TestLoad_PreservesLegacyContextWithoutValidation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	cfg := Default()
@@ -1623,31 +1695,15 @@ func TestLoad_ContextDefaultsAndValidation(t *testing.T) {
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for invalid context.mode")
-	}
-	if !strings.Contains(err.Error(), "invalid context.mode") {
-		t.Fatalf("expected error about invalid context.mode, got: %v", err)
-	}
-
-	// Now test with a valid mode
-	cfg.Context.Mode = "quality"
-	if err := Save(path, cfg); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
 	got, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.Context.Mode != "quality" {
-		t.Fatalf("expected quality mode, got %q", got.Context.Mode)
+	if got.Context.Mode != "invalid-mode" {
+		t.Fatalf("expected legacy context value to be preserved, got %q", got.Context.Mode)
 	}
-	if got.Context.MaxInputTokens <= 0 || got.Context.OutputReserveTokens <= 0 {
-		t.Fatalf("expected positive context budgets, got %+v", got.Context)
-	}
-	if got.Context.Pressure.WarningPercent <= 0 || got.Context.Pressure.HighPercent <= got.Context.Pressure.WarningPercent || got.Context.Pressure.EmergencyPercent <= got.Context.Pressure.HighPercent {
-		t.Fatalf("unexpected pressure thresholds: %+v", got.Context.Pressure)
+	if got.Context.MaxInputTokens != -10 || got.Context.OutputReserveTokens != -1 {
+		t.Fatalf("expected legacy context values to remain untouched, got %+v", got.Context)
 	}
 	if !got.ContextConfigured {
 		t.Fatalf("expected context block written by Save(Default()) to be treated as configured")

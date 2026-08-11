@@ -74,23 +74,20 @@ func TestConfigureTUISectionPickerShowsExpandedSections(t *testing.T) {
 		titles = append(titles, entry.title)
 	}
 	view := strings.Join(titles, " | ")
-	for _, label := range []string{"Runtime", "Context", "Skills", "Security", "Hardening", "Automation"} {
+	for _, label := range []string{"Runtime", "Skills", "Security", "Hardening", "Automation"} {
 		if !strings.Contains(view, label) {
 			t.Fatalf("expected %q in section picker, got %q", label, view)
 		}
 	}
+	if strings.Contains(view, "Context") {
+		t.Fatalf("expected legacy context controls to be hidden, got %q", view)
+	}
 }
 
-func TestConfigureTUIAppliesContextFields(t *testing.T) {
+func TestConfigureTUIHidesLegacyContextFields(t *testing.T) {
 	cfg := config.Default()
-	if changed, err := applyChoiceSelection(&cfg, "context", "", "context_mode", "balanced"); err != nil || !changed {
-		t.Fatalf("apply context mode: changed=%v err=%v", changed, err)
-	}
-	if changed, err := applyFieldValue(&cfg, "context", "", "context_pressure_warning", "65"); err != nil || !changed {
-		t.Fatalf("apply context pressure warning: changed=%v err=%v", changed, err)
-	}
-	if cfg.Context.Mode != "balanced" || cfg.Context.Pressure.WarningPercent != 65 {
-		t.Fatalf("unexpected context config: %+v", cfg.Context)
+	if fields := buildSectionFields(cfg, "context", "/workspace/project"); len(fields) != 0 {
+		t.Fatalf("expected no legacy context controls, got %#v", fields)
 	}
 }
 
@@ -118,7 +115,7 @@ func TestConfigureTUIDiscordEnableDefaultsClosedInboundAccess(t *testing.T) {
 
 func TestConfigureTUIFieldDescriptionsAreHelpful(t *testing.T) {
 	cfg := config.Default()
-	sections := []string{"provider", "storage", "runtime", "context", "workspace", "skills", "security", "hardening", "session", "automation", "service"}
+	sections := []string{"provider", "storage", "runtime", "workspace", "skills", "security", "hardening", "session", "automation", "service"}
 	for _, section := range sections {
 		for _, field := range buildSectionFields(cfg, section, "/workspace/project") {
 			if len(strings.Fields(field.Description)) < 5 {

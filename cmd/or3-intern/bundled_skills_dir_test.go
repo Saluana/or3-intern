@@ -43,6 +43,34 @@ func TestEnsureMemorySkillRegisteredPersistsPolicy(t *testing.T) {
 	}
 }
 
+func TestEnsureMemorySkillRegisteredDoesNotPersistRuntimeSecrets(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "or3-intern.json")
+	persisted := config.Default()
+	persisted.Provider.APIKey = "stored-key"
+	if err := config.Save(cfgPath, persisted); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeCfg := persisted
+	runtimeCfg.Provider.APIKey = "environment-only-key"
+	changed, err := ensureMemorySkillRegistered(cfgPath, &runtimeCfg)
+	if err != nil {
+		t.Fatalf("ensureMemorySkillRegistered: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected registration changes")
+	}
+
+	loaded, err := config.LoadPersisted(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadPersisted: %v", err)
+	}
+	if loaded.Provider.APIKey != "stored-key" {
+		t.Fatalf("persisted API key was overwritten: %q", loaded.Provider.APIKey)
+	}
+}
+
 func TestPrepareRuntimeStorageAutoRegistersMemorySkill(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "or3-intern.json")

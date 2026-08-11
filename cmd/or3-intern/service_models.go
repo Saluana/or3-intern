@@ -125,7 +125,7 @@ func (c *serviceModelCatalogCache) Clear() {
 }
 
 func (s *serviceServer) fetchConfigureModelCatalog(ctx context.Context, provider, kind, category string, userFiltered bool) ([]serviceModelCatalogItem, error) {
-	profile, ok := s.config.ProviderProfile(provider)
+	profile, ok := s.configSnapshot().ProviderProfile(provider)
 	if !ok {
 		return nil, fmt.Errorf("provider is not configured: %s", provider)
 	}
@@ -277,7 +277,7 @@ func (s *serviceServer) handleConfigureProviderTest(w http.ResponseWriter, r *ht
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	cfg := s.config
+	cfg := s.configSnapshot()
 	roleName := strings.TrimSpace(body.Role)
 	if roleName == "" {
 		roleName = config.ModelRoleChat

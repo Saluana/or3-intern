@@ -376,6 +376,30 @@ func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit in
 	return out, nil
 }
 
+// ListRunnerChatTurnsAwaitingApproval returns the newest turns paused for an
+// approval decision. Callers use the bounded result to associate an approval
+// request with its durable runner-chat turn.
+func (d *DB) ListRunnerChatTurnsAwaitingApproval(ctx context.Context, limit int) ([]RunnerChatTurn, error) {
+	if limit <= 0 || limit > MaxRunnerChatSessionListLimit {
+		limit = MaxRunnerChatSessionListLimit
+	}
+	rows, err := d.SQL.QueryContext(ctx, runnerChatTurnSelectSQL+`
+		 WHERE status=? ORDER BY requested_at DESC LIMIT ?`, RunnerChatTurnStatusApprovalRequired, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	turns := make([]RunnerChatTurn, 0, limit)
+	for rows.Next() {
+		turn, err := scanRunnerChatTurn(rows)
+		if err != nil {
+			return nil, err
+		}
+		turns = append(turns, turn)
+	}
+	return turns, rows.Err()
+}
+
 // MarkRunnerChatTurnStarted transitions a queued turn to running.
 func (d *DB) MarkRunnerChatTurnStarted(ctx context.Context, id string, runID, jobID string) error {
 	now := NowMS()

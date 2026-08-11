@@ -7,12 +7,9 @@ import (
 	"or3-intern/internal/config"
 )
 
-func TestBuildServiceJobRegistryOnlyForService(t *testing.T) {
-	if buildServiceJobRegistry("chat") != nil {
-		t.Fatalf("expected nil job registry for chat")
-	}
-	if buildServiceJobRegistry("service") == nil {
-		t.Fatalf("expected job registry for service")
+func TestBuildRuntimeJobRegistry(t *testing.T) {
+	if buildRuntimeJobRegistry() == nil {
+		t.Fatal("expected job registry for runner chat event delivery")
 	}
 }
 

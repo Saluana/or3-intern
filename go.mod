@@ -1,6 +1,6 @@
 module or3-intern
 
-go 1.25.0
+go 1.26.5
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
@@ -19,7 +19,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v0.8.0
 	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/crypto v0.50.0
-	golang.org/x/net v0.52.0
+	golang.org/x/net v0.53.0
 	golang.org/x/term v0.43.0
 	golang.org/x/text v0.36.0
 	gopkg.in/yaml.v3 v3.0.1

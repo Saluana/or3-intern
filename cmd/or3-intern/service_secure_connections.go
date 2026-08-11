@@ -19,7 +19,7 @@ func (s *serviceServer) secureConnectionTrustStore(ctx context.Context) (*secure
 	if s == nil || s.broker == nil || s.broker.DB == nil {
 		return nil, fmt.Errorf("approval broker unavailable")
 	}
-	key, err := security.LoadOrCreateKey(s.config.Security.SecretStore.KeyFile)
+	key, err := security.LoadOrCreateKey(s.configSnapshot().Security.SecretStore.KeyFile)
 	if err != nil {
 		return nil, err
 	}

@@ -15,11 +15,24 @@ if [[ -z "$bin_dir" ]]; then
 fi
 
 mkdir -p "$bin_dir"
-go install ./cmd/or3-intern
+source_commit="$(git rev-parse HEAD 2>/dev/null || true)"
+source_dirty="false"
+if ! git diff --quiet --ignore-submodules -- 2>/dev/null || ! git diff --cached --quiet --ignore-submodules -- 2>/dev/null; then
+  source_dirty="true"
+fi
+build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+build_ldflags="-X main.buildVersion=dev -X main.buildCommit=${source_commit} -X main.buildDirty=${source_dirty} -X main.buildTime=${build_time}"
+go install -ldflags="$build_ldflags" ./cmd/or3-intern
 
 binary_path="$bin_dir/or3-intern"
 if [[ ! -x "$binary_path" ]]; then
   echo "install failed: $binary_path was not created" >&2
+  exit 1
+fi
+
+version_output="$("$binary_path" version)"
+if [[ -n "$source_commit" && "$version_output" != *"commit: $source_commit"* ]]; then
+  echo "install failed: binary provenance does not match this checkout" >&2
   exit 1
 fi
 

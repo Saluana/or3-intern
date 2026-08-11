@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -14,6 +15,32 @@ type testChannel struct {
 	startedCount int
 	stoppedCount int
 	delivered    []string
+}
+
+type blockingStartChannel struct {
+	name    string
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (c *blockingStartChannel) Name() string { return c.name }
+func (c *blockingStartChannel) Start(ctx context.Context, eventBus *bus.Bus) error {
+	_ = eventBus
+	close(c.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (c *blockingStartChannel) Stop(ctx context.Context) error {
+	_ = ctx
+	close(c.stopped)
+	return nil
+}
+func (c *blockingStartChannel) Deliver(ctx context.Context, to, text string, meta map[string]any) error {
+	_ = ctx
+	_ = to
+	_ = text
+	_ = meta
+	return nil
 }
 
 func (c *testChannel) Name() string { return c.name }
@@ -68,6 +95,42 @@ func TestManager_RejectsDuplicateNames(t *testing.T) {
 	}
 	if err := m.Register(&testChannel{name: "slack"}); err == nil {
 		t.Fatal("expected duplicate registration error")
+	}
+}
+
+func TestManager_StopCancelsAnInitialStart(t *testing.T) {
+	m := NewManager()
+	ch := &blockingStartChannel{name: "slack", started: make(chan struct{}), stopped: make(chan struct{})}
+	if err := m.Register(ch); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- m.Start(context.Background(), "SLACK", bus.New(1)) }()
+	select {
+	case <-ch.started:
+	case <-time.After(time.Second):
+		t.Fatal("channel start did not begin")
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := m.Stop(stopCtx, "slack"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-ch.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("channel stop was not called")
+	}
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Fatal("expected canceled start error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("start did not finish after stop")
+	}
+	if status := m.ConnectionStatuses()["slack"]; status != "stopped" {
+		t.Fatalf("expected stopped status after canceled start, got %q", status)
 	}
 }
 
@@ -129,5 +192,20 @@ func TestIngressDeduplicator_DefaultTTL(t *testing.T) {
 	d := NewIngressDeduplicator(0)
 	if d.ttl != defaultDeduplicatorTTL {
 		t.Fatalf("expected default TTL %v, got %v", defaultDeduplicatorTTL, d.ttl)
+	}
+}
+
+func TestIngressDeduplicator_BoundsUniqueKeys(t *testing.T) {
+	d := NewIngressDeduplicator(time.Minute)
+	for i := 0; i < defaultDeduplicatorMaxEntries+32; i++ {
+		if d.IsDuplicate("message-" + strconv.Itoa(i)) {
+			t.Fatalf("unexpected duplicate at %d", i)
+		}
+	}
+	d.mu.Lock()
+	count := len(d.seen)
+	d.mu.Unlock()
+	if count > defaultDeduplicatorMaxEntries {
+		t.Fatalf("expected at most %d cached keys, got %d", defaultDeduplicatorMaxEntries, count)
 	}
 }

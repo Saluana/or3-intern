@@ -129,7 +129,7 @@ func (s *serviceServer) terminalWebSocketOriginAllowed(r *http.Request) bool {
 	if strings.TrimSpace(r.Header.Get("Origin")) == "" {
 		return true
 	}
-	_, ok := serviceAllowedBrowserOrigin(s.config, r)
+	_, ok := serviceAllowedBrowserOrigin(s.configSnapshot(), r)
 	return ok
 }
 

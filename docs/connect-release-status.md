@@ -20,21 +20,25 @@ The coordinated 2026-08-11 release target is:
 
 | Artifact | Coordinated version | Current source version | Required outcome |
 | --- | --- | --- | --- |
-| `@or3/intern-client` | `0.1.2` | `0.1.2` | Publish once from tag `v0.1.2`; never republish. |
-| `@or3/connect` | `0.1.2` | `0.1.2` | Publish once from tag `v0.1.2`; never republish. |
-| `or3-intern` GitHub release assets | `v0.1.2` | Bootstrap targets `v0.1.2` | Produce all platform archives and checksums from the same tag. |
+| `@or3/intern-client` | `0.1.3` | `0.1.3` | Publish once from tag `v0.1.3`; never republish. |
+| `@or3/connect` | `0.1.3` | `0.1.3` | Publish once from tag `v0.1.3`; never republish. |
+| `or3-intern` GitHub release assets | `v0.1.3` | Bootstrap targets `v0.1.3` | Produce all platform archives and checksums from the same tag. |
 
 The release is complete only when the GitHub Actions run succeeds, both exact
 npm versions resolve, the matching GitHub release assets resolve, and a clean
-`npx @or3/connect@0.1.2 intern --help` smoke passes. A successful workflow and
+`npx @or3/connect@0.1.3 intern --help` smoke passes. A successful workflow and
 npm propagation are separate checks.
+
+Tag `v0.1.2` produced verified binary assets but its npm qualification stopped
+before publication because the workflow packed from the repository root. Its
+npm versions were never created; the immutable correction is `v0.1.3`.
 
 ## Supported commands today
 
 Local setup does not use remote Connect or a central endpoint:
 
 ```bash
-npx @or3/connect@0.1.2 intern
+npx @or3/connect@0.1.3 intern
 ```
 
 From an `or3-intern` source checkout:

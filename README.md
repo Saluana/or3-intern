@@ -9,7 +9,7 @@ The README now stays focused on orientation and quick start. Detailed guides and
 Install the supported local CLI without Go or a PATH edit:
 
 ```bash
-npx @or3/connect@0.1.2 intern
+npx @or3/connect@0.1.3 intern
 ```
 
 From a source checkout, you can instead install it directly:

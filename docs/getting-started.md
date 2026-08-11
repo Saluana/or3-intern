@@ -26,7 +26,7 @@ The beginner mental model is:
 Without Go or a PATH edit:
 
 ```bash
-npx @or3/connect@0.1.2 intern
+npx @or3/connect@0.1.3 intern
 ```
 
 From this source checkout:

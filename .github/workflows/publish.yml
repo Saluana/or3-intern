@@ -151,12 +151,17 @@ jobs:
               exit 1
             fi
           done
-      - name: Qualify immutable npm tarballs
+      - name: Qualify immutable npx bootstrap tarball
+        working-directory: packages/or3
         run: |
-          npm test --prefix packages/or3
-          npm pack --json --prefix packages/or3 > packages/or3/pack.json
-          npm test --prefix clients/typescript
-          npm pack --json --prefix clients/typescript > clients/typescript/pack.json
+          npm test
+          npm pack --ignore-scripts --json > pack.json
+      - name: Qualify immutable TypeScript client tarball
+        working-directory: clients/typescript
+        run: |
+          npm test
+          npm run build
+          npm pack --ignore-scripts --json > pack.json
       - name: Smoke-test the released one-command bootstrap
         working-directory: packages/or3
         run: |

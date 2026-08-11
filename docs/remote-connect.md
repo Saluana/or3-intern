@@ -9,7 +9,7 @@ command. Local/offline Intern remains account-free.
 
 Read [Connect release status](connect-release-status.md) before choosing a
 package version. Install local Intern with
-`npx @or3/connect@0.1.2 intern`, from this checkout with
+`npx @or3/connect@0.1.3 intern`, from this checkout with
 `./scripts/install-cli.sh`, or use `go run ./cmd/or3-intern ...` for a one-off
 source run.
 

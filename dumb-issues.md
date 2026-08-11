@@ -8,7 +8,7 @@ Scope: Go CLI/runtime, service API, configuration persistence/live reload, chann
 
 ## Verdict
 
-This report preserves the original audit evidence and records the completed remediation below. All identified source, durability, memory-bounding, and CLI-UX issues are now addressed. The zero-install Connect bootstrap is coordinated at `v0.1.2`; its tag workflow must publish both npm packages and all matching binary assets before the release is considered complete. Managed remote Connect remains withheld.
+This report preserves the original audit evidence and records the completed remediation below. All identified source, durability, memory-bounding, and CLI-UX issues are now addressed. The zero-install Connect bootstrap is coordinated at `v0.1.3`; its tag workflow must publish both npm packages and all matching binary assets before the release is considered complete. Managed remote Connect remains withheld.
 
 ## Original priority summary
 
@@ -26,7 +26,7 @@ This report preserves the original audit evidence and records the completed reme
 | 2 | [x] — `agent` now waits for a terminal turn, prints its result, exits non-zero on failure/timeout, and aborts an unfinished turn. Runner chat events are now available outside service mode; a fake-runner CLI check completed with the expected output and no active record. |
 | 3 | [x] — Service config now has a single serialized mutation path with deep immutable snapshots for readers. A live update also refreshes the embedding provider, memory service, runner orchestrator, control plane, and service app together; concurrent read, provider-map, and skill-map updates pass repeated `-race` coverage. |
 | 4 | [x] — Discord, Slack, and WhatsApp now supervise inbound sockets with context-bound, jittered exponential reconnects, interruptible initial handshakes, atomic connection replacement, clean stop/join behavior, and permanent-auth failure detection. The manager safely cancels an in-flight `Start`; live state drives `/health` `channelStatuses` and degradation. Inbound-ID and Discord display-name caches are bounded and cleared on shutdown. |
-| 5 | [x] — The coordinated `v0.1.2` release builds all Intern assets, publishes both immutable npm packages, verifies registry propagation, and smokes the exact `npx @or3/connect@0.1.2 intern` path before completion. |
+| 5 | [x] — The coordinated `v0.1.3` release builds all Intern assets, publishes both immutable npm packages, verifies registry propagation, and smokes the exact `npx @or3/connect@0.1.3 intern` path before completion. |
 | 6 | [x] — Channel approvals now use the live runner-turn continuation path when available, give one deterministic truthful response when it is not, and close unrecoverable fallback turns instead of leaving them running. |
 | 7 | [x] — Config writes are serialized, written to a synced 0600 sibling temp file, atomically renamed, and directory-synced; a concurrent reader/writer regression test passes under `-race`. |
 | 8 | [x] — Root globals now work before or after the command, including `--config=value`; malformed/unknown root flags fail clearly, and `version`, `config-path`, `init`, and `setup` reject stray positional arguments. Parser coverage and an actual post-command `config-path --config` run pass. |
@@ -136,9 +136,9 @@ This report preserves the original audit evidence and records the completed reme
 
 **Validation:** From a clean machine/cache, run the exact README command for every supported OS/architecture, finish setup, run `version`, and verify exact npm version and release asset provenance.
 
-**Remediation:** The source, `@or3/connect`, and `@or3/intern-client` manifests now share version `0.1.2`. The release workflow builds all four platform archives from the same tag, injects build provenance, creates the GitHub release, qualifies immutable npm tarballs, publishes the client before Connect, waits for exact registry propagation, and smokes the exact bootstrap on Node 20 Alpine. Local docs use the pinned command while managed remote Connect stays explicitly withheld.
+**Remediation:** The source, `@or3/connect`, and `@or3/intern-client` manifests now share version `0.1.3`. The release workflow builds all four platform archives from the same tag, injects build provenance, creates the GitHub release, qualifies immutable npm tarballs from their package directories, publishes the client before Connect, waits for exact registry propagation, and smokes the exact bootstrap on Node 20 Alpine. Local docs use the pinned command while managed remote Connect stays explicitly withheld. Tag `v0.1.2` built verified binaries but stopped before npm publication because `npm pack --prefix` resolved the repository root; the workflow fix and immutable replacement use `v0.1.3`.
 
-**Validation:** Pre-release qualification passed the complete Go suite, vet, module verification, a pinned vulnerability scan with 0 reachable vulnerabilities, both npm test suites, tarball inspection, and a built `v0.1.2` CLI smoke. Final closure still requires the tag workflow and exact npm/asset propagation checks to succeed independently.
+**Validation:** Pre-release qualification passed the complete Go suite, vet, module verification, a pinned vulnerability scan with 0 reachable vulnerabilities, both npm test suites, tarball inspection, and a built `v0.1.3` CLI smoke. Final closure still requires the tag workflow and exact npm/asset propagation checks to succeed independently.
 
 ## P2 — Correctness, durability, leaks, and UX
 

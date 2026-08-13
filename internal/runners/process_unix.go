@@ -53,6 +53,14 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 	if err != nil {
 		return nil
 	}
+	if pgid == syscall.Getpgrp() {
+		// A missing applyProcessGroup call must never let child cleanup signal
+		// the parent process group (for example, the GitHub Actions test step).
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		time.Sleep(2 * time.Second)
+		_ = cmd.Process.Kill()
+		return nil
+	}
 	// SIGTERM to the negative process group id
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	// SIGKILL after a grace period

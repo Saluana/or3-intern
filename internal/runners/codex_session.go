@@ -72,6 +72,7 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 	if len(cfg.Env) > 0 {
 		cmd.Env = cfg.Env
 	}
+	applyProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("codex stdin pipe: %w", err)

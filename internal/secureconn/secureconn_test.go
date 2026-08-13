@@ -1016,6 +1016,22 @@ func TestValidateStepUpUpdateRejectsFutureTimestamps(t *testing.T) {
 	}
 }
 
+func TestHasRecentStepUpUsesTrustSpecificExpiry(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	claims := SessionClaims{TrustLevel: TrustNativeSoftware, StepUpAtUnixMs: now.Add(-DefaultStepUpTTL).UnixMilli()}
+	if !HasRecentStepUp(claims, now) {
+		t.Fatal("desktop step-up should remain valid through the TTL boundary")
+	}
+	if HasRecentStepUp(claims, now.Add(time.Millisecond)) {
+		t.Fatal("desktop step-up should expire after the TTL")
+	}
+	claims.TrustLevel = TrustWebLimited
+	claims.StepUpAtUnixMs = now.Add(-2 * time.Minute).UnixMilli()
+	if !HasRecentStepUp(claims, now) || HasRecentStepUp(claims, now.Add(time.Millisecond)) {
+		t.Fatal("web-limited step-up should use the two-minute TTL")
+	}
+}
+
 func TestSessionLifecyclePurge(t *testing.T) {
 	now := time.Now().UTC()
 	identity, err := NewHostIdentity("Test Host", now)

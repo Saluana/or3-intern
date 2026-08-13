@@ -26,8 +26,8 @@ func TestServiceFileRootsUseConfiguredDirs(t *testing.T) {
 	if root, ok := byID["allowed"]; !ok || !root.Writable {
 		t.Fatalf("expected writable allowed root, got %+v", root)
 	}
-	if _, ok := byID["home"]; !ok {
-		t.Fatal("expected home root to be present")
+	if _, ok := byID["home"]; ok {
+		t.Fatal("home root must not be exposed implicitly")
 	}
 }
 
@@ -326,6 +326,13 @@ func TestHandleFileWriteCreatesAndOverwritesTextFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat file: %v", err)
 	}
+	if err := os.Chmod(filepath.Join(tmp, "notes", "today.md"), 0o755); err != nil {
+		t.Fatalf("chmod file: %v", err)
+	}
+	info, err = os.Stat(filepath.Join(tmp, "notes", "today.md"))
+	if err != nil {
+		t.Fatalf("stat executable file: %v", err)
+	}
 	secondBody, _ := json.Marshal(map[string]any{
 		"root_id":           "allowed",
 		"path":              "notes/today.md",
@@ -346,6 +353,13 @@ func TestHandleFileWriteCreatesAndOverwritesTextFiles(t *testing.T) {
 	}
 	if string(written) != "updated\n" {
 		t.Fatalf("unexpected updated contents: %q", string(written))
+	}
+	updatedInfo, err := os.Stat(filepath.Join(tmp, "notes", "today.md"))
+	if err != nil {
+		t.Fatalf("stat updated file: %v", err)
+	}
+	if got := updatedInfo.Mode().Perm(); got != 0o755 {
+		t.Fatalf("expected existing mode 0755 to be preserved, got %04o", got)
 	}
 }
 

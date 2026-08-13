@@ -1,14 +1,40 @@
 package security
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 )
+
+func TestLoadOrCreateKeyConcurrentFirstStartUsesOneKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.key")
+	const callers = 32
+	keys := make([][]byte, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			keys[index], errs[index] = LoadOrCreateKey(path)
+		}(i)
+	}
+	wg.Wait()
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if !bytes.Equal(keys[0], keys[i]) {
+			t.Fatalf("caller %d received a different key", i)
+		}
+	}
+}
 
 func openSecurityTestDB(t *testing.T) *db.DB {
 	t.Helper()

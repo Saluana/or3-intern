@@ -412,6 +412,26 @@ describe('@or3/intern-client SSE', () => {
             )
         ).rejects.toMatchObject({ code: 'timeout', retryable: true });
     });
+
+    it('times out an established stream after inactivity', async () => {
+        const transport = createInternTransport({
+            baseUrl: 'https://host.example',
+            fetch: fetchLike(async () =>
+                new Response(
+                    new ReadableStream<Uint8Array>({
+                        start() {
+                            // Keep the established response silent forever.
+                        },
+                    }),
+                    { headers: { 'Content-Type': 'text/event-stream' } }
+                )
+            ),
+            streamInactivityTimeoutMs: 5,
+        });
+        await expect(
+            collect(transport.stream('/events', { requireAuth: false }))
+        ).rejects.toMatchObject({ code: 'timeout', retryable: true });
+    });
 });
 
 describe('@or3/intern-client redaction', () => {

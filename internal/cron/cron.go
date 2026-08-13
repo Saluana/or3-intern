@@ -195,8 +195,25 @@ func (s *Service) save(st Store) error {
 	if err != nil {
 		return err
 	}
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, b, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".cron-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmpPath, s.path)
@@ -301,6 +318,11 @@ func (s *Service) saveSQLite(st Store) error {
 func (s *Service) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := lockCronStore(s.path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	if s.c != nil {
 		return nil
@@ -352,6 +374,11 @@ func (s *Service) Stop() {
 func (s *Service) Status() (map[string]any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	unlock, err := lockCronStore(s.path)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	st, err := s.load()
 	if err != nil {
 		return nil, err
@@ -375,6 +402,11 @@ func (s *Service) Status() (map[string]any, error) {
 func (s *Service) List() ([]CronJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	unlock, err := lockCronStore(s.path)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	st, err := s.load()
 	if err != nil {
 		return nil, err
@@ -386,6 +418,11 @@ func (s *Service) List() ([]CronJob, error) {
 func (s *Service) Add(job CronJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := lockCronStore(s.path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	st, err := s.load()
 	if err != nil {
 		return err
@@ -428,6 +465,11 @@ func (s *Service) Add(job CronJob) error {
 func (s *Service) Update(id string, job CronJob) (CronJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, lockErr := lockCronStore(s.path)
+	if lockErr != nil {
+		return CronJob{}, lockErr
+	}
+	defer unlock()
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return CronJob{}, fmt.Errorf("job id is required")
@@ -470,6 +512,11 @@ func (s *Service) Update(id string, job CronJob) (CronJob, error) {
 func (s *Service) SetEnabled(id string, enabled bool) (CronJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, lockErr := lockCronStore(s.path)
+	if lockErr != nil {
+		return CronJob{}, lockErr
+	}
+	defer unlock()
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return CronJob{}, fmt.Errorf("job id is required")
@@ -508,6 +555,11 @@ func (s *Service) SetEnabled(id string, enabled bool) (CronJob, error) {
 func (s *Service) Remove(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := lockCronStore(s.path)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	return s.removeLocked(id)
 }
 
@@ -550,8 +602,14 @@ func (s *Service) RunNow(ctx context.Context, id string, force bool) (CronJob, e
 
 func (s *Service) runJobByID(ctx context.Context, id string, force bool) (CronJob, error) {
 	s.mu.Lock()
+	unlock, err := lockCronStore(s.path)
+	if err != nil {
+		s.mu.Unlock()
+		return CronJob{}, err
+	}
 	st, err := s.load()
 	if err != nil {
+		unlock()
 		s.mu.Unlock()
 		return CronJob{}, err
 	}
@@ -565,19 +623,30 @@ func (s *Service) runJobByID(ctx context.Context, id string, force bool) (CronJo
 		}
 	}
 	if !found {
+		unlock()
 		s.mu.Unlock()
 		return CronJob{}, ErrNotFound
 	}
 	if !force && !jobToRun.Enabled {
+		unlock()
 		s.mu.Unlock()
 		return jobToRun, nil
 	}
+	unlock()
 	s.mu.Unlock()
 
 	result, err := s.runner(ctx, jobToRun)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, lockErr := lockCronStore(s.path)
+	if lockErr != nil {
+		if err != nil {
+			return jobToRun, errors.Join(err, lockErr)
+		}
+		return jobToRun, lockErr
+	}
+	defer unlock()
 	latest, loadErr := s.load()
 	if loadErr != nil {
 		if err != nil {
@@ -607,7 +676,7 @@ func (s *Service) runJobByID(ctx context.Context, id string, force bool) (CronJo
 	}
 	jobToUpdate.State.LastEnqueuedJobID = result.EnqueuedJobID
 	jobToUpdate.State.LastEnqueuedRunID = result.EnqueuedRunID
-	if jobToUpdate.DeleteAfterRun {
+	if jobToUpdate.DeleteAfterRun && err == nil {
 		s.unarmJobLocked(id)
 		n := make([]CronJob, 0, len(latest.Jobs))
 		for _, jj := range latest.Jobs {
@@ -622,6 +691,10 @@ func (s *Service) runJobByID(ctx context.Context, id string, force bool) (CronJo
 	}
 	if saveErr := s.save(latest); saveErr != nil {
 		log.Printf("cron save failed: %v", saveErr)
+		if err != nil {
+			return jobToRun, errors.Join(err, saveErr)
+		}
+		return jobToRun, saveErr
 	}
 	return jobToRun, err
 }

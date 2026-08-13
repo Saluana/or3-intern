@@ -48,6 +48,21 @@ type RunnerRuntimeRegistry struct {
 	runtimes map[RunnerID]NativeRunnerRuntime
 }
 
+type lifecycleContextRuntime interface {
+	SetLifecycleContext(context.Context)
+}
+
+func (r *RunnerRuntimeRegistry) SetLifecycleContext(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.ForEach(func(runtime NativeRunnerRuntime) {
+		if managed, ok := runtime.(lifecycleContextRuntime); ok {
+			managed.SetLifecycleContext(ctx)
+		}
+	})
+}
+
 func NewDefaultRuntimeRegistry() *RunnerRuntimeRegistry {
 	registry := &RunnerRuntimeRegistry{runtimes: map[RunnerID]NativeRunnerRuntime{}}
 	registry.Register(NewOpenCodeNativeRuntime())
@@ -293,10 +308,26 @@ type OpenCodeNativeRuntime struct {
 	activeSessions map[string]string
 	activeRequests map[string]NativeRequestRef
 	lifecycle      *openCodeLifecycle
+	lifecycleCtx   context.Context
 }
 
 func NewOpenCodeNativeRuntime() *OpenCodeNativeRuntime {
 	return &OpenCodeNativeRuntime{client: &http.Client{}, activeSessions: map[string]string{}, activeRequests: map[string]NativeRequestRef{}}
+}
+
+func (r *OpenCodeNativeRuntime) SetLifecycleContext(ctx context.Context) {
+	r.mu.Lock()
+	r.lifecycleCtx = ctx
+	r.mu.Unlock()
+}
+
+func (r *OpenCodeNativeRuntime) processContext(fallback context.Context) context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lifecycleCtx != nil {
+		return r.lifecycleCtx
+	}
+	return fallback
 }
 
 // Compile-time assertion that OpenCodeNativeRuntime supports request responses.
@@ -750,7 +781,7 @@ func (r *OpenCodeNativeRuntime) ensureServer(ctx context.Context, cfg config.Run
 			idleTimeout = 5 * time.Minute
 		}
 		lc = newOpenCodeLifecycle(RuntimeOwnershipManaged, idleTimeout)
-		start := openCodeStart(ctx, binary, openCodeStartOptions{
+		start := openCodeStart(r.processContext(ctx), binary, openCodeStartOptions{
 			Env:           env,
 			StartupBudget: time.Duration(cfg.NativeServerStartupSeconds) * time.Second,
 		})
@@ -979,6 +1010,7 @@ type CodexNativeRuntime struct {
 	activeJobID   string
 	lastUsedAt    atomic.Int64
 	idleTimeout   time.Duration
+	lifecycleCtx  context.Context
 }
 
 // Compile-time assertion that CodexNativeRuntime supports request responses.
@@ -987,6 +1019,21 @@ var _ NativeTurnContinuer = (*CodexNativeRuntime)(nil)
 
 func NewCodexNativeRuntime() *CodexNativeRuntime {
 	return &CodexNativeRuntime{idleTimeout: 5 * time.Minute}
+}
+
+func (r *CodexNativeRuntime) SetLifecycleContext(ctx context.Context) {
+	r.mu.Lock()
+	r.lifecycleCtx = ctx
+	r.mu.Unlock()
+}
+
+func (r *CodexNativeRuntime) processContext(fallback context.Context) context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lifecycleCtx != nil {
+		return r.lifecycleCtx
+	}
+	return fallback
 }
 
 func (r *CodexNativeRuntime) ID() RunnerID { return RunnerCodex }
@@ -1300,7 +1347,7 @@ func (r *CodexNativeRuntime) acquireSession(ctx context.Context, binary string, 
 		}
 	}
 	if sess == nil {
-		newSess, err := startCodexSession(ctx, binary, codexSessionConfig{Env: req.Env, Cwd: req.Run.Cwd})
+		newSess, err := startCodexSession(r.processContext(ctx), binary, codexSessionConfig{Env: req.Env, Cwd: req.Run.Cwd})
 		if err != nil {
 			return nil, err
 		}

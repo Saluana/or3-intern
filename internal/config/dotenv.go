@@ -28,9 +28,6 @@ func dotenvCandidates() []string {
 	var paths []string
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 		paths = append(paths, filepath.Join(cwd, ".env"))
-		if parent := filepath.Dir(cwd); parent != cwd {
-			paths = append(paths, filepath.Join(parent, ".env"))
-		}
 	}
 	return paths
 }

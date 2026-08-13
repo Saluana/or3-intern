@@ -321,7 +321,17 @@ func (s *serviceServer) handleConfigure(w http.ResponseWriter, r *http.Request) 
 			writeServiceError(w, r, http.StatusBadGateway, "config save failed", err)
 			return
 		}
-		writeServiceJSON(w, http.StatusOK, map[string]any{"ok": true, "config_path": path, "live_reloaded": []string{"model_routing"}})
+		restartFields := make([]string, 0, len(body.Changes))
+		for _, change := range body.Changes {
+			restartFields = append(restartFields, strings.Trim(strings.Join([]string{normalizeConfigureSectionKey(change.Section), strings.TrimSpace(change.Channel), strings.TrimSpace(change.Field)}, "."), "."))
+		}
+		writeServiceJSON(w, http.StatusOK, map[string]any{
+			"ok":                      true,
+			"config_path":             path,
+			"live_reloaded":           []string{"model_routing"},
+			"restart_required":        true,
+			"restart_required_fields": restartFields,
+		})
 	default:
 		writeServiceJSON(w, http.StatusNotFound, map[string]any{"error": "configure route not found"})
 	}

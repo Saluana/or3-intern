@@ -78,6 +78,14 @@ after the original approval event so replay cannot create a second prompt.
 | `GET` | `/internal/v1/configure` | Read configurable settings. |
 | `POST` | `/internal/v1/configure` | Apply canonical settings. |
 | `GET` | `/internal/v1/capabilities` | Read runtime posture, approvals, network, runner, and auth capabilities. |
+
+File browsing is limited to explicitly configured workspace, allowed, and
+artifact roots. The service does not expose the account home directory
+implicitly. Full-filesystem read access appears only when
+`filesystemBrowsing` is explicitly enabled. File operations use rooted,
+handle-relative traversal on supported platforms; symlinks may resolve within
+the selected root but cannot escape it.
+
 | `GET` | `/internal/v1/secure-connections/discovery` | Read secure connection capabilities. |
 | `POST` | `/internal/v1/secure-connections/pairing/approve` | Approve secure device enrollment. |
 

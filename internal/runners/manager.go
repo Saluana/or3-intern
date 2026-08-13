@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	runnerClaimRetryDelay = 25 * time.Millisecond
-	runnerFinalizeTimeout = 5 * time.Second
-	runnerDetectCacheTTL  = 30 * time.Second
+	runnerRecoveryInterval = 5 * time.Second
+	runnerFinalizeTimeout  = 5 * time.Second
+	runnerDetectCacheTTL   = 30 * time.Second
 )
 
 // Manager queues and runs external runner jobs.
@@ -100,12 +100,15 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.Runtimes.SetLifecycleContext(m.ctx)
 	m.notifyCh = make(chan struct{}, m.MaxConcurrent)
 	m.started = true
 	for i := 0; i < m.MaxConcurrent; i++ {
 		m.wg.Add(1)
 		go m.workerLoop()
 	}
+	m.wg.Add(1)
+	go m.recoveryLoop()
 	for _, run := range running {
 		m.reconcileInterruptedRun(run, "aborted by service restart")
 	}
@@ -167,7 +170,8 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 	if m == nil || m.DB == nil {
 		return db.RunnerRun{}, fmt.Errorf("runner manager is not available")
 	}
-	cfg := m.configSnapshot()
+	live := m.liveConfigSnapshot()
+	cfg := live.cfg
 	parentSessionKey := strings.TrimSpace(req.ParentSessionKey)
 	if parentSessionKey == "" {
 		return db.RunnerRun{}, fmt.Errorf("missing parent session")
@@ -234,7 +238,7 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 	}
 
 	// Resolve and validate cwd against allowed root
-	cwd, err := resolveRunnerCwd(req.Cwd, m.RestrictDir)
+	cwd, err := resolveRunnerCwd(req.Cwd, live.restrictDir)
 	if err != nil {
 		return db.RunnerRun{}, fmt.Errorf("invalid cwd: %w", err)
 	}
@@ -278,7 +282,7 @@ func (m *Manager) Enqueue(ctx context.Context, req RunnerRunRequest) (db.RunnerR
 		MetaJSON:         metaJSON,
 	}
 
-	if err := m.DB.EnqueueRunnerRunLimited(ctx, run, m.MaxQueued); err != nil {
+	if err := m.DB.EnqueueRunnerRunLimited(ctx, run, live.maxQueued); err != nil {
 		return db.RunnerRun{}, err
 	}
 
@@ -359,7 +363,23 @@ func (m *Manager) workerLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-m.notifyCh:
-		case <-time.After(runnerClaimRetryDelay):
+		}
+	}
+}
+
+func (m *Manager) recoveryLoop() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(runnerRecoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			workers := m.MaxConcurrent
+			m.mu.Unlock()
+			m.signalN(workers)
 		}
 	}
 }
@@ -1005,16 +1025,29 @@ func (m *Manager) configSnapshot() config.RunnersConfig {
 	return m.Cfg
 }
 
+type runnerLiveConfig struct {
+	cfg         config.RunnersConfig
+	maxQueued   int
+	restrictDir string
+}
+
+func (m *Manager) liveConfigSnapshot() runnerLiveConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return runnerLiveConfig{cfg: m.Cfg, maxQueued: m.MaxQueued, restrictDir: m.RestrictDir}
+}
+
 // ApplyConfig refreshes live policy/config values used by newly enqueued runs.
 func (m *Manager) ApplyConfig(cfg config.RunnersConfig, maxConcurrent, maxQueued int, timeout time.Duration, openCodeDirs []string, restrictDir string) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
+	_ = maxConcurrent
 	m.Cfg = cfg
-	if maxConcurrent > 0 {
-		m.MaxConcurrent = maxConcurrent
-	}
+	// Worker-pool size and notify-channel capacity are constructor-bound.
+	// Keep the effective value stable until restart instead of advertising a
+	// concurrency change that did not happen.
 	if maxQueued > 0 {
 		m.MaxQueued = maxQueued
 	}

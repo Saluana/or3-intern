@@ -146,6 +146,15 @@ func stepUpTTLForTrust(trustLevel string) time.Duration {
 	return DefaultStepUpTTL
 }
 
+// HasRecentStepUp reports whether claims contain a step-up proof that is still
+// valid for the session's trust level. It must be evaluated on every request.
+func HasRecentStepUp(claims SessionClaims, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return hasRecentStepUp(claims.StepUpAtUnixMs, now, stepUpTTLForTrust(claims.TrustLevel))
+}
+
 func (d AuthorizationDecision) deny(code, message string, stepUp bool) AuthorizationDecision {
 	d.Allowed = false
 	d.Code = code

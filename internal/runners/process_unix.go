@@ -3,10 +3,33 @@
 package runners
 
 import (
+	"context"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
+
+var unixProcessWatchers sync.Map
+
+func attachProcessGroup(ctx context.Context, cmd *exec.Cmd) error {
+	watchCtx, cancel := context.WithCancel(context.Background())
+	unixProcessWatchers.Store(cmd, cancel)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = KillProcessGroup(cmd)
+		case <-watchCtx.Done():
+		}
+	}()
+	return nil
+}
+
+func releaseProcessGroup(cmd *exec.Cmd) {
+	if raw, ok := unixProcessWatchers.LoadAndDelete(cmd); ok {
+		raw.(context.CancelFunc)()
+	}
+}
 
 func (p *ProcessManager) setProcessGroup(cmd *exec.Cmd) {
 	applyProcessGroup(cmd)

@@ -152,6 +152,47 @@ func TestOpen_MigratesLegacyMemorySchema(t *testing.T) {
 	}
 }
 
+func TestOpenRecoversPinnedMigrationInterruptedAfterRename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "partial-pinned.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open partial database: %v", err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TABLE memory_pinned_legacy(
+		key TEXT PRIMARY KEY,
+		content TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO memory_pinned_legacy(key, content, updated_at) VALUES('name', 'survived', 1)`); err != nil {
+		t.Fatalf("seed legacy table: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close partial database: %v", err)
+	}
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("recover partial migration: %v", err)
+	}
+	defer d.Close()
+	pinned, err := d.GetPinned(context.Background(), "session")
+	if err != nil {
+		t.Fatalf("get recovered pinned memory: %v", err)
+	}
+	if pinned["name"] != "survived" {
+		t.Fatalf("legacy row was stranded: %#v", pinned)
+	}
+	var legacyCount int
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_pinned_legacy'`).Scan(&legacyCount); err != nil {
+		t.Fatalf("inspect legacy table: %v", err)
+	}
+	if legacyCount != 0 {
+		t.Fatal("legacy migration table was not removed")
+	}
+}
+
 func TestOpen_InvalidPath(t *testing.T) {
 	// A path inside a non-existent directory shouldn't cause Open to fail
 	// because SQLite creates the file. But an invalid path format should fail.

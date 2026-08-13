@@ -171,12 +171,12 @@ func TestPreRuntimeCommands_DispatchDevicesAndPairing(t *testing.T) {
 	broker.Config.Pairing.Mode = config.ApprovalModeAsk
 	var out bytes.Buffer
 
-	handled, err := runPreRuntimeCommand(context.Background(), "devices", config.Config{}, broker.DB, nil, nil, broker, []string{"create", "--id", "dispatch-device"}, &out, &out)
+	handled, err := runPreRuntimeCommand(context.Background(), "devices", "", config.Config{}, broker.DB, nil, nil, broker, []string{"create", "--id", "dispatch-device"}, &out, &out)
 	if err != nil || !handled {
 		t.Fatalf("devices dispatch: handled=%v err=%v", handled, err)
 	}
 	out.Reset()
-	handled, err = runPreRuntimeCommand(context.Background(), "pairing", config.Config{}, broker.DB, nil, nil, broker, []string{"request", "--id", "dispatch-pairing"}, &out, &out)
+	handled, err = runPreRuntimeCommand(context.Background(), "pairing", "", config.Config{}, broker.DB, nil, nil, broker, []string{"request", "--id", "dispatch-pairing"}, &out, &out)
 	if err != nil || !handled {
 		t.Fatalf("pairing dispatch: handled=%v err=%v", handled, err)
 	}

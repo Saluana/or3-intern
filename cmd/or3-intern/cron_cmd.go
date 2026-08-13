@@ -15,15 +15,22 @@ import (
 )
 
 func runCronCommand(ctx context.Context, storePath string, args []string, stdout, stderr io.Writer) error {
+	return runCronCommandWithRunner(ctx, storePath, args, stdout, stderr, nil)
+}
+
+func runCronCommandWithRunner(ctx context.Context, storePath string, args []string, stdout, stderr io.Writer, runner cron.Runner) error {
 	if len(args) == 0 {
 		return newUsageError("usage: or3-intern cron <add|list|show|remove|run|pause|resume>")
 	}
 	cmd := args[0]
 	rest := args[1:]
 
-	svc := cron.New(storePath, noopCronRunner(stdout))
-	// "cron add" and "cron list" don't need Start()
-	// "cron run" runs inline via the no-op runner
+	if runner == nil {
+		runner = func(context.Context, cron.CronJob) (cron.RunResult, error) {
+			return cron.RunResult{}, fmt.Errorf("cron execution requires the runtime; rerun with a configured runner")
+		}
+	}
+	svc := cron.New(storePath, runner)
 	switch cmd {
 	case "add":
 		return cronAdd(svc, rest, stdout, stderr)
@@ -34,24 +41,13 @@ func runCronCommand(ctx context.Context, storePath string, args []string, stdout
 	case "remove":
 		return cronRemove(svc, rest, stdout, stderr)
 	case "run":
-		return cronRun(context.Background(), svc, rest, stdout, stderr)
+		return cronRun(ctx, svc, rest, stdout, stderr)
 	case "pause":
 		return cronPause(svc, rest, stdout, stderr)
 	case "resume":
 		return cronResume(svc, rest, stdout, stderr)
 	default:
 		return newUsageError("unknown cron subcommand: %s\nusage: or3-intern cron <add|list|show|remove|run|pause|resume>", cmd)
-	}
-}
-
-func noopCronRunner(stdout io.Writer) cron.Runner {
-	return func(_ context.Context, job cron.CronJob) (cron.RunResult, error) {
-		fmt.Fprintf(stdout, "job %q (%s) would fire:\n", job.Name, job.ID)
-		if job.Payload.AgentRun != nil {
-			fmt.Fprintf(stdout, "  runner: %s\n", job.Payload.AgentRun.RunnerID)
-			fmt.Fprintf(stdout, "  task:   %s\n", job.Payload.AgentRun.Task)
-		}
-		return cron.RunResult{}, nil
 	}
 }
 

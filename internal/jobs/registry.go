@@ -330,9 +330,10 @@ func (r *Registry) cleanupLocked(now time.Time) {
 	}
 	for len(r.jobs) > r.maxTracked {
 		if !r.evictOldestLocked(false) {
-			if !r.evictOldestLocked(true) {
-				break
-			}
+			// Active jobs are control-plane state, not cache entries. Let the
+			// registry temporarily exceed its target rather than making running
+			// work unobservable and uncancellable.
+			break
 		}
 	}
 }

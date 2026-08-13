@@ -320,6 +320,26 @@ func TestValidateAuthConfigRejectsUnsafeRPAndOrigins(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotRejectsUnboundedWorkerConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"worker count", func(cfg *Config) { cfg.WorkerCount = MaxWorkerCount + 1 }},
+		{"runner concurrency", func(cfg *Config) { cfg.Runners.MaxConcurrent = MaxRunnerConcurrent + 1 }},
+		{"runner queue", func(cfg *Config) { cfg.Runners.MaxQueued = MaxRunnerQueued + 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Default()
+			test.mutate(&cfg)
+			if err := ValidateSnapshot(cfg); err == nil {
+				t.Fatal("expected oversized configuration to be rejected")
+			}
+		})
+	}
+}
+
 func TestApplyEnvOverrides_ServiceConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := Default()

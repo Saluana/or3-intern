@@ -113,7 +113,7 @@ func emitStartupWarnings(cmd string, warnings []intdoctor.Finding) {
 
 func startupDoctorMode(cmd string) intdoctor.Mode {
 	switch cmd {
-	case "chat":
+	case "chat", "agent", "cron":
 		return intdoctor.ModeStartupChat
 	case "serve":
 		return intdoctor.ModeStartupServe

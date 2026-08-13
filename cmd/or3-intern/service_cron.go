@@ -162,7 +162,11 @@ func (s *serviceServer) handleCronJobAction(w http.ResponseWriter, r *http.Reque
 	switch action {
 	case "run":
 		limitServiceRequestBody(w, r, serviceCronBodyLimit)
-		force := serviceCronRunForce(r.Body)
+		force, decodeErr := serviceCronRunForce(r.Body)
+		if decodeErr != nil {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": decodeErr.Error()})
+			return
+		}
 		job, err := svc.RunNow(r.Context(), id, force)
 		if err != nil {
 			if errors.Is(err, cron.ErrNotFound) {
@@ -233,16 +237,25 @@ func decodeServiceCronJobRequest(body io.Reader, defaultEnabled bool) (cron.Cron
 	return job, nil
 }
 
-func serviceCronRunForce(body io.Reader) bool {
-	force := true
+func serviceCronRunForce(body io.Reader) (bool, error) {
 	var raw map[string]json.RawMessage
-	if err := decodeServiceRequestBody(body, &raw); err != nil || len(raw) == 0 {
-		return force
+	if err := decodeServiceRequestBody(body, &raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		return false, fmt.Errorf("invalid request body: %w", err)
+	}
+	if len(raw) == 0 {
+		return false, nil
 	}
 	if value, ok := raw["force"]; ok {
-		_ = json.Unmarshal(value, &force)
+		var force bool
+		if err := json.Unmarshal(value, &force); err != nil {
+			return false, fmt.Errorf("force must be a boolean")
+		}
+		return force, nil
 	}
-	return force
+	return false, nil
 }
 
 func findServiceCronJob(jobs []cron.CronJob, id string) *cron.CronJob {

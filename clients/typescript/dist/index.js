@@ -579,6 +579,7 @@ function sensitiveQueryKey(key) {
 }
 var DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 var DEFAULT_STREAM_CONNECT_TIMEOUT_MS = 15000;
+var DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 60000;
 function defaultSleep(milliseconds, signal) {
   if (milliseconds <= 0)
     return Promise.resolve();
@@ -769,27 +770,49 @@ function createAbortScope(externalSignal, timeoutMs, clock) {
       once: true
     });
   }
-  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-    timeoutHandle = clock.setTimeout(() => {
-      didTimeout = true;
-      controller.abort(new DOMException("Timed out", "TimeoutError"));
-    }, timeoutMs);
-  }
+  const resetTimeout = (milliseconds) => {
+    clearTimeout();
+    if (Number.isFinite(milliseconds) && milliseconds > 0) {
+      timeoutHandle = clock.setTimeout(() => {
+        didTimeout = true;
+        controller.abort(new DOMException("Timed out", "TimeoutError"));
+      }, milliseconds);
+    }
+  };
   const clearTimeout = () => {
     if (timeoutHandle !== undefined) {
       clock.clearTimeout(timeoutHandle);
       timeoutHandle = undefined;
     }
   };
+  resetTimeout(timeoutMs);
   return {
     signal: controller.signal,
     timedOut: () => didTimeout,
     clearTimeout,
+    resetTimeout,
     dispose() {
       clearTimeout();
       externalSignal?.removeEventListener("abort", externalAbort);
     }
   };
+}
+function monitorStreamActivity(stream, onActivity) {
+  const reader = stream.getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      onActivity();
+      controller.enqueue(value);
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    }
+  });
 }
 function requestFailure(error, scope, externalSignal, secrets) {
   if (error instanceof InternClientError)
@@ -864,6 +887,7 @@ function createInternTransport(options) {
   const clock = createClock(options.clock);
   const configuredTimeout = options.defaultTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const configuredStreamTimeout = options.streamConnectTimeoutMs ?? DEFAULT_STREAM_CONNECT_TIMEOUT_MS;
+  const configuredStreamInactivityTimeout = options.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS;
   const currentBaseUrl = (explicit) => normalizeBaseUrl(explicit ?? (typeof options.baseUrl === "function" ? options.baseUrl() : options.baseUrl));
   const buildUrl = (path, explicitBaseUrl) => `${currentBaseUrl(explicitBaseUrl)}${validatePath(path)}`;
   async function resolvedHeaders(method, path, requestOptions, accept) {
@@ -1007,7 +1031,8 @@ function createInternTransport(options) {
           cache: "no-store",
           signal: scope.signal
         });
-        scope.clearTimeout();
+        const inactivityTimeout = streamOptions.inactivityTimeoutMs ?? configuredStreamInactivityTimeout;
+        scope.resetTimeout(inactivityTimeout);
         await streamOptions.onResponse?.({
           method,
           path: attemptPath,
@@ -1020,7 +1045,7 @@ function createInternTransport(options) {
         if (!response.body) {
           throw new InternClientError("protocol", "The host did not return an event stream.", { status: response.status, secrets });
         }
-        for await (const event of readInternSseStream(response.body, scope.signal)) {
+        for await (const event of readInternSseStream(monitorStreamActivity(response.body, () => scope.resetTimeout(inactivityTimeout)), scope.signal)) {
           if (event.retry !== undefined) {
             serverRetry = event.retry;
           }
@@ -1035,6 +1060,9 @@ function createInternTransport(options) {
           yield event;
           if (streamOptions.isTerminal?.(event))
             return;
+        }
+        if (scope.signal.aborted) {
+          throw scope.signal.reason ?? new DOMException("Aborted", "AbortError");
         }
         ended = true;
       } catch (error) {

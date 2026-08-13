@@ -68,7 +68,7 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 		// Cwd is used by app-server to resolve sandbox policy but does not
 		// have to exist; the adapter passes it as a turn parameter instead.
 	}
-	cmd := exec.CommandContext(context.Background(), binary, cfg.Args...)
+	cmd := exec.CommandContext(ctx, binary, cfg.Args...)
 	if len(cfg.Env) > 0 {
 		cmd.Env = cfg.Env
 	}
@@ -87,6 +87,17 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("codex app-server start: %w", err)
 	}
+	if err := attachProcessGroup(ctx, cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("codex process containment: %w", err)
+	}
+	contained := true
+	defer func() {
+		if contained {
+			releaseProcessGroup(cmd)
+		}
+	}()
 	sess := &codexSession{
 		cmd:         cmd,
 		stdin:       stdin,
@@ -125,6 +136,7 @@ func startCodexSession(ctx context.Context, binary string, cfg codexSessionConfi
 		_ = cmd.Wait()
 		return nil, fmt.Errorf("codex initialized: %w", err)
 	}
+	contained = false
 	return sess, nil
 }
 
@@ -162,9 +174,10 @@ func (s *codexSession) Close(ctx context.Context) error {
 		rpc.close()
 	}
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = KillProcessGroup(cmd)
 	}
 	if cmd != nil {
+		defer releaseProcessGroup(cmd)
 		doneCh := make(chan error, 1)
 		go func() { doneCh <- cmd.Wait() }()
 		select {

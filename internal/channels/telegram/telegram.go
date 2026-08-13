@@ -469,7 +469,7 @@ func (c *Channel) getJSON(ctx context.Context, path string, query map[string]str
 		return fmt.Errorf("telegram api error: %s", resp.Status)
 	}
 	var envelope apiEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	if err := shared.DecodeJSONLimited(resp.Body, &envelope); err != nil {
 		return err
 	}
 	if !envelope.OK {
@@ -500,7 +500,7 @@ func (c *Channel) postJSON(ctx context.Context, path string, payload any, out an
 		return fmt.Errorf("telegram api error: %s", resp.Status)
 	}
 	var envelope apiEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	if err := shared.DecodeJSONLimited(resp.Body, &envelope); err != nil {
 		return err
 	}
 	if !envelope.OK {
@@ -538,7 +538,7 @@ func telegramRateLimitError(resp *http.Response) error {
 			RetryAfter int `json:"retry_after"`
 		} `json:"parameters"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	_ = shared.DecodeJSONLimited(resp.Body, &payload)
 	return rootchannels.FormatRateLimitError("telegram", time.Duration(payload.Parameters.RetryAfter)*time.Second, payload.Description)
 }
 
@@ -759,7 +759,7 @@ func (c *Channel) sendMediaFile(ctx context.Context, chatID, mediaPath, caption 
 		return fmt.Errorf("telegram api error: %s", resp.Status)
 	}
 	var envelope apiEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	if err := shared.DecodeJSONLimited(resp.Body, &envelope); err != nil {
 		return err
 	}
 	if !envelope.OK {

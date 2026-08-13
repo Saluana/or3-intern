@@ -81,6 +81,13 @@ func (p *ProcessManager) Run(ctx context.Context, spec CommandSpec, onEvent func
 		emitError(onEvent, 0, fmt.Sprintf("process start: %v", err))
 		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(startedAt).Milliseconds()}
 	}
+	if err := attachProcessGroup(ctx, cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		emitError(onEvent, 0, fmt.Sprintf("process containment: %v", err))
+		return ProcessOutput{ExitCode: -1, DurationMS: time.Since(startedAt).Milliseconds()}
+	}
+	defer releaseProcessGroup(cmd)
 
 	var seq int64
 	collector := newOutputCollector(p.PreviewMaxBytes, spec.RunnerID)

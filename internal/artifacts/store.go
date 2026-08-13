@@ -28,6 +28,65 @@ type Store struct {
 	DB  *db.DB
 }
 
+// Reconcile removes old regular files that have no metadata row. The grace
+// period avoids racing a currently executing Save between file creation and
+// its database insert.
+func (s *Store) Reconcile(ctx context.Context, grace time.Duration) error {
+	if s == nil || s.DB == nil || strings.TrimSpace(s.Dir) == "" {
+		return nil
+	}
+	if grace <= 0 {
+		grace = time.Hour
+	}
+	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT path FROM artifacts`)
+	if err != nil {
+		return err
+	}
+	referenced := map[string]struct{}{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			referenced[filepath.Clean(abs)] = struct{}{}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(s.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-grace)
+	var reconcileErr error
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		path, err := filepath.Abs(filepath.Join(s.Dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if _, ok := referenced[filepath.Clean(path)]; ok {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("remove orphan artifact %s: %w", entry.Name(), err))
+		}
+	}
+	return reconcileErr
+}
+
 // ReadResult contains a bounded artifact read authorized for a session.
 type ReadResult struct {
 	Artifact  StoredArtifact

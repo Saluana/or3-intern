@@ -472,7 +472,7 @@ func (c *Channel) getJSON(ctx context.Context, endpoint string, out any) error {
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("discord api error: %s", resp.Status)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return shared.DecodeJSONLimited(resp.Body, out)
 }
 
 func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, out any) error {
@@ -492,13 +492,12 @@ func (c *Channel) postJSON(ctx context.Context, endpoint string, payload any, ou
 		return discordRateLimitError(resp)
 	}
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("discord api error: %s %s", resp.Status, string(body))
+		return fmt.Errorf("discord api error: %s %s", resp.Status, shared.ReadErrorPreview(resp.Body))
 	}
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return shared.DecodeJSONLimited(resp.Body, out)
 }
 
 func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {
@@ -638,7 +637,7 @@ func discordRateLimitError(resp *http.Response) error {
 		Message    string  `json:"message"`
 		RetryAfter float64 `json:"retry_after"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	_ = shared.DecodeJSONLimited(resp.Body, &payload)
 	return rootchannels.FormatRateLimitError("discord", time.Duration(payload.RetryAfter*float64(time.Second)), payload.Message)
 }
 
@@ -738,8 +737,7 @@ func (c *Channel) postMultipart(ctx context.Context, channelID, text string, med
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("discord api error: %s %s", resp.Status, string(respBody))
+		return fmt.Errorf("discord api error: %s %s", resp.Status, shared.ReadErrorPreview(resp.Body))
 	}
 	return nil
 }

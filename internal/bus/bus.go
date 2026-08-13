@@ -4,6 +4,8 @@ package bus
 import (
 	"log"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // EventType classifies messages sent through a Bus.
@@ -37,6 +39,7 @@ type Event struct {
 const (
 	defaultBufferSize = 128
 	maxBufferSize     = 1_000_000
+	criticalSendWait  = 100 * time.Millisecond
 )
 
 // Bus is a buffered single-process fan-out event bus.
@@ -47,7 +50,54 @@ type Bus struct {
 	closed      bool
 	legacy      chan Event
 	legacyUsed  bool
-	subscribers map[chan Event]struct{}
+	subscribers map[chan Event]*subscriberState
+}
+
+type subscriberState struct {
+	mu      sync.Mutex
+	ch      chan Event
+	closed  bool
+	name    string
+	dropped atomic.Uint64
+}
+
+func (s *subscriberState) deliver(ev Event, wait bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if !wait {
+		select {
+		case s.ch <- ev:
+			return true
+		default:
+			return false
+		}
+	}
+	timer := time.NewTimer(criticalSendWait)
+	defer timer.Stop()
+	select {
+	case s.ch <- ev:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (s *subscriberState) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+}
+
+// SubscriberHealth exposes delivery loss without requiring log scraping.
+type SubscriberHealth struct {
+	Name    string
+	Dropped uint64
 }
 
 // New constructs a Bus with per-subscriber buffer slots, defaulting to 128 when buffer <= 0.
@@ -59,11 +109,16 @@ func New(buffer int) *Bus {
 		panic("bus buffer exceeds maxBufferSize")
 	}
 	legacy := make(chan Event, buffer)
-	return &Bus{buffer: buffer, legacy: legacy, subscribers: map[chan Event]struct{}{legacy: {}}}
+	return &Bus{buffer: buffer, legacy: legacy, subscribers: map[chan Event]*subscriberState{legacy: {ch: legacy, name: "legacy-worker-queue"}}}
 }
 
 // Subscribe returns a per-subscriber event stream and an idempotent unsubscribe function.
 func (b *Bus) Subscribe() (<-chan Event, func()) {
+	return b.SubscribeNamed("optional")
+}
+
+// SubscribeNamed registers an observable optional subscriber.
+func (b *Bus) SubscribeNamed(name string) (<-chan Event, func()) {
 	if b == nil {
 		ch := make(chan Event)
 		close(ch)
@@ -76,7 +131,8 @@ func (b *Bus) Subscribe() (<-chan Event, func()) {
 		b.mu.Unlock()
 		return ch, func() {}
 	}
-	b.subscribers[ch] = struct{}{}
+	state := &subscriberState{ch: ch, name: name}
+	b.subscribers[ch] = state
 	b.mu.Unlock()
 
 	var once sync.Once
@@ -85,46 +141,69 @@ func (b *Bus) Subscribe() (<-chan Event, func()) {
 			b.mu.Lock()
 			if _, ok := b.subscribers[ch]; ok {
 				delete(b.subscribers, ch)
-				close(ch)
 			}
 			b.mu.Unlock()
+			state.close()
 		})
 	}
 	return ch, unsubscribe
 }
 
 // Publish fans ev out and reports whether at least one active subscriber
-// accepted it. The primary worker queue applies backpressure once it is in use;
-// slow optional subscribers may still miss events without making critical
-// producers fail.
+// accepted it. Delivery is always bounded: callers never block while holding
+// the lifecycle lock, so a full queue cannot deadlock Close or unsubscribe.
 func (b *Bus) Publish(ev Event) bool {
 	if b == nil {
 		return false
 	}
+	type delivery struct {
+		state      *subscriberState
+		critical   bool
+		reportDrop bool
+	}
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	if b.closed {
+		b.mu.RUnlock()
 		log.Printf("bus: event dropped, bus closed (type=%s)", ev.Type)
 		return false
 	}
+	deliveries := make([]delivery, 0, len(b.subscribers))
+	for ch, state := range b.subscribers {
+		legacy := ch == b.legacy
+		deliveries = append(deliveries, delivery{
+			state:      state,
+			critical:   legacy && b.legacyUsed,
+			reportDrop: !legacy || b.legacyUsed,
+		})
+	}
+	b.mu.RUnlock()
 	delivered := false
-	for ch := range b.subscribers {
-		select {
-		case ch <- ev:
+	for _, target := range deliveries {
+		if target.state.deliver(ev, target.critical) {
 			delivered = true
-		default:
-			if ch == b.legacy && b.legacyUsed {
-				ch <- ev
-				delivered = true
-				continue
-			}
-			if ch == b.legacy && !b.legacyUsed {
-				continue
-			}
-			log.Printf("bus: event dropped, subscriber buffer full (type=%s)", ev.Type)
+			continue
 		}
+		if !target.reportDrop {
+			continue
+		}
+		dropped := target.state.dropped.Add(1)
+		log.Printf("bus: event dropped, subscriber=%s buffer full (type=%s dropped=%d)", target.state.name, ev.Type, dropped)
 	}
 	return delivered
+}
+
+// Health returns a point-in-time delivery-loss snapshot for every subscriber.
+func (b *Bus) Health() []SubscriberHealth {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	result := make([]SubscriberHealth, 0, len(b.subscribers))
+	for _, state := range b.subscribers {
+		result = append(result, SubscriberHealth{Name: state.name, Dropped: state.dropped.Load()})
+	}
+	return result
 }
 
 // Close closes every subscriber stream once.
@@ -134,11 +213,15 @@ func (b *Bus) Close() {
 	}
 	b.once.Do(func() {
 		b.mu.Lock()
-		defer b.mu.Unlock()
 		b.closed = true
-		for ch := range b.subscribers {
-			close(ch)
+		states := make([]*subscriberState, 0, len(b.subscribers))
+		for ch, state := range b.subscribers {
+			states = append(states, state)
 			delete(b.subscribers, ch)
+		}
+		b.mu.Unlock()
+		for _, state := range states {
+			state.close()
 		}
 	})
 }
@@ -165,6 +248,6 @@ func (b *Bus) Channel() <-chan Event {
 		return b.legacy
 	}
 	b.legacyUsed = true
-	b.subscribers[b.legacy] = struct{}{}
+	b.subscribers[b.legacy] = &subscriberState{ch: b.legacy, name: "legacy-worker-queue"}
 	return b.legacy
 }

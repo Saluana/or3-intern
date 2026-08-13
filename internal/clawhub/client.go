@@ -8,11 +8,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -356,19 +358,78 @@ func installZip(zipBytes []byte, target string, origin SkillOrigin, opts Install
 	}
 
 	backup := target + ".bak"
+	marker := target + ".update-pending"
+	if err := recoverSkillReplacement(target); err != nil {
+		return err
+	}
 	_ = os.RemoveAll(backup)
+	if err := os.WriteFile(marker, []byte(filepath.Base(target)), 0o600); err != nil {
+		return err
+	}
+	if err := syncInstallDirectory(filepath.Dir(target)); err != nil {
+		return err
+	}
 	if _, err := os.Stat(target); err == nil {
 		if err := os.Rename(target, backup); err != nil {
+			return err
+		}
+		if err := syncInstallDirectory(filepath.Dir(target)); err != nil {
 			return err
 		}
 	}
 	if err := os.Rename(tempTarget, target); err != nil {
 		if _, statErr := os.Stat(backup); statErr == nil {
 			_ = os.Rename(backup, target)
+			_ = os.Remove(marker)
+			_ = syncInstallDirectory(filepath.Dir(target))
 		}
 		return err
 	}
+	if err := syncInstallDirectory(filepath.Dir(target)); err != nil {
+		return err
+	}
 	_ = os.RemoveAll(backup)
+	_ = os.Remove(marker)
+	return syncInstallDirectory(filepath.Dir(target))
+}
+
+func recoverSkillReplacement(target string) error {
+	backup := target + ".bak"
+	marker := target + ".update-pending"
+	_, targetErr := os.Stat(target)
+	_, backupErr := os.Stat(backup)
+	if os.IsNotExist(targetErr) && backupErr == nil {
+		if err := os.Rename(backup, target); err != nil {
+			return fmt.Errorf("restore interrupted skill update: %w", err)
+		}
+		_ = os.Remove(marker)
+		return syncInstallDirectory(filepath.Dir(target))
+	}
+	if targetErr == nil && backupErr == nil {
+		if err := os.RemoveAll(backup); err != nil {
+			return err
+		}
+	}
+	if targetErr == nil {
+		_ = os.Remove(marker)
+	} else if os.IsNotExist(targetErr) && os.IsNotExist(backupErr) {
+		_ = os.Remove(marker)
+	}
+	return syncInstallDirectory(filepath.Dir(target))
+}
+
+func syncInstallDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
+	}
 	return nil
 }
 
@@ -510,6 +571,9 @@ func LocalEdits(skillDir string) (bool, error) {
 
 // ListInstalled returns managed skills found below root.
 func ListInstalled(root string) ([]InstalledSkill, error) {
+	if err := recoverInterruptedInstalls(root); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -540,6 +604,26 @@ func ListInstalled(root string) ([]InstalledSkill, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+func recoverInterruptedInstalls(root string) error {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".update-pending") {
+			continue
+		}
+		target := filepath.Join(root, strings.TrimSuffix(entry.Name(), ".update-pending"))
+		if err := recoverSkillReplacement(target); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ReadOrigin loads the .clawhub origin metadata for skillDir.

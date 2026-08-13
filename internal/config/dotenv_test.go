@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-func TestLoadDotEnvLoadsCurrentAndParentWithoutOverriding(t *testing.T) {
+func TestLoadDotEnvLoadsCurrentOnlyWithoutOverriding(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	if err := os.MkdirAll(child, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OR3_MODEL=from-parent\nOR3_API_KEY=from-parent\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OR3_MODEL=from-parent\nOR3_API_KEY=from-parent\nOR3_BASE_URL=https://parent.invalid\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(child, ".env"), []byte("OR3_API_KEY=from-child\nOR3_EMBED_MODEL='embed-child'\n"), 0o644); err != nil {
@@ -20,6 +20,7 @@ func TestLoadDotEnvLoadsCurrentAndParentWithoutOverriding(t *testing.T) {
 	}
 	oldAPIKey, hadAPIKey := os.LookupEnv("OR3_API_KEY")
 	oldEmbedModel, hadEmbedModel := os.LookupEnv("OR3_EMBED_MODEL")
+	oldBaseURL, hadBaseURL := os.LookupEnv("OR3_BASE_URL")
 	defer func() {
 		if hadAPIKey {
 			_ = os.Setenv("OR3_API_KEY", oldAPIKey)
@@ -31,11 +32,17 @@ func TestLoadDotEnvLoadsCurrentAndParentWithoutOverriding(t *testing.T) {
 		} else {
 			_ = os.Unsetenv("OR3_EMBED_MODEL")
 		}
+		if hadBaseURL {
+			_ = os.Setenv("OR3_BASE_URL", oldBaseURL)
+		} else {
+			_ = os.Unsetenv("OR3_BASE_URL")
+		}
 	}()
 	t.Setenv("OR3_MODEL", "from-shell")
 	t.Setenv("OR3_LOAD_DOTENV", "true")
 	_ = os.Unsetenv("OR3_API_KEY")
 	_ = os.Unsetenv("OR3_EMBED_MODEL")
+	_ = os.Unsetenv("OR3_BASE_URL")
 	wd, _ := os.Getwd()
 	defer os.Chdir(wd)
 	if err := os.Chdir(child); err != nil {
@@ -52,6 +59,9 @@ func TestLoadDotEnvLoadsCurrentAndParentWithoutOverriding(t *testing.T) {
 	}
 	if got := os.Getenv("OR3_EMBED_MODEL"); got != "embed-child" {
 		t.Fatalf("expected quoted value to load, got %q", got)
+	}
+	if got := os.Getenv("OR3_BASE_URL"); got != "" {
+		t.Fatalf("expected parent .env to be ignored, got %q", got)
 	}
 }
 

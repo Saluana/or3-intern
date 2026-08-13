@@ -32,6 +32,57 @@ func makeZip(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
+func TestRecoverSkillReplacementRestoresInterruptedBackup(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "demo")
+	backup := target + ".bak"
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "SKILL.md"), []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed backup: %v", err)
+	}
+	if err := os.WriteFile(target+".update-pending", []byte("demo"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	if err := recoverSkillReplacement(target); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "SKILL.md")); err != nil || string(data) != "old" {
+		t.Fatalf("backup was not restored: data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(target + ".update-pending"); !os.IsNotExist(err) {
+		t.Fatalf("recovery marker remains: %v", err)
+	}
+}
+
+func TestRecoverSkillReplacementCommitsCompletedTarget(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "demo")
+	for path, content := range map[string]string{target: "new", target + ".bak": "old"} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create %s: %v", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte(content), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(target+".update-pending", []byte("demo"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	if err := recoverSkillReplacement(target); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "SKILL.md")); err != nil || string(data) != "new" {
+		t.Fatalf("completed target was not retained: data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(target + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("stale backup remains: %v", err)
+	}
+}
+
 func TestClient_SearchInspectInstallAndModificationSafety(t *testing.T) {
 	zipBytes := makeZip(t, map[string]string{
 		"SKILL.md": "---\nname: demo\ndescription: demo skill\n---\n# Demo\n",

@@ -23,7 +23,23 @@ Important config keys:
 - `triggers.webhook.secret`
 - `triggers.webhook.maxBodyKB`
 
-The webhook path is fixed at `/webhook`.
+The webhook paths are `/webhook` and `/webhook/<route>`. Every request must
+include `X-Webhook-Timestamp` (Unix seconds), a unique `X-Webhook-Nonce`, and
+`X-Webhook-Signature: v1=<hex HMAC-SHA256>`. The HMAC input is the following
+newline-delimited canonical value:
+
+```text
+v1
+<timestamp>
+<uppercase HTTP method>
+<escaped request path>
+<Content-Type>
+<hex SHA-256 of the body>
+```
+
+Sign with `triggers.webhook.secret`. Timestamps outside five minutes, reused
+nonces, and signatures replayed against another route or method are rejected.
+The legacy body-only signature and plaintext secret headers are not accepted.
 
 ## File-watch trigger
 

@@ -724,13 +724,67 @@ func (d *DB) migrate(ctx context.Context) error {
 func NowMS() int64 { return time.Now().UnixMilli() }
 
 func (d *DB) migrateMemoryPinned(ctx context.Context) error {
-	hasSession, err := d.tableHasColumn(ctx, "memory_pinned", "session_key")
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	hasSession, err := tableHasColumnQuery(ctx, tx, "memory_pinned", "session_key")
+	if err != nil {
+		return err
+	}
+	destinationExists, err := tableExistsQuery(ctx, tx, "memory_pinned")
+	if err != nil {
+		return err
+	}
+	legacyExists, err := tableExistsQuery(ctx, tx, "memory_pinned_legacy")
 	if err != nil {
 		return err
 	}
 	if hasSession {
-		_, err = d.SQL.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`)
-		return err
+		if legacyExists {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO memory_pinned(session_key, key, content, updated_at)
+				SELECT ?, key, content, updated_at FROM memory_pinned_legacy
+				WHERE true
+				ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`, scope.GlobalMemoryScope); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DROP TABLE memory_pinned_legacy`); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if legacyExists {
+		if destinationExists {
+			return fmt.Errorf("invalid pinned-memory migration state: legacy table exists beside an unmigrated destination")
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE memory_pinned(
+			session_key TEXT NOT NULL,
+			key TEXT NOT NULL,
+			content TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(session_key, key)
+		);`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_pinned(session_key, key, content, updated_at)
+			SELECT ?, key, content, updated_at FROM memory_pinned_legacy;`, scope.GlobalMemoryScope); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE memory_pinned_legacy`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if !destinationExists {
+		return fmt.Errorf("memory_pinned table is missing")
 	}
 	stmts := []string{
 		`ALTER TABLE memory_pinned RENAME TO memory_pinned_legacy;`,
@@ -747,11 +801,11 @@ func (d *DB) migrateMemoryPinned(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS memory_pinned_session_key_key ON memory_pinned(session_key, key);`,
 	}
 	for _, stmt := range stmts {
-		if _, err := d.SQL.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (d *DB) ensureMemoryNotesSessionColumn(ctx context.Context) error {
@@ -772,30 +826,39 @@ func (d *DB) migrateLegacyGlobalMemoryScope(ctx context.Context) error {
 	if scope.GlobalMemoryScope == scope.GlobalScopeAlias {
 		return nil
 	}
-	if _, err := d.SQL.ExecContext(ctx,
-		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
-		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
-		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
-		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
-		return err
-	}
-	if _, err := d.SQL.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
-		return err
-	}
-	_, err := d.SQL.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
-	if err != nil {
-		return err
-	}
+	// Move vector rows first. If the process stops before the relational
+	// transaction commits, the idempotent update is retried on restart; the
+	// inverse ordering could permanently hide old vector rows from new scopes.
 	if dims, derr := d.MemoryVectorDims(ctx); derr == nil && dims > 0 && d.VecSQL != nil {
 		var hasVec int
 		if qerr := d.VecSQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='memory_vec'`).Scan(&hasVec); qerr != nil {
 			return qerr
 		}
 		if hasVec > 0 {
-			_, err = d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias)
+			if _, err := d.VecSQL.ExecContext(ctx, `UPDATE memory_vec SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
+				return err
+			}
 		}
 	}
-	return err
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_pinned(session_key, key, content, updated_at)
+		 SELECT ?, key, content, updated_at FROM memory_pinned WHERE session_key=?
+		 ON CONFLICT(session_key, key) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_pinned WHERE session_key=?`, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_notes SET session_key=? WHERE session_key=?`, scope.GlobalMemoryScope, scope.GlobalScopeAlias); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) ensureMemoryVecIndexForExisting(ctx context.Context) error {
@@ -1220,7 +1283,16 @@ func (d *DB) ensureRunnerChatTurnColumns(ctx context.Context) error {
 }
 
 func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (bool, error) {
-	rows, err := d.SQL.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	return tableHasColumnQuery(ctx, d.SQL, tableName, columnName)
+}
+
+type sqlQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func tableHasColumnQuery(ctx context.Context, q sqlQueryer, tableName, columnName string) (bool, error) {
+	rows, err := q.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
 	if err != nil {
 		return false, err
 	}
@@ -1238,4 +1310,12 @@ func (d *DB) tableHasColumn(ctx context.Context, tableName, columnName string) (
 		}
 	}
 	return false, rows.Err()
+}
+
+func tableExistsQuery(ctx context.Context, q sqlQueryer, tableName string) (bool, error) {
+	var count int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tableName).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

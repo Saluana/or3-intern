@@ -2,9 +2,11 @@ package artifacts
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"or3-intern/internal/db"
 )
@@ -56,6 +58,35 @@ func TestStore_Save_OK(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("expected artifact mode 0600, got %#o", info.Mode().Perm())
+	}
+}
+
+func TestStoreReconcileRemovesOnlyOldOrphans(t *testing.T) {
+	d := openTestDB(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	store := &Store{Dir: dir, DB: d}
+	referencedID, err := store.Save(ctx, "sess", "text/plain", []byte("keep"))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	orphan := filepath.Join(dir, "orphan")
+	if err := os.WriteFile(orphan, []byte("remove"), 0o600); err != nil {
+		t.Fatalf("write orphan: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatalf("age orphan: %v", err)
+	}
+
+	if err := store.Reconcile(ctx, time.Hour); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old orphan still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, referencedID)); err != nil {
+		t.Fatalf("referenced artifact removed: %v", err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,9 +35,26 @@ func doRequest(t *testing.T, srv *WebhookServer, body string, headers map[string
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	if headers != nil {
+		signWebhookTestRequest(req, body, srv.Config.Secret)
+	}
 	rw := httptest.NewRecorder()
 	srv.handle(rw, req)
 	return rw
+}
+
+var webhookTestNonce atomic.Uint64
+
+func signWebhookTestRequest(req *http.Request, body, secret string) {
+	timestamp := time.Now().UTC().Unix()
+	timestampRaw := fmt.Sprint(timestamp)
+	bodyHash := sha256.Sum256([]byte(body))
+	canonical := strings.Join([]string{"v1", timestampRaw, req.Method, req.URL.EscapedPath(), strings.TrimSpace(req.Header.Get("Content-Type")), hex.EncodeToString(bodyHash[:])}, "\n")
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(canonical))
+	req.Header.Set("X-Webhook-Timestamp", timestampRaw)
+	req.Header.Set("X-Webhook-Nonce", fmt.Sprintf("test-%d", webhookTestNonce.Add(1)))
+	req.Header.Set("X-Webhook-Signature", "v1="+hex.EncodeToString(mac.Sum(nil)))
 }
 
 func TestWebhookAuthFailure(t *testing.T) {
@@ -68,14 +86,9 @@ func TestWebhookAuthSuccess(t *testing.T) {
 func TestWebhookHMAC(t *testing.T) {
 	secret := "hmac-secret"
 	body := `{"event":"push"}`
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(body))
-	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
 	srv, b := newTestWebhookServer(t, secret)
-	rw := doRequest(t, srv, body, map[string]string{
-		"X-Hub-Signature-256": sig,
-	})
+	rw := doRequest(t, srv, body, map[string]string{})
 	if rw.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", rw.Code, rw.Body.String())
 	}
@@ -86,6 +99,34 @@ func TestWebhookHMAC(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for bus event")
+	}
+}
+
+func TestWebhookRejectsReplayAndCrossRouteReuse(t *testing.T) {
+	srv, _ := newTestWebhookServer(t, "secret")
+	req := httptest.NewRequest(http.MethodPost, "/webhook/a", strings.NewReader("hello"))
+	signWebhookTestRequest(req, "hello", "secret")
+	first := httptest.NewRecorder()
+	srv.handle(first, req)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first request failed: %d", first.Code)
+	}
+
+	replay := httptest.NewRequest(http.MethodPost, "/webhook/a", strings.NewReader("hello"))
+	replay.Header = req.Header.Clone()
+	replayResult := httptest.NewRecorder()
+	srv.handle(replayResult, replay)
+	if replayResult.Code != http.StatusUnauthorized {
+		t.Fatalf("expected replay rejection, got %d", replayResult.Code)
+	}
+
+	crossRoute := httptest.NewRequest(http.MethodPost, "/webhook/b", strings.NewReader("hello"))
+	crossRoute.Header = req.Header.Clone()
+	crossRoute.Header.Set("X-Webhook-Nonce", "different")
+	crossResult := httptest.NewRecorder()
+	srv.handle(crossResult, crossRoute)
+	if crossResult.Code != http.StatusUnauthorized {
+		t.Fatalf("expected cross-route signature rejection, got %d", crossResult.Code)
 	}
 }
 

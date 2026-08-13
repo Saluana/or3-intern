@@ -51,7 +51,30 @@ func LoadOrCreateKey(path string) ([]byte, error) {
 	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepathDir(path), ".secret-key-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	encoded := []byte(base64.StdEncoding.EncodeToString(key))
+	if _, err := tmp.Write(encoded); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	// Linking publishes only the complete, synced file and fails atomically if
+	// another process won the first-start race.
+	if err := os.Link(tmpPath, path); err != nil {
+		if os.IsExist(err) {
+			return LoadExistingKey(path)
+		}
 		return nil, err
 	}
 	return key, nil

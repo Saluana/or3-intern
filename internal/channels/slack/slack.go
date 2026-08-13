@@ -380,7 +380,7 @@ func (c *Channel) postJSON(ctx context.Context, endpoint, token string, payload 
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return shared.DecodeJSONLimited(resp.Body, out)
 }
 
 func (c *Channel) postForm(ctx context.Context, endpoint, token string, values url.Values, out any) error {
@@ -406,7 +406,7 @@ func (c *Channel) postForm(ctx context.Context, endpoint, token string, values u
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return shared.DecodeJSONLimited(resp.Body, out)
 }
 
 func (c *Channel) ingressDeduper() *rootchannels.IngressDeduplicator {

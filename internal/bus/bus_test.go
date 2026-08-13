@@ -222,6 +222,49 @@ func TestPublish_SubscribeOnlyDoesNotFillLegacyChannel(t *testing.T) {
 	}
 }
 
+func TestPublish_FullLegacyQueueDoesNotBlockClose(t *testing.T) {
+	b := New(1)
+	_ = b.Channel()
+	if !b.Publish(Event{Type: EventUserMessage}) {
+		t.Fatal("expected first publish")
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = b.Publish(Event{Type: EventUserMessage})
+		b.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("publish and close deadlocked on a full legacy queue")
+	}
+	var dropped uint64
+	for _, health := range b.Health() {
+		dropped += health.Dropped
+	}
+	if dropped != 0 {
+		// Close removes subscribers, so health is intentionally empty here.
+		t.Fatalf("closed bus should not retain subscriber health, got %d", dropped)
+	}
+}
+
+func TestPublish_ReportsNamedSubscriberDrops(t *testing.T) {
+	b := New(1)
+	_, unsubscribe := b.SubscribeNamed("ui-stream")
+	defer unsubscribe()
+	if !b.Publish(Event{Type: EventUserMessage}) {
+		t.Fatal("expected first publish")
+	}
+	_ = b.Publish(Event{Type: EventUserMessage})
+	for _, health := range b.Health() {
+		if health.Name == "ui-stream" && health.Dropped == 1 {
+			return
+		}
+	}
+	t.Fatal("expected observable drop count for ui-stream")
+}
+
 func TestChannel_SharedQueueSplitsWork(t *testing.T) {
 	b := New(4)
 	ch1 := b.Channel()

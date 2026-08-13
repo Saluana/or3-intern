@@ -10,7 +10,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"or3-intern/internal/bus"
@@ -22,12 +24,20 @@ type WebhookServer struct {
 	Bus        *bus.Bus
 	SessionKey string
 	server     *http.Server
+	errors     chan error
+	mu         sync.Mutex
+	seenNonces map[string]time.Time
+	now        func() time.Time
 }
 
-const structuredBodyPreviewMaxChars = 512
+const (
+	structuredBodyPreviewMaxChars = 512
+	webhookSignatureMaxSkew       = 5 * time.Minute
+	webhookReplayCacheMax         = 4096
+)
 
 func NewWebhookServer(cfg config.WebhookConfig, b *bus.Bus, sessionKey string) *WebhookServer {
-	return &WebhookServer{Config: cfg, Bus: b, SessionKey: sessionKey}
+	return &WebhookServer{Config: cfg, Bus: b, SessionKey: sessionKey, errors: make(chan error, 1), seenNonces: map[string]time.Time{}, now: time.Now}
 }
 
 func (w *WebhookServer) Start(ctx context.Context) error {
@@ -54,9 +64,22 @@ func (w *WebhookServer) Start(ctx context.Context) error {
 	go func() {
 		if err := w.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("webhook server error: %v", err)
+			select {
+			case w.errors <- err:
+			default:
+			}
 		}
 	}()
 	return nil
+}
+
+// Errors reports unexpected listener failures so the owning runtime can fail
+// readiness instead of silently continuing without webhook ingress.
+func (w *WebhookServer) Errors() <-chan error {
+	if w == nil {
+		return nil
+	}
+	return w.errors
 }
 
 func (w *WebhookServer) Stop(ctx context.Context) error {
@@ -134,15 +157,42 @@ func (w *WebhookServer) authenticate(r *http.Request, body []byte) bool {
 	if secret == "" {
 		return false
 	}
-	// Check HMAC-SHA256 in X-Hub-Signature-256
-	sig := r.Header.Get("X-Hub-Signature-256")
-	if strings.HasPrefix(sig, "sha256=") {
-		sig = strings.TrimPrefix(sig, "sha256=")
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		return hmac.Equal([]byte(sig), []byte(expected))
+	timestampRaw := strings.TrimSpace(r.Header.Get("X-Webhook-Timestamp"))
+	nonce := strings.TrimSpace(r.Header.Get("X-Webhook-Nonce"))
+	sig := strings.TrimSpace(r.Header.Get("X-Webhook-Signature"))
+	if timestampRaw == "" || nonce == "" || !strings.HasPrefix(sig, "v1=") {
+		return false
 	}
-	// Fall back to simple shared secret in X-Webhook-Secret header
-	return r.Header.Get("X-Webhook-Secret") == secret
+	timestamp, err := strconv.ParseInt(timestampRaw, 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	if w.now != nil {
+		now = w.now().UTC()
+	}
+	signedAt := time.Unix(timestamp, 0).UTC()
+	if signedAt.After(now.Add(webhookSignatureMaxSkew)) || now.Sub(signedAt) > webhookSignatureMaxSkew {
+		return false
+	}
+	bodyHash := sha256.Sum256(body)
+	canonical := strings.Join([]string{"v1", timestampRaw, strings.ToUpper(r.Method), r.URL.EscapedPath(), strings.TrimSpace(r.Header.Get("Content-Type")), hex.EncodeToString(bodyHash[:])}, "\n")
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(canonical))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(strings.TrimPrefix(sig, "v1=")), []byte(expected)) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for cachedNonce, expires := range w.seenNonces {
+		if !expires.After(now) {
+			delete(w.seenNonces, cachedNonce)
+		}
+	}
+	if _, exists := w.seenNonces[nonce]; exists || len(w.seenNonces) >= webhookReplayCacheMax {
+		return false
+	}
+	w.seenNonces[nonce] = now.Add(webhookSignatureMaxSkew)
+	return true
 }

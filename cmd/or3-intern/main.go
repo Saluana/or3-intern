@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"or3-intern/internal/config"
 	"or3-intern/internal/controlplane"
 	"or3-intern/internal/cron"
+	"or3-intern/internal/cronrunner"
 	"or3-intern/internal/db"
 	"or3-intern/internal/heartbeat"
 	"or3-intern/internal/memory"
@@ -35,7 +37,6 @@ import (
 	"or3-intern/internal/runners"
 	"or3-intern/internal/security"
 	"or3-intern/internal/serviceerrors"
-	"or3-intern/internal/skills"
 	"or3-intern/internal/streaming"
 	"or3-intern/internal/tools"
 	"or3-intern/internal/triggers"
@@ -166,24 +167,28 @@ func roleProviderVision(cfg config.Config, provider string) bool {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfgPath, args, showHelp, unsafeDev, err := parseRootCLIArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		return 2
 	}
 	if showHelp {
 		if err := printHelpTopic(os.Stdout, helpTopicPath(args)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
+			return 2
 		}
-		return
+		return 0
 	}
 	if handled, err := maybeHandleHelpRequest(args, os.Stdout); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
+			return 2
 		}
-		return
+		return 0
 	}
 
 	cmd := "chat"
@@ -192,59 +197,59 @@ func main() {
 	}
 	if isHelpToken(cmd) {
 		printRootHelp(os.Stdout)
-		return
+		return 0
 	}
 	if !isKnownRootCommand(cmd) {
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
-		os.Exit(2)
+		return 2
 	}
 	if commandHandledBeforeConfigLoad(cmd) {
 		switch cmd {
 		case "config-path":
 			if err := requireExactArgs(args[1:], 0, "or3-intern config-path"); err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				return 2
 			}
 			fmt.Fprintln(os.Stdout, cfgPathOrDefault(cfgPath))
 		case "version":
 			if err := requireExactArgs(args[1:], 0, "or3-intern version"); err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				return 2
 			}
 			fmt.Println(buildVersionString())
 		case "configure":
 			if err := runConfigure(cfgPath, args[1:]); err != nil {
 				fmt.Fprintln(os.Stderr, "configure error:", err)
-				os.Exit(1)
+				return 1
 			}
 		case "init":
 			if err := requireExactArgs(args[1:], 0, "or3-intern init"); err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				return 2
 			}
 			if err := runInit(cfgPath); err != nil {
 				fmt.Fprintln(os.Stderr, "init error:", err)
-				os.Exit(1)
+				return 1
 			}
 		case "settings":
 			if err := runSettings(cfgPath, args[1:]); err != nil {
 				if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 					fmt.Fprintln(os.Stderr, "settings error:", err)
 				}
-				os.Exit(1)
+				return 1
 			}
 		case "setup":
 			if err := requireExactArgs(args[1:], 0, "or3-intern setup"); err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				return 2
 			}
 			result, err := runSetup(cfgPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "setup error:", err)
-				os.Exit(1)
+				return 1
 			}
 			if !result.StartChat {
-				return
+				return 0
 			}
 			cmd = "chat"
 			args = []string{"chat"}
@@ -254,22 +259,22 @@ func main() {
 			if err := runConnectCommand(ctx, cfgPathOrDefault(cfgPath), args[1:], os.Stdout, os.Stderr); err != nil {
 				if isUsageError(err) {
 					fmt.Fprintln(os.Stderr, err)
-					os.Exit(2)
+					return 2
 				}
 				fmt.Fprintln(os.Stderr, "connect error:", err)
-				os.Exit(1)
+				return 1
 			}
 		}
 		if cmd != "chat" {
-			return
+			return 0
 		}
 	}
 	if setupRan, err := maybeRunFirstRunSetup(cfgPath, cmd, args); err != nil {
 		fmt.Fprintln(os.Stderr, "setup error:", err)
-		os.Exit(1)
+		return 1
 	} else if setupRan {
 		if cmd == "chat" {
-			return
+			return 0
 		}
 	}
 	if cmd == "doctor" || cmd == "health" {
@@ -280,20 +285,20 @@ func main() {
 		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
 		if loadErr != nil {
 			fmt.Fprintln(os.Stderr, cmd+" error:", loadErr)
-			os.Exit(1)
+			return 1
 		}
 		if cmd == "health" {
 			if err := runHealthCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 				fmt.Fprintln(os.Stderr, "health error:", err)
-				os.Exit(1)
+				return 1
 			}
 		} else {
 			if err := runDoctorCommand(cfgPathOrDefault(cfgPath), cfg, validationError, args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 				fmt.Fprintln(os.Stderr, "doctor error:", err)
-				os.Exit(1)
+				return 1
 			}
 		}
-		return
+		return 0
 	}
 	if cmd == "status" {
 		cwd, err := os.Getwd()
@@ -303,7 +308,7 @@ func main() {
 		cfg, validationError, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
 		if loadErr != nil {
 			fmt.Fprintln(os.Stderr, "status error:", loadErr)
-			os.Exit(1)
+			return 1
 		}
 		var database *db.DB
 		if strings.TrimSpace(cfg.DBPath) != "" {
@@ -316,17 +321,17 @@ func main() {
 		statusOptions, err := parseStatusCommandArgs(args[1:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "status error:", err)
-			os.Exit(2)
+			return 2
 		}
 		if err := runStatusCommandWithOptions(cfgPathOrDefault(cfgPath), cfg, validationError, database, os.Stdout, statusOptions); err != nil {
 			if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 				fmt.Fprintln(os.Stderr, "status error:", err)
 			}
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
-	if cmd == "cron" {
+	if cmd == "cron" && (len(args) < 2 || args[1] != "run") {
 		cwd, err := os.Getwd()
 		if err != nil {
 			cwd = ""
@@ -334,22 +339,22 @@ func main() {
 		cfg, _, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
 		if loadErr != nil {
 			fmt.Fprintln(os.Stderr, "cron error:", loadErr)
-			os.Exit(1)
+			return 1
 		}
 		storePath := strings.TrimSpace(cfg.Cron.StorePath)
 		if storePath == "" {
 			fmt.Fprintln(os.Stderr, "cron error: cron store path not configured")
-			os.Exit(1)
+			return 1
 		}
 		if err := runCronCommand(context.Background(), storePath, args[1:], os.Stdout, os.Stderr); err != nil {
 			if isUsageError(err) {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				return 2
 			}
 			fmt.Fprintln(os.Stderr, "cron error:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 	if cmd == "access" {
 		cwd, err := os.Getwd()
@@ -359,17 +364,17 @@ func main() {
 		cfg, _, loadErr := loadDoctorConfig(cfgPathOrDefault(cfgPath), cwd)
 		if loadErr != nil {
 			fmt.Fprintln(os.Stderr, "access error:", loadErr)
-			os.Exit(1)
+			return 1
 		}
 		if err := runAccessCommand(context.Background(), cfgPathOrDefault(cfgPath), cfg, args[1:], os.Stdout, os.Stderr); err != nil {
 			if isUsageError(err) {
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				return 2
 			}
 			fmt.Fprintln(os.Stderr, "access error:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	loadedRuntimeConfig, err := loadRuntimeConfig(cfgPath)
@@ -380,29 +385,31 @@ func main() {
 		if hint := configErrorHint(err); hint != "" {
 			fmt.Fprintln(os.Stderr, hint)
 		}
-		os.Exit(1)
+		return 1
 	}
 	cfg := loadedRuntimeConfig.Config
 	if err := prepareRuntimeStorage(&cfg, cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime storage error:", err)
-		os.Exit(1)
+		return 1
 	}
 
 	d, err := openRuntimeDatabase(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
 	defer d.Close()
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	ctx, cancelRuntime := context.WithCancel(ctx)
+	defer cancelRuntime()
 	securedRuntime, err := buildRuntimeSecurity(ctx, cfg, d)
 	if err != nil {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, "security error:", err)
 		}
-		os.Exit(1)
+		return 1
 	}
 	cfg = securedRuntime.Config
 	if cfg.Security.Profiles.Enabled {
@@ -414,60 +421,64 @@ func main() {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
-		os.Exit(1)
+		return 1
 	}
 	if cmd == "secrets" {
 		if secretManager == nil && cfg.Security.SecretStore.Enabled {
 			key, keyErr := security.LoadOrCreateKey(cfg.Security.SecretStore.KeyFile)
 			if keyErr != nil {
 				fmt.Fprintln(os.Stderr, "secret key error:", keyErr)
-				os.Exit(1)
+				return 1
 			}
 			secretManager = &security.SecretManager{DB: d, Key: key}
 		}
 		if err := runSecretsCommand(ctx, secretManager, auditLogger, args[1:], os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "secrets error:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 	if cmd == "audit" {
 		cp := controlplane.NewLocal(cfg, d, nil, auditLogger, nil)
 		if err := runAuditCommand(ctx, cp, args[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "audit error:", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 	approvalRuntime, err := buildRuntimeApprovalSecurity(cfg, d, auditLogger)
 	if err != nil {
 		if translated := translateAndPrintError(err, os.Stderr); translated != nil {
 			fmt.Fprintln(os.Stderr, "approval error:", err)
 		}
-		os.Exit(1)
+		return 1
 	}
 	approvalBroker := approvalRuntime.ApprovalBroker
 	if commandHandledBeforeRuntimeBootstrap(cmd) {
 		var prov *providers.Client
 		if cmd == "embeddings" {
 			prov = newEmbeddingProviderClient(cfg)
+		} else if cmd == "migrate-openclaw" {
+			prov = newProviderClient(cfg)
 		}
-		handled, err := runPreRuntimeCommand(ctx, cmd, cfg, d, prov, auditLogger, approvalBroker, args[1:], os.Stdout, os.Stderr)
+		handled, err := runPreRuntimeCommand(ctx, cmd, cfgPath, cfg, d, prov, auditLogger, approvalBroker, args[1:], os.Stdout, os.Stderr)
 		if handled {
 			if err != nil {
 				if isUsageError(err) {
 					fmt.Fprintln(os.Stderr, err)
-					os.Exit(2)
+					return 2
 				}
 				fmt.Fprintln(os.Stderr, cmd+" error:", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		}
 	}
-	prov := newProviderClient(cfg)
 	embedProv := newEmbeddingProviderClient(cfg)
 	art := &artifacts.Store{Dir: cfg.ArtifactsDir, DB: d}
+	if err := art.Reconcile(ctx, time.Hour); err != nil {
+		log.Printf("artifact reconciliation failed: %v", err)
+	}
 
 	b := bus.New(256)
 	spinner := cli.NewSpinner()
@@ -475,11 +486,34 @@ func main() {
 	channelManager, err := buildChannelManager(cfg, del, art, cfg.MaxMediaBytes, approvalBroker)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "channel config error:", err)
-		os.Exit(1)
+		return 1
 	}
 
 	var cronSvc *cron.Service
 	var runnerManager *runners.Manager
+	var heartbeatSvc *heartbeat.Service
+	var workerWG *sync.WaitGroup
+	defer func() {
+		cancelRuntime()
+		if heartbeatSvc != nil {
+			heartbeatSvc.Stop()
+		}
+		if cronSvc != nil {
+			cronSvc.Stop()
+		}
+		_ = channelManager.StopAll(context.Background())
+		b.Close()
+		if workerWG != nil {
+			workerWG.Wait()
+		}
+		if runnerManager != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+			defer cancel()
+			if err := runnerManager.Stop(stopCtx); err != nil {
+				log.Printf("runner manager stop failed: %v", err)
+			}
+		}
+	}()
 
 	ret := memory.NewRetriever(d)
 	ret.EmbedFingerprint = currentEmbedFingerprint(cfg)
@@ -501,17 +535,17 @@ func main() {
 	if runnerManager != nil && cmd != "service" {
 		if err := startRuntimeRunnerManager(ctx, runnerManager); err != nil {
 			fmt.Fprintln(os.Stderr, "runner manager error:", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 	chatManager := buildRuntimeChatManager(cfg, d, runnerManager, runtimeJobs, approvalBroker)
 	turnOrchestrator := buildRunnerTurnOrchestrator(cfg, chatManager, d, ret, docRetriever, embedProv)
 
 	cronSvc = buildRuntimeCronService(cfg, b, runnerManager, turnOrchestrator)
-	if cronSvc != nil {
+	if cronSvc != nil && cmd != "cron" {
 		if err := cronSvc.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "cron start error:", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 	if consolidator, scheduler := startMemoryConsolidation(ctx, cfg, d, del); consolidator != nil {
@@ -521,26 +555,25 @@ func main() {
 		}
 	}
 
-	var heartbeatSvc *heartbeat.Service
 	switch cmd {
 	case "chat":
 		_ = channelManager.Start(ctx, "cli", b)
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager, CLI: del})
+		workerWG = runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, del, channelManager, nil, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager, CLI: del})
 		ch := &cli.Channel{Bus: b, SessionKey: cfg.DefaultSessionKey, Spinner: spinner, Deliverer: del, History: d}
 		if err := ch.Run(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "cli error:", err)
 		}
 	case "serve":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: runtimeJobs, Broker: approvalBroker, Channels: channelManager, ChatManager: chatManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
+		workerWG = runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: runtimeJobs, Broker: approvalBroker, Channels: channelManager, ChatManager: chatManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
-			os.Exit(1)
+			return 1
 		}
 		// start webhook server if configured
 		webhookSrv := triggers.NewWebhookServer(cfg.Triggers.Webhook, b, cfg.DefaultSessionKey)
 		if err := webhookSrv.Start(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "webhook start error:", err)
-			os.Exit(1)
+			return 1
 		}
 		defer func() {
 			_ = webhookSrv.Stop(context.Background())
@@ -554,16 +587,21 @@ func main() {
 			heartbeatSvc.Start(ctx)
 		}
 		fmt.Println("or3-intern serve: channels running. Ctrl+C to stop.")
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case err := <-webhookSrv.Errors():
+			fmt.Fprintln(os.Stderr, "webhook server error:", err)
+			return 1
+		}
 	case "service":
-		runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: runtimeJobs, Broker: approvalBroker, Channels: channelManager, ChatManager: chatManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
+		workerWG = runWorkers(ctx, b, turnOrchestrator, cfg.WorkerCount, nil, channelManager, &channelApprovalHandler{Config: cfg, Jobs: runtimeJobs, Broker: approvalBroker, Channels: channelManager, ChatManager: chatManager}, &channelCommandHandler{Config: cfg, DB: d, RunnerManager: runnerManager, Channels: channelManager})
 		if err := channelManager.StartAll(ctx, b); err != nil {
 			fmt.Fprintln(os.Stderr, "channel start error:", err)
-			os.Exit(1)
+			return 1
 		}
 		if err := runServiceCommandWithBrokerOptionsCronMCPAndChannels(ctx, cfg, serviceHost, runnerManager, chatManager, turnOrchestrator, runtimeJobs, approvalBroker, unsafeDev, cronSvc, channelManager); err != nil {
 			fmt.Fprintln(os.Stderr, "service error:", err)
-			os.Exit(1)
+			return 1
 		}
 	case "agent":
 		// one-shot: or3-intern agent -m "hello" (runner-backed; built-in agent loop deprecated)
@@ -577,13 +615,13 @@ func main() {
 		_ = fs.Parse(args[1:])
 		if strings.TrimSpace(msg) == "" {
 			fmt.Fprintln(os.Stderr, "missing -m message")
-			os.Exit(2)
+			return 2
 		}
 		agentCtx := requestctx.ContextWithApprovalToken(ctx, approvalToken)
 		agentCtx = requestctx.ContextWithRequesterIdentity(agentCtx, "cli", approval.RoleOperator)
 		if turnOrchestrator == nil {
 			fmt.Fprintln(os.Stderr, "agent error: runner orchestration unavailable; enable runners and configure a default runner")
-			os.Exit(1)
+			return 1
 		}
 		result, err := turnOrchestrator.StartTurn(agentCtx, app.RunnerTurnRequest{
 			SessionKey:    session,
@@ -597,7 +635,7 @@ func main() {
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "agent error:", err)
-			os.Exit(1)
+			return 1
 		}
 		var abort func(context.Context, string) error
 		if chatManager != nil {
@@ -612,88 +650,60 @@ func main() {
 		)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "agent error:", err)
-			os.Exit(1)
+			return 1
 		}
 		if text := channelTurnDeliveryText(final); strings.TrimSpace(text) != "" {
 			fmt.Fprintln(os.Stdout, text)
 		}
 		if !foregroundAgentTurnSucceeded(final) {
-			os.Exit(1)
+			return 1
 		}
-	case "migrate-jsonl":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: or3-intern migrate-jsonl <jsonl_path> [session_key]")
-			os.Exit(2)
-		}
-		sessionKey := "migrated:default"
-		if len(args) >= 3 {
-			sessionKey = args[2]
-		}
-		if err := migrateJSONL(ctx, d, args[1], sessionKey); err != nil {
-			fmt.Fprintln(os.Stderr, "migration error:", err)
-			os.Exit(1)
-		}
-		fmt.Println("ok")
-	case "migrate-openclaw":
-		if err := runMigrateOpenClawCommand(ctx, cfg, d, prov, args[1:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintln(os.Stderr, "migrate-openclaw error:", err)
-			os.Exit(1)
-		}
-	case "memory":
-		if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "memory error:", err)
-			os.Exit(1)
-		}
-		if err := runMemoryCommandWithDeps(ctx, cfg, d, args[1:], memoryCommandDeps{
-			Stdout: os.Stdout,
-			Stderr: os.Stderr,
-		}); err != nil {
-			fmt.Fprintln(os.Stderr, "memory error:", err)
-			os.Exit(1)
-		}
-	case "skills":
-		if _, err := ensureMemorySkillRegistered(cfgPath, &cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "skills error:", err)
-			os.Exit(1)
-		}
-		bundledDir, bundledErr := resolveBundledSkillsDir(cfgPath)
-		if bundledErr != nil {
-			fmt.Fprintln(os.Stderr, "skills error:", bundledErr)
-			os.Exit(1)
-		}
-		deps := skillsCommandDeps{
-			Client: newClawHubClient(cfg),
-			LoadToolNames: func(ctx context.Context, cfg config.Config) map[string]struct{} {
-				return loadAvailableToolNamesWithManager(ctx, cfg, struct{}{})
-			},
-			LoadInventory: func(toolNames map[string]struct{}) skills.Inventory {
-				return buildSkillsInventory(cfg, bundledDir, toolNames)
-			},
-			Audit: func(ctx context.Context, eventType string, payload any) error {
-				if auditLogger == nil {
-					return nil
-				}
-				return auditLogger.Record(ctx, eventType, "", "cli", payload)
-			},
-			Stdout: os.Stdout,
-			Stderr: os.Stderr,
-		}
-		if err := runSkillsCommandWithDeps(ctx, cfg, args[1:], deps); err != nil {
-			fmt.Fprintln(os.Stderr, "skills error:", err)
-			os.Exit(1)
+	case "cron":
+		runner := foregroundCronRunner(d, cronrunner.NewWithPreparer(b, cfg.DefaultSessionKey, runnerManager, turnOrchestrator))
+		if err := runCronCommandWithRunner(ctx, cfg.Cron.StorePath, args[1:], os.Stdout, os.Stderr, runner); err != nil {
+			fmt.Fprintln(os.Stderr, "cron error:", err)
+			if isUsageError(err) {
+				return 2
+			}
+			return 1
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", cmd)
-		os.Exit(2)
+		return 2
 	}
 
-	if heartbeatSvc != nil {
-		heartbeatSvc.Stop()
+	return 0
+}
+
+func foregroundCronRunner(database *db.DB, dispatch cron.Runner) cron.Runner {
+	return func(ctx context.Context, job cron.CronJob) (cron.RunResult, error) {
+		result, err := dispatch(ctx, job)
+		if err != nil || strings.TrimSpace(result.EnqueuedRunID) == "" || database == nil {
+			return result, err
+		}
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			run, ok, err := database.GetRunnerRun(ctx, result.EnqueuedRunID)
+			if err != nil {
+				return result, err
+			}
+			if !ok {
+				return result, fmt.Errorf("runner run %s disappeared", result.EnqueuedRunID)
+			}
+			switch run.Status {
+			case db.RunnerRunStatusSucceeded:
+				return result, nil
+			case db.RunnerRunStatusFailed, db.RunnerRunStatusAborted, db.RunnerRunStatusTimedOut, db.RunnerRunStatusApprovalRequired:
+				return result, fmt.Errorf("runner run %s ended with status %s: %s", run.ID, run.Status, run.ErrorMessage)
+			}
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			case <-ticker.C:
+			}
+		}
 	}
-	if cronSvc != nil {
-		cronSvc.Stop()
-	}
-	_ = channelManager.StopAll(context.Background())
 }
 
 func loadDoctorConfig(cfgPath, cwd string) (config.Config, string, error) {
@@ -763,7 +773,7 @@ func currentWorkingDir() string {
 
 func commandHandledBeforeRuntimeBootstrap(cmd string) bool {
 	switch cmd {
-	case "approvals", "capabilities", "devices", "embeddings", "pairing", "scope":
+	case "approvals", "capabilities", "devices", "embeddings", "pairing", "scope", "migrate-jsonl", "migrate-openclaw", "memory", "skills":
 		return true
 	default:
 		return false
@@ -883,13 +893,16 @@ func heartbeatServiceForCommand(cmd string, cfg config.Config, eventBus *bus.Bus
 	return heartbeat.New(cfg.Heartbeat, cfg.WorkspaceDir, eventBus)
 }
 
-func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTurnOrchestrator, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler, commandHandler *channelCommandHandler) {
+func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTurnOrchestrator, n int, cliDeliverer *cli.Deliverer, channelManager *rootchannels.Manager, approvalHandler *channelApprovalHandler, commandHandler *channelCommandHandler) *sync.WaitGroup {
 	if n <= 0 {
 		n = 4
 	}
 	events := b.Channel()
+	wg := &sync.WaitGroup{}
 	for i := 0; i < n; i++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for ev := range events {
 				cctx, cancel := context.WithTimeout(ctx, time.Duration(channelWorkerTimeoutSeconds(ev))*time.Second)
 				cctx = streaming.ContextWithConversationSession(cctx, ev.SessionKey)
@@ -942,6 +955,7 @@ func runWorkers(ctx context.Context, b *bus.Bus, turnOrchestrator *app.RunnerTur
 			}
 		}()
 	}
+	return wg
 }
 
 func channelWorkerTimeoutSeconds(ev bus.Event) int {

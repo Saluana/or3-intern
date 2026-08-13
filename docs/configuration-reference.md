@@ -2,7 +2,8 @@
 
 `or3-intern` loads `config.json`, usually from `~/.or3-intern/config.json`.
 Process environment overrides are applied at runtime. Set `OR3_LOAD_DOTENV=true`
-to opt into loading a nearby `.env` file; already-exported shell variables win.
+to opt into loading `.env` from the current working directory; parent directories
+are never searched, and already-exported shell variables win.
 
 Use `or3-intern settings` for normal edits and `or3-intern configure` for section-focused advanced edits.
 
@@ -52,6 +53,11 @@ Set the default runner with:
 - `OR3_RUNNERS_DEFAULT`
 
 Supported runners include OpenCode, Codex, Claude Code, and Gemini.
+
+Runtime resource limits are validated at startup: `workerCount` is capped at
+64, `runners.maxConcurrent` at 32, and `runners.maxQueued` at 10,000. Changing
+constructor-bound concurrency through the service configuration API requires a
+restart; the apply response reports the affected fields explicitly.
 
 ## API Shape
 

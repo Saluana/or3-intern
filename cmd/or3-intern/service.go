@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"or3-intern/internal/app"
@@ -280,6 +281,7 @@ func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Serv
 	errCh := make(chan error, 1)
 	socketPath := strings.TrimSpace(cfg.Service.UnixSocket)
 	var listener net.Listener
+	var socketIdentity os.FileInfo
 	if socketPath != "" {
 		if err := prepareUnixSocketPath(socketPath); err != nil {
 			return err
@@ -287,6 +289,11 @@ func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Serv
 		var err error
 		listener, err = net.Listen("unix", socketPath)
 		if err != nil {
+			return err
+		}
+		socketIdentity, err = os.Lstat(socketPath)
+		if err != nil {
+			_ = listener.Close()
 			return err
 		}
 	} else {
@@ -303,7 +310,7 @@ func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Serv
 		if err := callback(); err != nil {
 			_ = listener.Close()
 			if socketPath != "" {
-				cleanupUnixSocketPath(socketPath)
+				cleanupUnixSocketPath(socketPath, socketIdentity)
 			}
 			return err
 		}
@@ -324,12 +331,12 @@ func serveHTTPWithConfiguredTransport(ctx context.Context, httpServer *http.Serv
 		defer cancel()
 		err := httpServer.Shutdown(shutdownCtx)
 		if socketPath != "" {
-			cleanupUnixSocketPath(socketPath)
+			cleanupUnixSocketPath(socketPath, socketIdentity)
 		}
 		return err
 	case err := <-errCh:
 		if socketPath != "" {
-			cleanupUnixSocketPath(socketPath)
+			cleanupUnixSocketPath(socketPath, socketIdentity)
 		}
 		return err
 	}
@@ -350,16 +357,24 @@ func prepareUnixSocketPath(socketPath string) error {
 	if info.Mode()&os.ModeSocket == 0 {
 		return fmt.Errorf("unix socket path %s already exists and is not a socket", socketPath)
 	}
+	conn, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("unix socket %s is already in use", socketPath)
+	}
+	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		return fmt.Errorf("could not prove unix socket %s is stale: %w", socketPath, dialErr)
+	}
 	return os.Remove(socketPath)
 }
 
-func cleanupUnixSocketPath(socketPath string) {
+func cleanupUnixSocketPath(socketPath string, expected os.FileInfo) {
 	socketPath = strings.TrimSpace(socketPath)
 	if socketPath == "" {
 		return
 	}
 	info, err := os.Lstat(socketPath)
-	if err != nil || info.Mode()&os.ModeSocket == 0 {
+	if err != nil || info.Mode()&os.ModeSocket == 0 || expected == nil || !os.SameFile(info, expected) {
 		return
 	}
 	if err := os.Remove(socketPath); err != nil {

@@ -942,3 +942,50 @@ func TestService_ConcurrentMutationAndLifecycle(t *testing.T) {
 		}
 	}
 }
+
+func TestService_ConcurrentInstancesPreserveUpdates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cron.json")
+	runner := func(context.Context, CronJob) (RunResult, error) { return RunResult{}, nil }
+	first := New(path, runner)
+	second := New(path, runner)
+	if err := first.Start(); err != nil {
+		t.Fatalf("start first service: %v", err)
+	}
+	defer first.Stop()
+
+	const jobs = 24
+	errCh := make(chan error, jobs)
+	var wg sync.WaitGroup
+	for i := 0; i < jobs; i++ {
+		svc := first
+		if i%2 == 1 {
+			svc = second
+		}
+		id := fmt.Sprintf("shared-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- svc.Add(CronJob{
+				ID:       id,
+				Enabled:  true,
+				Schedule: CronSchedule{Kind: KindEvery, EveryMS: 60000},
+				Payload:  testRunnerRunPayload(id),
+			})
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent add: %v", err)
+		}
+	}
+
+	got, err := first.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != jobs {
+		t.Fatalf("expected %d jobs after cross-instance writes, got %d", jobs, len(got))
+	}
+}

@@ -705,7 +705,7 @@ func authenticateSecureConnectionSession(cfg config.Config, broker *approval.Bro
 		Device:   claims.DeviceID,
 		Session:  claims.SessionID,
 		StepUpAt: claims.StepUpAtUnixMs,
-		StepUpOK: claims.StepUpAtUnixMs > 0,
+		StepUpOK: secureconn.HasRecentStepUp(claims, time.Now().UTC()),
 	}, nil
 }
 

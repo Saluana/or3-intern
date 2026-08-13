@@ -32,15 +32,36 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Check reachable Go vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Require immutable action references
+        run: |
+          if grep -R -E '^[[:space:]]*- uses:' .github/workflows | grep -E -v '@[0-9a-f]{40}([[:space:]]|$)'; then
+            echo 'Every workflow action must be pinned to a full commit SHA.' >&2
+            exit 1
+          fi
+      - run: sudo apt-get update && sudo apt-get install --yes libsqlite3-dev
+      - name: Test and vet the complete Go module
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Race-test concurrent control-plane packages
+        run: go test -race ./internal/bus ./internal/cron ./internal/jobs ./internal/runners ./cmd/or3-intern
+
   binaries:
-    needs: security
+    needs: [security, tests]
     strategy:
       matrix:
         include:
@@ -58,8 +79,8 @@ jobs:
             goarch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Install Linux build dependencies
@@ -99,7 +120,7 @@ jobs:
       - name: Smoke test the Linux archive on Alpine
         if: matrix.goos == 'linux'
         run: docker run --rm -v "$PWD/smoke:/smoke:ro" alpine:3.20 /smoke/or3-intern version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: or3-intern-${{ matrix.goos }}-${{ matrix.goarch }}
           path: or3-intern-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
@@ -111,11 +132,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*.tar.gz
 
@@ -127,12 +148,12 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
       - run: npm install --global npm@11

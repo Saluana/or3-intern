@@ -93,6 +93,12 @@ func normalizeAndValidateConfig(cfg Config) (Config, error) {
 	return normalizeAndValidateConfigWithOptions(cfg, normalizeOptions{QuarantineOptionalIntegrations: true})
 }
 
+const (
+	MaxWorkerCount      = 64
+	MaxRunnerConcurrent = 32
+	MaxRunnerQueued     = 10_000
+)
+
 func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (Config, error) {
 	if cfg.Provider.TimeoutSeconds <= 0 {
 		cfg.Provider.TimeoutSeconds = int((60 * time.Second).Seconds())
@@ -125,6 +131,9 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.WorkerCount <= 0 {
 		cfg.WorkerCount = 4
 	}
+	if cfg.WorkerCount > MaxWorkerCount {
+		return cfg, fmt.Errorf("workerCount must be at most %d", MaxWorkerCount)
+	}
 	if cfg.ConsolidationWindowSize <= 0 {
 		cfg.ConsolidationWindowSize = 10
 	}
@@ -140,8 +149,14 @@ func normalizeAndValidateConfigWithOptions(cfg Config, opts normalizeOptions) (C
 	if cfg.Runners.MaxConcurrent <= 0 {
 		cfg.Runners.MaxConcurrent = 1
 	}
+	if cfg.Runners.MaxConcurrent > MaxRunnerConcurrent {
+		return cfg, fmt.Errorf("runners.maxConcurrent must be at most %d", MaxRunnerConcurrent)
+	}
 	if cfg.Runners.MaxQueued <= 0 {
 		cfg.Runners.MaxQueued = 16
+	}
+	if cfg.Runners.MaxQueued > MaxRunnerQueued {
+		return cfg, fmt.Errorf("runners.maxQueued must be at most %d", MaxRunnerQueued)
 	}
 	if cfg.Runners.DefaultTimeoutSeconds <= 0 {
 		cfg.Runners.DefaultTimeoutSeconds = 900

@@ -146,6 +146,8 @@ type serviceRateLimiter struct {
 	counts map[string]int
 }
 
+const serviceRateLimiterMaxKeys = 4096
+
 func (l *serviceRateLimiter) Allow(r *http.Request, limit int) bool {
 	if l == nil || r == nil || limit <= 0 {
 		return true
@@ -155,15 +157,32 @@ func (l *serviceRateLimiter) Allow(r *http.Request, limit int) bool {
 		actor = remoteIPKey(r.RemoteAddr)
 	}
 	now := time.Now().UTC().Truncate(time.Minute)
-	key := actor + ":" + r.URL.Path
+	remote := remoteIPKey(r.RemoteAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.counts == nil || !l.window.Equal(now) {
 		l.window = now
 		l.counts = map[string]int{}
 	}
-	l.counts[key]++
-	return l.counts[key] <= limit
+	actorKey := "actor:" + actor
+	ipKey := "ip:" + remote
+	newKeys := 0
+	if _, known := l.counts[actorKey]; !known {
+		newKeys++
+	}
+	if remote != "" {
+		if _, known := l.counts[ipKey]; !known {
+			newKeys++
+		}
+	}
+	if len(l.counts)+newKeys > serviceRateLimiterMaxKeys {
+		return false
+	}
+	l.counts[actorKey]++
+	if remote != "" {
+		l.counts[ipKey]++
+	}
+	return l.counts[actorKey] <= limit && (remote == "" || l.counts[ipKey] <= limit)
 }
 
 func (s *serviceServer) recordServiceAudit(r *http.Request, statusCode int) {

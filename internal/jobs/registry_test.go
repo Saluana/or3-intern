@@ -61,7 +61,7 @@ func TestRegistryRetentionKeepsLiveJobsWhenBounded(t *testing.T) {
 	}
 }
 
-func TestRegistryEvictsOldestActiveWhenOverCapacity(t *testing.T) {
+func TestRegistryRetainsActiveJobsWhenOverCapacity(t *testing.T) {
 	registry := NewRegistry(time.Hour, 2)
 	first := registry.RegisterWithID("job-active-1", "turn")
 	registry.Publish(first.ID, "started", map[string]any{"status": "running"})
@@ -72,8 +72,11 @@ func TestRegistryEvictsOldestActiveWhenOverCapacity(t *testing.T) {
 
 	registry.CleanupForTest(time.Now())
 
-	if got := registry.TrackedCountForTest(); got != 2 {
-		t.Fatalf("expected bounded registry to retain 2 jobs, got %d", got)
+	if got := registry.TrackedCountForTest(); got != 3 {
+		t.Fatalf("expected every active job to remain tracked, got %d", got)
+	}
+	if _, ok := registry.Snapshot(first.ID); !ok {
+		t.Fatal("expected oldest active job to remain tracked")
 	}
 	if _, ok := registry.Snapshot(third.ID); !ok {
 		t.Fatal("expected newest active job to remain tracked")

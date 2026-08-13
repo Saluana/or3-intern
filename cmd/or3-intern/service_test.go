@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"or3-intern/internal/requestctx"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,6 +34,30 @@ import (
 
 type serviceTestTool struct {
 	name string
+}
+
+func TestPrepareUnixSocketPathRejectsLiveListener(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets are not used on Windows")
+	}
+	dir, err := os.MkdirTemp("/tmp", "or3-socket-test-")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "service.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	if err := prepareUnixSocketPath(path); err == nil {
+		t.Fatal("expected a live Unix socket to be rejected")
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("live socket path was removed: %v", err)
+	}
 }
 
 func TestServiceServerEffectiveServiceProfileNameUsesServiceChannel(t *testing.T) {
@@ -487,7 +513,7 @@ func TestServiceErrorsRedactInternalsAndAddRecoveryGuidance(t *testing.T) {
 	}
 }
 
-func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing.T) {
+func TestServiceBoundary_RateLimitIsActorWideAndEchoesRequestID(t *testing.T) {
 	server := &serviceServer{config: config.Config{Service: config.ServiceConfig{MutationRateLimitPerMinute: 1}}}
 	var handled int
 	handler := serviceBoundaryMiddleware(server, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -497,6 +523,9 @@ func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing
 
 	newReq := func(actor, path, requestID string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
+		if actor == "actor-b" {
+			req.RemoteAddr = "198.51.100.2:1234"
+		}
 		if requestID != "" {
 			req.Header.Set("X-Request-Id", requestID)
 		}
@@ -521,8 +550,8 @@ func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing
 
 	differentPath := httptest.NewRecorder()
 	handler.ServeHTTP(differentPath, newReq("actor-a", "/internal/v1/approvals/expire", ""))
-	if differentPath.Code != http.StatusOK {
-		t.Fatalf("expected same actor on different path to pass, got %d", differentPath.Code)
+	if differentPath.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected actor-wide limit across path variations, got %d", differentPath.Code)
 	}
 
 	differentActor := httptest.NewRecorder()
@@ -530,8 +559,8 @@ func TestServiceBoundary_RateLimitIsPerActorAndPathAndEchoesRequestID(t *testing
 	if differentActor.Code != http.StatusOK {
 		t.Fatalf("expected different actor on same path to pass, got %d", differentActor.Code)
 	}
-	if handled != 3 {
-		t.Fatalf("expected downstream handler to run exactly 3 times, got %d", handled)
+	if handled != 2 {
+		t.Fatalf("expected downstream handler to run exactly 2 times, got %d", handled)
 	}
 }
 
@@ -1210,6 +1239,14 @@ func TestServiceConfigureApply_PersistsConfigChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
 	}
+	response := mustDecodeJSONBody(t, rec.Body)
+	if response["restart_required"] != true {
+		t.Fatalf("expected changed constructed components to require restart, got %#v", response)
+	}
+	fields, ok := response["restart_required_fields"].([]any)
+	if !ok || len(fields) != 3 {
+		t.Fatalf("expected every writable field to be classified, got %#v", response)
+	}
 	loaded, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
@@ -1377,7 +1414,7 @@ func TestServiceCron_CRUDAndRun(t *testing.T) {
 		t.Fatalf("expected pause 200, got %d (%s)", pauseRec.Code, pauseRec.Body.String())
 	}
 
-	runReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs/"+jobID+"/run", nil)
+	runReq := httptest.NewRequest(http.MethodPost, "/internal/v1/cron/jobs/"+jobID+"/run", strings.NewReader(`{"force":true}`))
 	runReq = runReq.WithContext(context.WithValue(runReq.Context(), serviceAuthContextKey{}, serviceAuthIdentity{Actor: "ops", Role: approval.RoleOperator}))
 	runRec := httptest.NewRecorder()
 	server.handleCron(runRec, runReq)
@@ -1508,6 +1545,31 @@ func TestServiceCron_RunDisabledWithoutForceReportsSkipped(t *testing.T) {
 	}
 	if runs != 0 {
 		t.Fatalf("expected disabled job not to run, got %d runs", runs)
+	}
+}
+
+func TestServiceCronRunForceRequiresExplicitBoolean(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		want      bool
+		wantError bool
+	}{
+		{name: "empty", body: "", want: false},
+		{name: "omitted", body: `{}`, want: false},
+		{name: "explicit", body: `{"force":true}`, want: true},
+		{name: "wrong type", body: `{"force":"true"}`, wantError: true},
+		{name: "malformed", body: `{`, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := serviceCronRunForce(strings.NewReader(tc.body))
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error=%v, wantError=%v", err, tc.wantError)
+			}
+			if got != tc.want {
+				t.Fatalf("force=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

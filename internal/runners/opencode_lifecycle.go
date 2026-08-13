@@ -167,6 +167,11 @@ func (p *openCodeProcess) start(ctx context.Context) error {
 	if err := p.cmd.Start(); err != nil {
 		return err
 	}
+	if err := attachProcessGroup(ctx, p.cmd); err != nil {
+		_ = p.cmd.Process.Kill()
+		_ = p.cmd.Wait()
+		return err
+	}
 	p.startedAt = time.Now().UTC()
 	go p.drain(stdout, "stdout")
 	go p.drain(stderr, "stderr")
@@ -217,6 +222,7 @@ func (p *openCodeProcess) Stop(ctx context.Context) error {
 	KillProcessGroup(p.cmd)
 	done := make(chan error, 1)
 	go func() { done <- p.cmd.Wait() }()
+	defer releaseProcessGroup(p.cmd)
 	select {
 	case <-done:
 		return nil
@@ -436,7 +442,7 @@ func openCodeStart(ctx context.Context, binary string, opts openCodeStartOptions
 		return openCodeStartupResult{Error: "could not allocate loopback port: " + err.Error()}
 	}
 	host := "127.0.0.1"
-	cmd := exec.CommandContext(context.Background(), binary, "serve", "--hostname", host, "--port", strconv.Itoa(port))
+	cmd := exec.CommandContext(ctx, binary, "serve", "--hostname", host, "--port", strconv.Itoa(port))
 	cmd.Env = opts.Env
 	applyProcessGroup(cmd)
 	proc := newOpenCodeProcess(cmd)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,8 @@ type serviceFileReadResponse struct {
 }
 
 const maxServiceFileSearchVisited = 5000
+
+var serviceFileSearchSlots = make(chan struct{}, 4)
 
 func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	if !requireServiceRole(w, r, approval.RoleOperator) {
@@ -136,9 +139,6 @@ func (s *serviceServer) serviceFileRoots() []serviceFileRoot {
 	add("allowed", "Allowed Folder", cfg.AllowedDir, true)
 	add("workspace", "Workspace", cfg.WorkspaceDir, true)
 	add("artifacts", "Artifacts", cfg.ArtifactsDir, false)
-	if home, err := os.UserHomeDir(); err == nil {
-		add("home", "Home", home, false)
-	}
 	if cfg.FilesystemBrowsing {
 		add("filesystem", "Full Filesystem", "/", false)
 	}
@@ -236,12 +236,18 @@ func resolveExistingServicePath(realRoot, cleanRel string) (string, error) {
 }
 
 func (s *serviceServer) handleFileList(w http.ResponseWriter, r *http.Request) {
-	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	root, _, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	items, err := os.ReadDir(absPath)
+	dir, err := secureOpenServicePath(root.Path, rel, os.O_RDONLY, 0)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "directory unavailable", err)
+		return
+	}
+	defer dir.Close()
+	items, err := dir.ReadDir(-1)
 	if err != nil {
 		writeServiceError(w, r, http.StatusNotFound, "directory unavailable", err)
 		return
@@ -266,6 +272,20 @@ func (s *serviceServer) handleFileList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) handleFileSearch(w http.ResponseWriter, r *http.Request) {
+	if limit := s.configSnapshot().Service.MutationRateLimitPerMinute; limit > 0 && !s.serviceRateLimiter().Allow(r, limit) {
+		writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
+		return
+	}
+	select {
+	case serviceFileSearchSlots <- struct{}{}:
+		defer func() { <-serviceFileSearchSlots }()
+	case <-r.Context().Done():
+		writeServiceJSON(w, http.StatusRequestTimeout, map[string]any{"error": "search canceled"})
+		return
+	default:
+		writeServiceJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many concurrent searches"})
+		return
+	}
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
 	if limit > 50 {
@@ -284,31 +304,43 @@ func (s *serviceServer) handleFileSearch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, absRoot, _, err := s.resolveServiceFilePath(root.ID, ".")
+	_, _, _, err := s.resolveServiceFilePath(root.ID, ".")
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 
-	items := serviceFileSearchItems(absRoot, root, query, limit)
+	items := serviceFileSearchItemsContext(r.Context(), root.Path, root, query, limit)
 
 	writeServiceJSON(w, http.StatusOK, map[string]any{"root_id": root.ID, "query": query, "items": items})
 }
 
 func serviceFileSearchItems(absRoot string, root serviceFileRoot, query string, limit int) []serviceFileSearchItem {
+	return serviceFileSearchItemsContext(context.Background(), absRoot, root, query, limit)
+}
+
+func serviceFileSearchItemsContext(ctx context.Context, absRoot string, root serviceFileRoot, query string, limit int) []serviceFileSearchItem {
 	if limit <= 0 {
 		return nil
 	}
 
 	items := make([]serviceFileSearchItem, 0, limit)
-	queue := []string{absRoot}
+	queue := []string{"."}
 	visited := 0
 
 	for len(queue) > 0 && len(items) < limit && visited < maxServiceFileSearchVisited {
-		dir := queue[0]
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		dirRel := queue[0]
 		queue = queue[1:]
 
-		entries, err := os.ReadDir(dir)
+		dir, err := secureOpenServicePath(absRoot, dirRel, os.O_RDONLY, 0)
+		if err != nil {
+			continue
+		}
+		entries, err := dir.ReadDir(-1)
+		_ = dir.Close()
 		if err != nil {
 			continue
 		}
@@ -320,11 +352,7 @@ func serviceFileSearchItems(absRoot string, root serviceFileRoot, query string, 
 
 			visited++
 			name := entry.Name()
-			childPath := filepath.Join(dir, name)
-			rel, err := filepath.Rel(absRoot, childPath)
-			if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				continue
-			}
+			rel := filepath.Join(dirRel, name)
 			slashRel := filepath.ToSlash(rel)
 
 			if query == "" || fileSearchMatches(query, name, slashRel) {
@@ -338,7 +366,7 @@ func serviceFileSearchItems(absRoot string, root serviceFileRoot, query string, 
 			}
 
 			if entry.IsDir() && !isIgnoredSearchDir(name) {
-				queue = append(queue, childPath)
+				queue = append(queue, rel)
 			}
 		}
 	}
@@ -440,12 +468,18 @@ func serviceFileTextAllowed(name, mimeType string, content []byte) bool {
 }
 
 func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
-	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	root, _, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	info, err := os.Stat(absPath)
+	file, err := secureOpenServicePath(root.Path, rel, os.O_RDONLY, 0)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
 		return
@@ -458,12 +492,18 @@ func (s *serviceServer) handleFileStat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) handleFileRead(w http.ResponseWriter, r *http.Request) {
-	root, absPath, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	root, _, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	info, err := os.Stat(absPath)
+	file, err := secureOpenServicePath(root.Path, rel, os.O_RDONLY, 0)
+	if err != nil {
+		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
 		return
@@ -476,7 +516,7 @@ func (s *serviceServer) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is too large for inline editing"})
 		return
 	}
-	content, err := os.ReadFile(absPath)
+	content, err := io.ReadAll(io.LimitReader(file, serviceFileTextReadLimit+1))
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "file read failed", err)
 		return
@@ -500,12 +540,12 @@ func (s *serviceServer) handleFileRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serviceServer) handleFileDownload(w http.ResponseWriter, r *http.Request) {
-	_, absPath, _, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
+	root, _, rel, err := s.resolveServiceFilePath(r.URL.Query().Get("root_id"), r.URL.Query().Get("path"))
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	file, err := os.Open(absPath)
+	file, err := secureOpenServicePath(root.Path, rel, os.O_RDONLY, 0)
 	if err != nil {
 		writeServiceError(w, r, http.StatusNotFound, "file unavailable", err)
 		return
@@ -532,7 +572,7 @@ func (s *serviceServer) handleFileWrite(w http.ResponseWriter, r *http.Request) 
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	root, absPath, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
+	root, _, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -546,19 +586,29 @@ func (s *serviceServer) handleFileWrite(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is too large for inline editing"})
 		return
 	}
-	name := filepath.Base(absPath)
+	name := filepath.Base(rel)
 	mimeType := mime.TypeByExtension(filepath.Ext(name))
 	if !serviceFileTextAllowed(name, mimeType, contentBytes) {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "file is not a supported text document"})
 		return
 	}
-	parent := filepath.Dir(absPath)
-	parentInfo, err := os.Stat(parent)
+	parentRel := filepath.Dir(rel)
+	parentFile, err := secureOpenServicePath(root.Path, parentRel, os.O_RDONLY, 0)
+	var parentInfo os.FileInfo
+	if err == nil {
+		parentInfo, err = parentFile.Stat()
+		_ = parentFile.Close()
+	}
 	if err != nil || !parentInfo.IsDir() {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "parent directory does not exist"})
 		return
 	}
-	existingInfo, statErr := os.Stat(absPath)
+	existingFile, statErr := secureOpenServicePath(root.Path, rel, os.O_RDONLY, 0)
+	var existingInfo os.FileInfo
+	if statErr == nil {
+		existingInfo, statErr = existingFile.Stat()
+		_ = existingFile.Close()
+	}
 	if statErr == nil && existingInfo.IsDir() {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "write target is not a file"})
 		return
@@ -590,27 +640,11 @@ func (s *serviceServer) handleFileWrite(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	tmp, err := os.CreateTemp(parent, ".or3-write-*")
-	if err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "could not prepare file write", err)
-		return
+	mode := os.FileMode(0o600)
+	if statErr == nil {
+		mode = existingInfo.Mode().Perm()
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(contentBytes); err != nil {
-		_ = tmp.Close()
-		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
-		return
-	}
-	if err := os.Rename(tmpName, absPath); err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "file write failed", err)
-		return
-	}
-	updatedInfo, err := os.Stat(absPath)
+	updatedInfo, err := secureAtomicWriteServiceFile(root.Path, rel, contentBytes, mode)
 	if err != nil {
 		writeServiceError(w, r, http.StatusBadGateway, "file stat failed", err)
 		return
@@ -630,7 +664,7 @@ func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request)
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart upload"})
 		return
 	}
-	root, dirPath, rel, err := s.resolveServiceFilePath(r.FormValue("root_id"), r.FormValue("path"))
+	root, _, rel, err := s.resolveServiceFilePath(r.FormValue("root_id"), r.FormValue("path"))
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -650,15 +684,9 @@ func (s *serviceServer) handleFileUpload(w http.ResponseWriter, r *http.Request)
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid file name"})
 		return
 	}
-	target := filepath.Join(dirPath, name)
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
+	targetRel := filepath.Join(rel, name)
+	if _, err := secureCreateServiceFile(root.Path, targetRel, source, 0o600); err != nil {
 		writeServiceError(w, r, http.StatusConflict, "file already exists or cannot be created", err)
-		return
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, source); err != nil {
-		writeServiceError(w, r, http.StatusBadGateway, "file upload failed", err)
 		return
 	}
 	writeServiceJSON(w, http.StatusCreated, map[string]any{"root_id": root.ID, "path": filepath.ToSlash(filepath.Join(rel, name)), "status": "uploaded"})
@@ -675,7 +703,7 @@ func (s *serviceServer) handleFileMkdir(w http.ResponseWriter, r *http.Request) 
 		writeServiceRequestDecodeError(w, err)
 		return
 	}
-	root, dirPath, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
+	root, _, rel, err := s.resolveServiceFilePath(body.RootID, body.Path)
 	if err != nil {
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -689,8 +717,8 @@ func (s *serviceServer) handleFileMkdir(w http.ResponseWriter, r *http.Request) 
 		writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid directory name"})
 		return
 	}
-	target := filepath.Join(dirPath, name)
-	if err := os.Mkdir(target, 0o700); err != nil {
+	targetRel := filepath.Join(rel, name)
+	if err := secureMkdirServicePath(root.Path, targetRel, 0o700); err != nil {
 		writeServiceError(w, r, http.StatusConflict, "directory already exists or cannot be created", err)
 		return
 	}

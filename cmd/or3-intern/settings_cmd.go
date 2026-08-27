@@ -277,7 +277,7 @@ func runConfigureSectionAndSave(reader *bufio.Reader, out io.Writer, cfgPath, cw
 }
 
 func exportSettingsConfig(out io.Writer, target string, cfg config.Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := marshalRedactedSettingsConfig(cfg)
 	if err != nil {
 		return err
 	}
@@ -286,9 +286,98 @@ func exportSettingsConfig(out io.Writer, target string, cfg config.Config) error
 		_, err = out.Write(data)
 		return err
 	}
-	if err := os.WriteFile(target, data, 0o600); err != nil {
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	// OpenFile's mode only applies to newly-created files. Chmod the open file
+	// before writing so an existing export cannot retain group/world access.
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if n, writeErr := file.Write(data); writeErr != nil {
+		_ = file.Close()
+		return writeErr
+	} else if n != len(data) {
+		_ = file.Close()
+		return io.ErrShortWrite
+	}
+	if err := file.Close(); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Exported advanced config to %s\n", target)
 	return nil
+}
+
+func marshalRedactedSettingsConfig(cfg config.Config) ([]byte, error) {
+	return json.MarshalIndent(redactedSettingsConfig(cfg), "", "  ")
+}
+
+func redactedSettingsConfig(cfg config.Config) config.Config {
+	redacted := config.Clone(cfg)
+	redacted.Provider.APIKey = ""
+	for name, profile := range redacted.Providers {
+		profile.APIKey = ""
+		redacted.Providers[name] = profile
+	}
+	redacted.Service.Secret = ""
+	redacted.Channels.Telegram.Token = ""
+	redacted.Channels.Slack.AppToken = ""
+	redacted.Channels.Slack.BotToken = ""
+	redacted.Channels.Discord.Token = ""
+	redacted.Channels.WhatsApp.BridgeToken = ""
+	redacted.Channels.Email.IMAPPassword = ""
+	redacted.Channels.Email.SMTPPassword = ""
+	redacted.Triggers.Webhook.Secret = ""
+	for name, entry := range redacted.Skills.Entries {
+		entry.APIKey = ""
+		redactSkillExportValue(entry.Env)
+		redactSkillExportValue(entry.Config)
+		redacted.Skills.Entries[name] = entry
+	}
+	return redacted
+}
+
+func redactSkillExportValue(value any) {
+	switch typed := value.(type) {
+	case map[string]string:
+		for key := range typed {
+			if settingsSkillSecretKey(key) {
+				typed[key] = ""
+			}
+		}
+	case map[string]any:
+		for key, child := range typed {
+			if settingsSkillSecretKey(key) {
+				typed[key] = ""
+				continue
+			}
+			redactSkillExportValue(child)
+		}
+	case []any:
+		for _, child := range typed {
+			redactSkillExportValue(child)
+		}
+	}
+}
+
+func settingsSkillSecretKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.NewReplacer("_", "", "-", "").Replace(normalized)
+	for _, suffix := range []string{
+		"apikey",
+		"token",
+		"secret",
+		"password",
+		"passwd",
+		"credential",
+		"privatekey",
+		"accesskey",
+	} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
 }

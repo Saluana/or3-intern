@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"or3-intern/internal/config"
@@ -59,6 +60,51 @@ func TestResolveServiceFilePathRejectsTraversal(t *testing.T) {
 	_, _, _, err := server.resolveServiceFilePath("allowed", "../secret.txt")
 	if err == nil {
 		t.Fatal("expected traversal to be rejected")
+	}
+}
+
+func TestHandleStagingReleaseRemovesOnlyGeneratedWorkspaceBatch(t *testing.T) {
+	workspace := t.TempDir()
+	batch := filepath.Join(workspace, ".or3-upload-1730000000000-abc123")
+	if err := os.Mkdir(batch, 0o700); err != nil {
+		t.Fatalf("mkdir batch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(batch, "notes.md"), []byte("notes"), 0o600); err != nil {
+		t.Fatalf("write batch file: %v", err)
+	}
+	server := &serviceServer{config: config.Config{WorkspaceDir: workspace}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/files/staging/release", strings.NewReader(`{"root_id":"workspace","path":".or3-upload-1730000000000-abc123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleStagingRelease(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(batch); !os.IsNotExist(err) {
+		t.Fatalf("expected staging batch removed, stat err=%v", err)
+	}
+}
+
+func TestHandleStagingReleaseRejectsArbitraryWorkspaceFile(t *testing.T) {
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "keep.txt")
+	if err := os.WriteFile(file, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write protected file: %v", err)
+	}
+	server := &serviceServer{config: config.Config{WorkspaceDir: workspace}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/files/staging/release", strings.NewReader(`{"root_id":"workspace","path":"keep.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handleStagingRelease(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if body, err := os.ReadFile(file); err != nil || string(body) != "keep" {
+		t.Fatalf("protected file changed: body=%q err=%v", body, err)
 	}
 }
 

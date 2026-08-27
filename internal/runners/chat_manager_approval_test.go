@@ -454,6 +454,45 @@ func TestRespondToTurnApprovalRejectFlow(t *testing.T) {
 	}
 }
 
+func TestRespondToTurnApprovalRejectFinalizesPausedRunnerRun(t *testing.T) {
+	d, cm, _, _ := setupChatManagerForApproval(t)
+	ctx := context.Background()
+	sess, turn := seedTurnWithApproval(t, d, 0)
+	run := mustInsertRunnerRun(t, d, db.RunnerRun{
+		ID:       "rr-rejected-approval",
+		JobID:    "job-rejected-approval",
+		RunnerID: string(RunnerCodex),
+		Status:   db.RunnerRunStatusApprovalRequired,
+		MetaJSON: `{"runner_chat_session_id":"rcs-approval","runner_chat_turn_id":"rct-approval","runner_chat_continuation_mode":"native"}`,
+	})
+	cm.Jobs.RegisterWithID(run.JobID, "runner:codex")
+	if _, err := d.SQL.ExecContext(ctx, `UPDATE runner_chat_turns SET runner_run_id=?, runner_job_id=? WHERE id=?`, run.ID, run.JobID, turn.ID); err != nil {
+		t.Fatalf("bind runner run to turn: %v", err)
+	}
+	payload := []byte(`{"status":"approval_required","approval_id":6161,"approval_request_id":6161,"runner_permission":{"runner_id":"codex","kind":"filesystem","access":"read","target_path":"/tmp/reject"}}`)
+	if err := d.AppendRunnerChatEvent(ctx, db.RunnerChatEvent{TurnID: turn.ID, SessionID: sess.ID, Seq: db.NowMS(), TS: db.NowMS(), Type: "approval_required", PayloadJSON: string(payload)}); err != nil {
+		t.Fatalf("AppendRunnerChatEvent: %v", err)
+	}
+	insertApprovalRow(t, d, 6161, sess.AppSessionKey, "/tmp/reject")
+	if _, err := cm.RespondToTurnApproval(ctx, turn.ID, RespondToTurnApprovalOpts{Decision: "reject", Actor: "test"}); err != nil {
+		t.Fatalf("RespondToTurnApproval: %v", err)
+	}
+	finalRun := mustGetRunnerRun(t, d, run.ID)
+	if finalRun.Status != db.RunnerRunStatusAborted {
+		t.Fatalf("expected rejected approval run aborted, got %q", finalRun.Status)
+	}
+	if snapshot, ok := cm.Jobs.Snapshot(run.JobID); !ok || snapshot.Status != "aborted" {
+		t.Fatalf("expected rejected approval job aborted, ok=%v snapshot=%#v", ok, snapshot)
+	}
+	finalTurn, err := d.GetRunnerChatTurn(ctx, turn.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatTurn: %v", err)
+	}
+	if finalTurn.Status != db.RunnerChatTurnStatusFailed {
+		t.Fatalf("expected rejected approval turn failed, got %q", finalTurn.Status)
+	}
+}
+
 func TestRespondToTurnApprovalApproveForSession(t *testing.T) {
 	d, cm, _, runtime := setupChatManagerForApproval(t)
 	ctx := context.Background()

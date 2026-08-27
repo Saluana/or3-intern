@@ -32,6 +32,71 @@ func makeZip(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
+func TestValidateSlugRejectsPathTargetsAndKeepsNormalNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{name: "empty", input: "", wantErr: "slug required"},
+		{name: "root", input: ".", wantErr: "invalid skill slug"},
+		{name: "parent", input: "..", wantErr: "invalid skill slug"},
+		{name: "parent traversal", input: "../demo", wantErr: "invalid skill slug"},
+		{name: "nested traversal", input: "demo/../other", wantErr: "invalid skill slug"},
+		{name: "absolute", input: "/tmp/demo", wantErr: "invalid skill slug"},
+		{name: "windows separator", input: `demo\\other`, wantErr: "invalid skill slug"},
+		{name: "dot name", input: "demo.v2", want: "demo.v2"},
+		{name: "double dot in name", input: "demo..v2", want: "demo..v2"},
+		{name: "trimmed", input: " demo-skill ", want: "demo-skill"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := validateSlug(test.input)
+			if test.wantErr != "" {
+				if err == nil || err.Error() != test.wantErr {
+					t.Fatalf("validateSlug(%q) error = %v, want %q", test.input, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("validateSlug(%q) = %q, %v; want %q", test.input, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestInstallRejectsRootSlugBeforeRegistryOrFilesystemChanges(t *testing.T) {
+	dest := t.TempDir()
+	client := New("http://127.0.0.1:1", "http://127.0.0.1:1")
+	if _, err := client.Install(context.Background(), ".", "", dest, InstallOptions{Force: true}); err == nil || err.Error() != "invalid skill slug" {
+		t.Fatalf("Install root slug error = %v, want invalid skill slug", err)
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid install changed managed root: %#v", entries)
+	}
+}
+
+func TestRemoveSkillRejectsRootAndTraversalNames(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "marker")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	for _, name := range []string{".", "..", "../outside"} {
+		if err := RemoveSkill(root, name); err == nil || err.Error() != "invalid skill slug" {
+			t.Fatalf("RemoveSkill(%q) error = %v, want invalid skill slug", name, err)
+		}
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("invalid remove changed root: %v", err)
+	}
+}
+
 func TestRecoverSkillReplacementRestoresInterruptedBackup(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "demo")

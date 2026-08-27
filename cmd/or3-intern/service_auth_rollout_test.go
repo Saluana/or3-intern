@@ -137,6 +137,112 @@ func TestServiceAuthMiddleware_AuthMethodSelection(t *testing.T) {
 	}
 }
 
+func TestServiceAuthMiddleware_ServiceClientCannotReachRunnerExecutionSurface(t *testing.T) {
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/internal/v1/jobs/job-1"},
+		{http.MethodGet, "/internal/v1/jobs/job-1/stream"},
+		{http.MethodPost, "/internal/v1/jobs/job-1/abort"},
+		{http.MethodPut, "/internal/v1/jobs/job-1/abort"},
+		{http.MethodGet, "/internal/v1/runner-runs"},
+		{http.MethodPost, "/internal/v1/runner-runs"},
+		{http.MethodGet, "/internal/v1/runner-runs/run-1"},
+		{http.MethodGet, "/internal/v1/runner-runs/run-1/events"},
+		{http.MethodOptions, "/internal/v1/runner-runs/run-1/events"},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions"},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions/session-1/turns"},
+		{http.MethodGet, "/internal/v1/runner-chat/sessions/session-1/turns"},
+		{http.MethodGet, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1"},
+		{http.MethodGet, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1/events"},
+		{http.MethodGet, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1/stream"},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1/abort"},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1/approve"},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1/reject"},
+		{http.MethodPost, "/internal/v1/runner-chat/sessions/session-1/turns/turn-1/cancel"},
+	}
+	for _, mode := range []config.AuthEnforcementMode{config.AuthEnforcementOff, config.AuthEnforcementWarn} {
+		t.Run(string(mode), func(t *testing.T) {
+			database, cleanup := openServiceTestDB(t)
+			defer cleanup()
+			cfg := rolloutAuthTestConfig(mode)
+			cfg.Service.Secret = strings.Repeat("r", 32)
+			cfg.Service.SharedSecretRole = approval.RoleServiceClient
+			broker := &approval.Broker{DB: database, Config: cfg.Security.Approvals}
+			_, operatorToken, err := broker.RotateDeviceToken(context.Background(), "operator-policy", approval.RoleOperator, "Operator", nil)
+			if err != nil {
+				t.Fatalf("RotateDeviceToken(operator): %v", err)
+			}
+			_, adminToken, err := broker.RotateDeviceToken(context.Background(), "admin-policy", approval.RoleAdmin, "Admin", nil)
+			if err != nil {
+				t.Fatalf("RotateDeviceToken(admin): %v", err)
+			}
+			handler := serviceAuthMiddlewareWithBroker(cfg, broker, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				identity := serviceAuthIdentityFromContext(r.Context())
+				writeServiceJSON(w, http.StatusOK, map[string]any{"role": identity.Role})
+			}))
+
+			doRequest := func(t *testing.T, method, path, token, authMethod string) *httptest.ResponseRecorder {
+				t.Helper()
+				req := httptest.NewRequest(method, path, nil)
+				req.Header.Set("Authorization", "Bearer "+token)
+				if authMethod != "" {
+					req.Header.Set("X-Or3-Auth-Method", authMethod)
+				}
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				return rec
+			}
+
+			for _, route := range routes {
+				t.Run("service-client "+route.method+" "+route.path, func(t *testing.T) {
+					rec := doRequest(t, route.method, route.path, mustIssueServiceTokenAt(t, cfg.Service.Secret, time.Now()), "")
+					if rec.Code != http.StatusForbidden {
+						t.Fatalf("expected 403, got %d (%s)", rec.Code, rec.Body.String())
+					}
+					payload := mustDecodeJSONBody(t, rec.Body)
+					if payload["code"] != serviceCodeForbidden || payload["error"] != "forbidden" {
+						t.Fatalf("expected forbidden error shape, got %#v", payload)
+					}
+				})
+			}
+
+			for _, roleToken := range []struct {
+				name  string
+				token string
+			}{
+				{name: "operator", token: operatorToken},
+				{name: "admin", token: adminToken},
+			} {
+				t.Run(roleToken.name+" preserves execution surface", func(t *testing.T) {
+					for _, route := range routes {
+						rec := doRequest(t, route.method, route.path, roleToken.token, "paired-device")
+						if rec.Code != http.StatusOK {
+							t.Fatalf("%s %s: expected authenticated handler to run with 200, got %d (%s)", route.method, route.path, rec.Code, rec.Body.String())
+						}
+						if got := mustDecodeJSONBody(t, rec.Body)["role"]; got != roleToken.name {
+							t.Fatalf("%s %s: expected role %q, got %#v", route.method, route.path, roleToken.name, got)
+						}
+					}
+				})
+			}
+
+			for _, metadataPath := range []string{
+				"/internal/v1/runner-chat/sessions",
+				"/internal/v1/runner-chat/sessions/session-1",
+			} {
+				t.Run("service-client metadata "+metadataPath, func(t *testing.T) {
+					rec := doRequest(t, http.MethodGet, metadataPath, mustIssueServiceTokenAt(t, cfg.Service.Secret, time.Now()), "")
+					if rec.Code != http.StatusOK {
+						t.Fatalf("expected metadata read to remain available, got %d (%s)", rec.Code, rec.Body.String())
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestServiceConnectIdentityAllowsOnlyConnectSurface(t *testing.T) {
 	identity := serviceAuthIdentity{
 		Kind:      "paired-device",
@@ -156,6 +262,7 @@ func TestServiceConnectIdentityAllowsOnlyConnectSurface(t *testing.T) {
 		{http.MethodGet, "/internal/v1/files/roots", true},
 		{http.MethodPost, "/internal/v1/files/mkdir", true},
 		{http.MethodPost, "/internal/v1/files/upload", true},
+		{http.MethodPost, "/internal/v1/files/staging/release", true},
 		{http.MethodGet, "/internal/v1/approvals", false},
 		{http.MethodGet, "/internal/v1/configure", false},
 		{http.MethodGet, "/internal/v1/terminal/sessions", false},

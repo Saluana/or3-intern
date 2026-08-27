@@ -32,6 +32,10 @@ var ErrRunnerChatTurnNotFound = errors.New("runner chat turn not found")
 const (
 	DefaultRunnerChatSessionListLimit = 50
 	MaxRunnerChatSessionListLimit     = 100
+	DefaultRunnerChatTurnListLimit    = 50
+	MaxRunnerChatTurnListLimit        = 100
+	DefaultRunnerChatEventListLimit   = 200
+	MaxRunnerChatEventListLimit       = 1000
 )
 
 // RunnerChatSession is a row in runner_chat_sessions.
@@ -339,11 +343,16 @@ func (d *DB) GetActiveRunnerChatTurn(ctx context.Context, sessionID string) (Run
 }
 
 // ListRunnerChatTurns returns the most recent turns for a session in
-// chronological (ascending sequence) order. limit <= 0 means no limit.
+// chronological (ascending sequence) order. Positive limits are capped at
+// MaxRunnerChatTurnListLimit. limit <= 0 means no limit for trusted internal
+// history reconstruction; the HTTP service always supplies a bounded limit.
 func (d *DB) ListRunnerChatTurns(ctx context.Context, sessionID string, limit int) ([]RunnerChatTurn, error) {
 	q := runnerChatTurnSelectSQL + ` WHERE session_id=?`
 	args := []any{sessionID}
 	if limit > 0 {
+		if limit > MaxRunnerChatTurnListLimit {
+			limit = MaxRunnerChatTurnListLimit
+		}
 		// Select newest first so LIMIT keeps the current tail of a long
 		// session. Results are reversed below to retain the API's
 		// chronological response order.
@@ -479,7 +488,9 @@ func (d *DB) AppendRunnerChatEvent(ctx context.Context, ev RunnerChatEvent) erro
 // ListRunnerChatEvents returns events for a turn after a given sequence.
 func (d *DB) ListRunnerChatEvents(ctx context.Context, turnID string, afterSeq int64, limit int) ([]RunnerChatEvent, error) {
 	if limit <= 0 {
-		limit = 200
+		limit = DefaultRunnerChatEventListLimit
+	} else if limit > MaxRunnerChatEventListLimit {
+		limit = MaxRunnerChatEventListLimit
 	}
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT id, turn_id, session_id, job_id, seq, ts, type, stream, text, payload_json
@@ -511,14 +522,16 @@ func (d *DB) MaxRunnerChatEventSeq(ctx context.Context, turnID string) (int64, e
 	return max.Int64, nil
 }
 
-// ReconcileRunnerChatTurnsOnStartup transitions any in-flight turns to
-// aborted. Returns the number of turns that were reconciled.
+// ReconcileRunnerChatTurnsOnStartup transitions any in-flight turns,
+// including native turns paused for approval, to aborted. Native approval
+// continuations cannot survive a service restart. Returns the number of turns
+// that were reconciled.
 func (d *DB) ReconcileRunnerChatTurnsOnStartup(ctx context.Context) (int, error) {
 	now := NowMS()
 	res, err := d.SQL.ExecContext(ctx,
 		`UPDATE runner_chat_turns
 		 SET status='aborted', error_message=COALESCE(NULLIF(error_message,''),'service restarted'), completed_at=?
-		 WHERE status IN ('queued','running')`, now)
+		 WHERE status IN ('queued','running','approval_required')`, now)
 	if err != nil {
 		return 0, err
 	}

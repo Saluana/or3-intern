@@ -117,6 +117,12 @@ func (s *serviceServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleFileMkdir(w, r)
+	case "staging/release":
+		if r.Method != http.MethodPost {
+			writeServiceJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		s.handleStagingRelease(w, r)
 	case "delete":
 		writeServiceJSON(w, http.StatusForbidden, map[string]any{"error": "file deletion is disabled in v1"})
 	default:

@@ -419,6 +419,89 @@ func TestRunSettingsWithIO_HomeExportAndSafetySection(t *testing.T) {
 	}
 }
 
+func TestRunSettingsWithIO_ExportRedactsSecretsAndLocksExistingFile(t *testing.T) {
+	clearConfigEnvForTest(t)
+	t.Setenv("OR3_API_KEY", "environment-provider-secret")
+	t.Setenv("OR3_SERVICE_SECRET", "environment-service-secret")
+	t.Setenv("OR3_TELEGRAM_TOKEN", "environment-telegram-secret")
+	t.Setenv("OR3_EMAIL_IMAP_PASSWORD", "environment-imap-secret")
+
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	cfg := seedConsumerConfig(t, cfgPath, tmp)
+	cfg.Provider.APIKey = "persisted-provider-secret"
+	cfg.Service.Secret = "persisted-service-secret"
+	cfg.Context.MaxInputTokens = 12345
+	cfg.Security.Approvals.ApprovalTokenTTLSeconds = 321
+	cfg.Security.Approvals.SecretAccess.Mode = config.ApprovalModeAllowlist
+	cfg.Skills.Entries["demo"] = config.SkillEntryConfig{
+		APIKey: "persisted-skill-secret",
+		Env:    map[string]string{"DEMO_API_KEY": "skill-environment-secret", "DEMO_MODE": "fast"},
+		Config: map[string]any{
+			"DEMO_TOKEN": "skill-config-secret",
+			"tokenLimit": 777,
+			"nested":     map[string]any{"clientSecret": "nested-skill-secret", "mode": "safe"},
+		},
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("config.Save: %v", err)
+	}
+
+	exportPath := filepath.Join(tmp, "export.json")
+	if err := os.WriteFile(exportPath, []byte("old export"), 0o644); err != nil {
+		t.Fatalf("seed export: %v", err)
+	}
+	var out bytes.Buffer
+	if err := runSettingsWithIO(strings.NewReader(""), &out, cfgPath, tmp, []string{"--export", exportPath}); err != nil {
+		t.Fatalf("settings export: %v", err)
+	}
+	data, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	for _, secret := range []string{
+		"environment-provider-secret",
+		"environment-service-secret",
+		"environment-telegram-secret",
+		"environment-imap-secret",
+		"persisted-provider-secret",
+		"persisted-service-secret",
+		"persisted-skill-secret",
+		"skill-environment-secret",
+		"skill-config-secret",
+		"nested-skill-secret",
+	} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("export leaked secret %q: %s", secret, data)
+		}
+	}
+	var exported config.Config
+	if err := json.Unmarshal(data, &exported); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if exported.Provider.Model != "gpt-test" || exported.Context.MaxInputTokens != 12345 {
+		t.Fatalf("export lost nonsecret provider/context settings: %#v", exported)
+	}
+	if exported.Provider.APIKey != "" || exported.Service.Secret != "" {
+		t.Fatalf("export retained typed secrets: provider=%q service=%q", exported.Provider.APIKey, exported.Service.Secret)
+	}
+	if exported.Security.Approvals.ApprovalTokenTTLSeconds != 321 || exported.Security.Approvals.SecretAccess.Mode != config.ApprovalModeAllowlist {
+		t.Fatalf("export lost nonsecret approval settings: %#v", exported.Security.Approvals)
+	}
+	entry, ok := exported.Skills.Entries["demo"]
+	nested, nestedOK := entry.Config["nested"].(map[string]any)
+	if !ok || entry.APIKey != "" || entry.Env["DEMO_API_KEY"] != "" || entry.Env["DEMO_MODE"] != "fast" ||
+		entry.Config["DEMO_TOKEN"] != "" || entry.Config["tokenLimit"] != float64(777) ||
+		!nestedOK || nested["clientSecret"] != "" || nested["mode"] != "safe" {
+		t.Fatalf("export lost nonsecret skill settings: %#v", exported.Skills.Entries)
+	}
+	if info, err := os.Stat(exportPath); err != nil {
+		t.Fatalf("stat export: %v", err)
+	} else if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("export remains accessible to group/world: mode %o", info.Mode().Perm())
+	}
+}
+
 func TestPrintSetupReview_UsesActualSafetySummary(t *testing.T) {
 	for _, tc := range []struct {
 		mode safetymode.Mode

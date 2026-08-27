@@ -184,6 +184,51 @@ func TestListRunnerChatTurnsLimitReturnsNewestInChronologicalOrder(t *testing.T)
 	}
 }
 
+func TestRunnerChatStorePaginationCapsPositiveLimits(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	sess, err := d.CreateOrGetRunnerChatSession(ctx, RunnerChatSession{
+		ID: "rcs-pagination-bounds", AppSessionKey: "app-pagination-bounds", RunnerID: "codex", ContinuationMode: "replay",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	for i := 1; i <= MaxRunnerChatTurnListLimit+1; i++ {
+		if _, err := d.CreateRunnerChatTurn(ctx, RunnerChatTurn{
+			ID:               fmt.Sprintf("rct-pagination-%d", i),
+			SessionID:        sess.ID,
+			Status:           RunnerChatTurnStatusSucceeded,
+			UserMessage:      "pagination",
+			ContinuationMode: "replay",
+		}); err != nil {
+			t.Fatalf("CreateRunnerChatTurn(%d): %v", i, err)
+		}
+	}
+	turns, err := d.ListRunnerChatTurns(ctx, sess.ID, MaxRunnerChatTurnListLimit+1)
+	if err != nil {
+		t.Fatalf("ListRunnerChatTurns: %v", err)
+	}
+	if len(turns) != MaxRunnerChatTurnListLimit {
+		t.Fatalf("expected turn limit capped at %d, got %d", MaxRunnerChatTurnListLimit, len(turns))
+	}
+
+	turn := turns[len(turns)-1]
+	for seq := int64(1); seq <= MaxRunnerChatEventListLimit+1; seq++ {
+		if err := d.AppendRunnerChatEvent(ctx, RunnerChatEvent{
+			TurnID: turn.ID, SessionID: sess.ID, JobID: "job-pagination", Seq: seq, Type: "text_delta", Text: "event",
+		}); err != nil {
+			t.Fatalf("AppendRunnerChatEvent(%d): %v", seq, err)
+		}
+	}
+	events, err := d.ListRunnerChatEvents(ctx, turn.ID, 0, MaxRunnerChatEventListLimit+1)
+	if err != nil {
+		t.Fatalf("ListRunnerChatEvents: %v", err)
+	}
+	if len(events) != MaxRunnerChatEventListLimit {
+		t.Fatalf("expected event limit capped at %d, got %d", MaxRunnerChatEventListLimit, len(events))
+	}
+}
+
 func TestRunnerChatStoreReconcileOnStartup(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

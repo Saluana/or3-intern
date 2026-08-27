@@ -10,6 +10,14 @@ Most routes require `Authorization: Bearer <signed-token>`. Secure device enroll
 
 Requests and responses use JSON with snake_case field names. Unknown JSON fields and trailing body data are rejected.
 
+The default shared-secret role is `service-client`, which is read-only for
+execution data. It cannot start or cancel runner work, read jobs or runner-run
+output/events, or read runner-chat turn output. Those routes require a paired
+or session-authenticated `operator` or `admin`. Read-only clients may still
+inspect runner-chat session metadata (`GET /internal/v1/runner-chat/sessions`
+and `GET /internal/v1/runner-chat/sessions/{id}`). Connect-scoped paired
+devices retain their existing namespace-limited runner-chat surface.
+
 ## Runner Routes
 
 | Method | Path | Purpose |
@@ -17,10 +25,10 @@ Requests and responses use JSON with snake_case field names. Unknown JSON fields
 | `GET` | `/internal/v1/chat-runners` | List available external runners and the service default. |
 | `GET` | `/internal/v1/runner-chat/sessions` | List recent runner-chat sessions, optionally scoped by `app_session_key_prefix`; `limit` defaults to 50 and cannot exceed 100. |
 | `POST` | `/internal/v1/runner-chat/sessions` | Create or continue a runner chat session. |
-| `GET` | `/internal/v1/runner-chat/sessions/{id}/turns` | List turns chronologically; when `limit` is supplied, return the newest N turns rather than the oldest N. |
+| `GET` | `/internal/v1/runner-chat/sessions/{id}/turns` | List turns chronologically; `limit` defaults to 50 and cannot exceed 100. The newest N turns are returned rather than the oldest N. |
 | `POST` | `/internal/v1/runner-chat/sessions/{id}/turns` | Submit a foreground turn through a runner. |
 | `GET` | `/internal/v1/runner-chat/sessions/{id}/turns/{turn}` | Read one canonical turn. |
-| `GET` | `/internal/v1/runner-chat/sessions/{id}/turns/{turn}/events` | Read normalized turn events after an optional sequence cursor. |
+| `GET` | `/internal/v1/runner-chat/sessions/{id}/turns/{turn}/events` | Read normalized turn events after an optional sequence cursor; `limit` defaults to 200 and cannot exceed 1000. |
 | `GET` | `/internal/v1/runner-chat/sessions/{id}/turns/{turn}/stream` | Stream normalized turn events with replay-safe sequence cursors. |
 | `POST` | `/internal/v1/runner-chat/sessions/{id}/turns/{turn}/abort` | Stop a running turn. |
 | `POST` | `/internal/v1/runner-chat/sessions/{id}/turns/{turn}/approve` | Approve a pending runner action and resume the live native turn when possible. |
@@ -75,6 +83,7 @@ after the original approval event so replay cannot create a second prompt.
 | `GET` | `/internal/v1/cron/jobs` | List scheduled jobs. |
 | `POST` | `/internal/v1/cron/jobs` | Create a scheduled runner job. |
 | `GET` | `/internal/v1/files` | Browse allowed files. |
+| `POST` | `/internal/v1/files/staging/release` | Release one Chat-managed `.or3-upload-*` workspace batch after a known pre-start failure. |
 | `GET` | `/internal/v1/configure` | Read configurable settings. |
 | `POST` | `/internal/v1/configure` | Apply canonical settings. |
 | `GET` | `/internal/v1/capabilities` | Read runtime posture, approvals, network, runner, and auth capabilities. |
@@ -85,6 +94,16 @@ implicitly. Full-filesystem read access appears only when
 `filesystemBrowsing` is explicitly enabled. File operations use rooted,
 handle-relative traversal on supported platforms; symlinks may resolve within
 the selected root but cannot escape it.
+
+Chat attachment staging uses a generated direct-child directory in the
+workspace (`.or3-upload-<timestamp>-<random>`). The release endpoint accepts
+only that exact shape and only the `workspace` root. Successful turns keep
+their staged files available to the runner. Clients may release a batch
+immediately when an upload or start failure is known to have happened before
+the turn was accepted. Successful batches remain until a future runner-owned,
+reference-counted lifecycle can prove consumption is complete. Older Intern
+hosts may not expose the release endpoint, in which case clients retain files
+and report a cleanup warning rather than risking missing runner inputs.
 
 | `GET` | `/internal/v1/secure-connections/discovery` | Read secure connection capabilities. |
 | `POST` | `/internal/v1/secure-connections/pairing/approve` | Approve secure device enrollment. |

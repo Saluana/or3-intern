@@ -173,6 +173,13 @@ func (d *DB) ListRunningRunnerRuns(ctx context.Context) ([]RunnerRun, error) {
 	return d.listRunnerRunsByStatus(ctx, RunnerRunStatusRunning)
 }
 
+// ListApprovalRequiredRunnerRuns returns native runs paused for approval.
+// Startup reconciliation treats these like interrupted work because the live
+// native runtime cannot be safely resumed across a service restart.
+func (d *DB) ListApprovalRequiredRunnerRuns(ctx context.Context) ([]RunnerRun, error) {
+	return d.listRunnerRunsByStatus(ctx, RunnerRunStatusApprovalRequired)
+}
+
 func (d *DB) ListRunnerRuns(ctx context.Context, filter RunnerRunFilter) ([]RunnerRun, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -326,6 +333,53 @@ func (d *DB) MarkRunningRunnerRunsAborted(ctx context.Context, reason string) er
 	return err
 }
 
+// MarkRunnerRunApprovalRequired pauses a claimed run until its native
+// approval is resolved. The conditional update makes the transition
+// idempotent with an abort or timeout racing the approval event.
+func (d *DB) MarkRunnerRunApprovalRequired(ctx context.Context, runID string) error {
+	res, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_runs SET status=? WHERE id=? AND status=?`,
+		RunnerRunStatusApprovalRequired, runID, RunnerRunStatusRunning)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ResumeRunnerRunAfterApproval reopens a paused native run. Runs already
+// marked running are accepted for compatibility with older rows created
+// before approval-required persistence was introduced.
+func (d *DB) ResumeRunnerRunAfterApproval(ctx context.Context, runID string) error {
+	res, err := d.SQL.ExecContext(ctx,
+		`UPDATE runner_runs SET status=?, completed_at=0, error_message='' WHERE id=? AND status=?`,
+		RunnerRunStatusRunning, runID, RunnerRunStatusApprovalRequired)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		return nil
+	}
+	var status string
+	if err := d.SQL.QueryRowContext(ctx, `SELECT status FROM runner_runs WHERE id=?`, runID).Scan(&status); err != nil {
+		return err
+	}
+	if status == RunnerRunStatusRunning {
+		return nil
+	}
+	return sql.ErrNoRows
+}
+
 func (d *DB) AppendRunnerRunEvent(ctx context.Context, event RunnerRunEvent) error {
 	_, err := d.SQL.ExecContext(ctx,
 		`INSERT OR IGNORE INTO runner_run_events(run_id, job_id, seq, ts, type, stream, chunk, payload_json)
@@ -363,10 +417,10 @@ func (d *DB) FinalizeRunnerRun(ctx context.Context, runID string, final RunnerRu
 		`UPDATE runner_runs
 		 SET status=?, exit_code=?, stdout_preview=?, stderr_preview=?, final_text_preview=?,
 		     error_message=?, completed_at=?
-		 WHERE id=? AND status=?`,
+		 WHERE id=? AND status IN (?,?)`,
 		final.Status, final.ExitCode, final.StdoutPreview, final.StderrPreview, final.FinalTextPreview,
 		final.ErrorMessage, final.CompletedAt,
-		runID, RunnerRunStatusRunning)
+		runID, RunnerRunStatusRunning, RunnerRunStatusApprovalRequired)
 	if err != nil {
 		return err
 	}

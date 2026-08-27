@@ -154,10 +154,17 @@ func serviceAuthMiddlewareWithBrokerAndLimiter(cfg config.Config, broker *approv
 			next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
 			return
 		}
+		authenticatedRequest := serviceRequestWithAuthIdentity(r, identity)
+		// The shared service secret is intentionally read-only. Keep this
+		// policy at the authenticated boundary so every method variant reaches
+		// the same decision before a handler can start or expose a run.
+		if serviceRouteRequiresOperator(r) && !requireServiceRole(w, authenticatedRequest, approval.RoleOperator) {
+			return
+		}
 		if serviceWriteAuthChallengeIfNeeded(cfg, authSvc, w, r, requirement, identity, nil) {
 			return
 		}
-		next.ServeHTTP(w, serviceRequestWithAuthIdentity(r, identity))
+		next.ServeHTTP(w, authenticatedRequest)
 	})
 }
 
@@ -184,9 +191,45 @@ func serviceConnectIdentityAllowsRequest(identity serviceAuthIdentity, r *http.R
 		return true
 	case path == "/internal/v1/files/upload" && r.Method == http.MethodPost:
 		return true
+	case path == "/internal/v1/files/staging/release" && r.Method == http.MethodPost:
+		return true
 	default:
 		return false
 	}
+}
+
+// serviceRouteRequiresOperator identifies execution and execution-output
+// routes that must not be reachable with the default service-client role.
+// Session metadata remains available for read-only clients, but turn lists
+// include user/model output and therefore stay operator-only.
+func serviceRouteRequiresOperator(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := strings.TrimRight(strings.TrimSpace(r.URL.Path), "/")
+	switch {
+	case path == "/internal/v1/jobs" || strings.HasPrefix(path, "/internal/v1/jobs/"):
+		return true
+	case path == "/internal/v1/runner-runs" || strings.HasPrefix(path, "/internal/v1/runner-runs/"):
+		return true
+	case path == "/internal/v1/runner-chat/sessions" || strings.HasPrefix(path, "/internal/v1/runner-chat/sessions/"):
+		return !serviceRunnerChatMetadataRead(r)
+	default:
+		return false
+	}
+}
+
+func serviceRunnerChatMetadataRead(r *http.Request) bool {
+	if r == nil || r.URL == nil || r.Method != http.MethodGet {
+		return false
+	}
+	path := strings.TrimRight(strings.TrimSpace(r.URL.Path), "/")
+	const prefix = "/internal/v1/runner-chat/sessions"
+	if path == prefix {
+		return true
+	}
+	relative := strings.Trim(strings.TrimPrefix(path, prefix), "/")
+	return relative != "" && !strings.Contains(relative, "/")
 }
 
 func authenticateTerminalWebSocketTicketRequest(server *serviceServer, r *http.Request, now time.Time) (serviceAuthIdentity, bool) {

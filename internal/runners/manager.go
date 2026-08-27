@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	runnerRecoveryInterval = 5 * time.Second
-	runnerFinalizeTimeout  = 5 * time.Second
-	runnerDetectCacheTTL   = 30 * time.Second
+	runnerRecoveryInterval    = 5 * time.Second
+	runnerFinalizeTimeout     = 5 * time.Second
+	runnerDetectCacheTTL      = 30 * time.Second
+	runnerEventPersistTimeout = 500 * time.Millisecond
 )
 
 // Manager queues and runs external runner jobs.
@@ -48,13 +49,32 @@ type Manager struct {
 	// Empty means no restriction.
 	RestrictDir string
 
-	mu       sync.Mutex
-	started  bool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	notifyCh chan struct{}
-	wg       sync.WaitGroup
+	mu                       sync.Mutex
+	started                  bool
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	notifyCh                 chan struct{}
+	wg                       sync.WaitGroup
+	continuations            map[string]*nativeContinuation
+	stopping                 bool
+	eventPersistenceStates   map[string]*runnerEventPersistenceState
+	eventPersistenceWarnings sync.Map
 }
+
+type nativeContinuation struct {
+	runID  string
+	jobID  string
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type runnerEventPersistenceState struct {
+	mu     sync.Mutex
+	used   int64
+	warned bool
+}
+
+const defaultMaxPersistedOutputBytes int64 = 10 * 1024 * 1024
 
 // Start launches the background workers and resumes queued jobs.
 func (m *Manager) Start(ctx context.Context) error {
@@ -65,10 +85,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("runner db not configured")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.started {
+		m.mu.Unlock()
 		return nil
 	}
+	m.stopping = false
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -93,10 +114,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.Registry.RefreshAllAsync(m.detectOptions(m.Cfg))
 	running, err := m.DB.ListRunningRunnerRuns(ctx)
 	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	approvalRequired, err := m.DB.ListApprovalRequiredRunnerRuns(ctx)
+	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	queued, err := m.DB.ListQueuedRunnerRuns(ctx)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	m.ctx, m.cancel = context.WithCancel(ctx)
@@ -109,7 +137,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.wg.Add(1)
 	go m.recoveryLoop()
+	// Reconciliation and worker notification acquire m.mu internally. Publish
+	// the started state first, then release the lifecycle lock before invoking
+	// either path so startup cannot deadlock on interrupted or queued runs.
+	m.mu.Unlock()
 	for _, run := range running {
+		m.reconcileInterruptedRun(run, "aborted by service restart")
+	}
+	for _, run := range approvalRequired {
 		m.reconcileInterruptedRun(run, "aborted by service restart")
 	}
 	if len(queued) > 0 {
@@ -126,16 +161,24 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return nil
 	}
 	m.mu.Lock()
-	if !m.started {
+	if !m.started && len(m.continuations) == 0 {
 		m.mu.Unlock()
 		return nil
 	}
 	cancel := m.cancel
 	m.started = false
+	m.stopping = true
+	continuations := make([]*nativeContinuation, 0, len(m.continuations))
+	for _, continuation := range m.continuations {
+		continuations = append(continuations, continuation)
+	}
 	runtimes := m.Runtimes
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	for _, continuation := range continuations {
+		continuation.cancel()
 	}
 	done := make(chan struct{})
 	go func() {
@@ -150,6 +193,18 @@ func (m *Manager) Stop(ctx context.Context) error {
 	case <-done:
 	case <-ctx.Done():
 		firstErr = ctx.Err()
+	}
+	if firstErr == nil {
+		for _, continuation := range continuations {
+			select {
+			case <-continuation.done:
+			case <-ctx.Done():
+				firstErr = ctx.Err()
+			}
+			if firstErr != nil {
+				break
+			}
+		}
 	}
 	// Best-effort native runtime shutdown. Use a bounded timeout so a
 	// stuck managed process doesn't block the service indefinitely.
@@ -307,41 +362,76 @@ func (m *Manager) Abort(ctx context.Context, id string) error {
 	if m == nil || m.DB == nil {
 		return fmt.Errorf("runner manager is not available")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if m.Runtimes != nil {
 		m.Runtimes.ForEach(func(runtime NativeRunnerRuntime) {
 			_ = runtime.Abort(ctx, id)
 		})
 	}
-	// First try to cancel a running job via JobRegistry
-	if m.Jobs != nil && m.Jobs.Cancel(id) {
-		return nil
+	if continuation := m.cancelContinuation(id); continuation != nil {
+		select {
+		case <-continuation.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	// Then try to abort a queued job in the DB
-	run, ok, err := m.DB.AbortQueuedRunnerRun(ctx, id, "aborted before execution")
+	// First try to cancel a running job via JobRegistry
+	jobCancelled := false
+	if m.Jobs != nil {
+		jobCancelled = m.Jobs.Cancel(id)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	run, exists, err := m.DB.GetRunnerRun(ctx, id)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		stored, exists, lookupErr := m.DB.GetRunnerRun(ctx, id)
-		if lookupErr != nil {
-			return lookupErr
+	if !exists {
+		if jobCancelled {
+			return nil
 		}
-		if !exists {
-			return fmt.Errorf("job not found")
+		return fmt.Errorf("job not found")
+	}
+	switch run.Status {
+	case db.RunnerRunStatusApprovalRequired:
+		// Paused jobs are terminal in the registry so approval subscribers do
+		// not keep waiting. Reopen before publishing the aborted completion so
+		// reject/cancel updates that same job instead of leaving its visible
+		// status stuck at approval_required.
+		if m.Jobs != nil {
+			m.Jobs.Reopen(run.JobID)
 		}
-		if stored.Status == db.RunnerRunStatusQueued {
+		m.finalizeRun(ctx, run, db.RunnerRunStatusAborted, "aborted by user", ProcessOutput{ExitCode: -1})
+		return nil
+	case db.RunnerRunStatusQueued:
+		aborted, ok, err := m.DB.AbortQueuedRunnerRun(ctx, id, "aborted before execution")
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return fmt.Errorf("job is not abortable")
 		}
+		if m.Jobs != nil {
+			m.Jobs.Complete(id, "aborted", map[string]any{
+				"message":   "aborted before execution",
+				"runner_id": aborted.RunnerID,
+				"run_id":    aborted.ID,
+			})
+		}
+		return nil
+	case db.RunnerRunStatusRunning:
+		if jobCancelled {
+			return nil
+		}
 		return fmt.Errorf("job is not abortable")
+	default:
+		// Aborting an already terminal run is idempotent. This is important
+		// when an approval decision races a timeout or shutdown finalizer.
+		return nil
 	}
-	if m.Jobs != nil {
-		m.Jobs.Complete(id, "aborted", map[string]any{
-			"message":   "aborted before execution",
-			"runner_id": run.RunnerID,
-			"run_id":    run.ID,
-		})
-	}
-	return nil
 }
 
 func (m *Manager) workerLoop() {
@@ -402,6 +492,13 @@ func (m *Manager) runOnce() (bool, error) {
 
 func (m *Manager) executeRun(run db.RunnerRun) {
 	defer m.recoverRunPanic(run)
+	keepEventPersistenceState := false
+	defer func() {
+		if !keepEventPersistenceState {
+			m.eventPersistenceWarnings.Delete(run.ID)
+			m.clearEventPersistenceState(run.ID)
+		}
+	}()
 	timeout := time.Duration(run.TimeoutSeconds) * time.Second
 	var runCtx context.Context
 	var cancel context.CancelFunc
@@ -425,7 +522,18 @@ func (m *Manager) executeRun(run db.RunnerRun) {
 
 	if out, handled := m.tryExecuteNativeRun(runCtx, run); handled {
 		if out.PendingNativeApproval {
-			m.pauseRunForNativeApproval(run, out)
+			if err := runCtx.Err(); err != nil {
+				finalStatus := db.RunnerRunStatusAborted
+				errMsg := "aborted"
+				if errors.Is(err, context.DeadlineExceeded) {
+					finalStatus = db.RunnerRunStatusTimedOut
+					errMsg = "timed out"
+				}
+				m.emitCompletion(run, finalStatus, out)
+				m.finalizeRun(runCtx, run, finalStatus, errMsg, out)
+				return
+			}
+			keepEventPersistenceState = m.pauseRunForNativeApproval(run, out)
 			return
 		}
 		finalStatus := db.RunnerRunStatusSucceeded
@@ -690,8 +798,16 @@ func (m *Manager) recoverRunPanic(run db.RunnerRun) {
 	}
 }
 
-func (m *Manager) pauseRunForNativeApproval(run db.RunnerRun, out ProcessOutput) {
+func (m *Manager) pauseRunForNativeApproval(run db.RunnerRun, out ProcessOutput) bool {
 	status := db.RunnerRunStatusApprovalRequired
+	if m.DB != nil {
+		if err := m.DB.MarkRunnerRunApprovalRequired(context.Background(), run.ID); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("runner manager: pause run for approval failed: run=%s err=%v", run.ID, err)
+			}
+			return false
+		}
+	}
 	m.emitCompletion(run, status, out)
 	if m.Jobs != nil {
 		m.Jobs.PauseForApproval(run.JobID, map[string]any{
@@ -700,6 +816,7 @@ func (m *Manager) pauseRunForNativeApproval(run db.RunnerRun, out ProcessOutput)
 			"status":    status,
 		})
 	}
+	return true
 }
 
 // ResumeNativeRunAfterApproval continues a native run that paused for operator
@@ -707,6 +824,9 @@ func (m *Manager) pauseRunForNativeApproval(run db.RunnerRun, out ProcessOutput)
 func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.RunnerRun) error {
 	if m == nil {
 		return errors.New("runner manager not configured")
+	}
+	if m.DB == nil {
+		return errors.New("runner db not configured")
 	}
 	chatReq, ok := buildRuntimeChatRequest(run)
 	if !ok {
@@ -731,8 +851,50 @@ func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.Runne
 	} else if len(additionalEnv) > 0 {
 		env = mergeEnvOverlay(env, additionalEnv)
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	continuationCtx, cancel := context.WithCancel(ctx)
+	continuation := &nativeContinuation{runID: run.ID, jobID: run.JobID, cancel: cancel, done: make(chan struct{})}
+	keepEventPersistenceState := false
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		cancel()
+		return context.Canceled
+	}
+	if m.continuations == nil {
+		m.continuations = map[string]*nativeContinuation{}
+	}
+	if _, exists := m.continuations[run.JobID]; exists {
+		m.mu.Unlock()
+		cancel()
+		return errors.New("native approval continuation already running")
+	}
+	m.continuations[run.JobID] = continuation
+	m.mu.Unlock()
+	defer func() {
+		cancel()
+		m.mu.Lock()
+		if current := m.continuations[run.JobID]; current == continuation {
+			delete(m.continuations, run.JobID)
+		}
+		m.mu.Unlock()
+		if !keepEventPersistenceState {
+			m.eventPersistenceWarnings.Delete(run.ID)
+			m.clearEventPersistenceState(run.ID)
+		}
+		close(continuation.done)
+	}()
+	if err := m.DB.ResumeRunnerRunAfterApproval(continuationCtx, run.ID); err != nil {
+		return fmt.Errorf("resume runner run after approval: %w", err)
+	}
+	run.Status = db.RunnerRunStatusRunning
+	if m.Jobs != nil {
+		m.Jobs.AttachCancel(run.JobID, cancel)
+	}
 	var maxSeq int64
-	out, err := continuer.ContinuePendingTurn(ctx, NativeRuntimeExecuteRequest{
+	out, err := continuer.ContinuePendingTurn(continuationCtx, NativeRuntimeExecuteRequest{
 		Run:    run,
 		Chat:   chatReq,
 		Config: cfg,
@@ -749,15 +911,26 @@ func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.Runne
 	})
 	out.EventSeq = maxSeq
 	if errors.Is(err, errNativeApprovalRequired) {
-		m.pauseRunForNativeApproval(run, out)
+		if continuationErr := continuationCtx.Err(); continuationErr != nil {
+			finalStatus := db.RunnerRunStatusAborted
+			errMsg := "aborted"
+			if errors.Is(continuationErr, context.DeadlineExceeded) {
+				finalStatus = db.RunnerRunStatusTimedOut
+				errMsg = "timed out"
+			}
+			m.emitCompletion(run, finalStatus, out)
+			m.finalizeRun(continuationCtx, run, finalStatus, errMsg, out)
+			return nil
+		}
+		keepEventPersistenceState = m.pauseRunForNativeApproval(run, out)
 		return nil
 	}
 	finalStatus := db.RunnerRunStatusSucceeded
 	errMsg := ""
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if errors.Is(continuationCtx.Err(), context.DeadlineExceeded) {
 		finalStatus = db.RunnerRunStatusTimedOut
 		errMsg = "timed out"
-	} else if errors.Is(ctx.Err(), context.Canceled) {
+	} else if errors.Is(continuationCtx.Err(), context.Canceled) {
 		finalStatus = db.RunnerRunStatusAborted
 		errMsg = "aborted"
 	} else if err != nil || out.ExitCode != 0 {
@@ -770,11 +943,28 @@ func (m *Manager) ResumeNativeRunAfterApproval(ctx context.Context, run db.Runne
 		}
 	}
 	m.emitCompletion(run, finalStatus, out)
-	m.finalizeRun(ctx, run, finalStatus, errMsg, out)
+	m.finalizeRun(continuationCtx, run, finalStatus, errMsg, out)
 	return err
 }
 
+func (m *Manager) cancelContinuation(id string) *nativeContinuation {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, continuation := range m.continuations {
+		if continuation.jobID == id || continuation.runID == id {
+			continuation.cancel()
+			return continuation
+		}
+	}
+	return nil
+}
+
 func (m *Manager) finalizeRun(ctx context.Context, run db.RunnerRun, status, errMsg string, out ProcessOutput) {
+	defer m.eventPersistenceWarnings.Delete(run.ID)
+	defer m.clearEventPersistenceState(run.ID)
 	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runnerFinalizeTimeout)
 	defer cancel()
 	cfg := m.configSnapshot()
@@ -822,21 +1012,197 @@ func (m *Manager) finalizeRun(ctx context.Context, run db.RunnerRun, status, err
 	}
 }
 
-func (m *Manager) persistEvent(run db.RunnerRun, e RunnerRunEvent) {
-	payloadJSON := ""
-	if len(e.Payload) > 0 {
-		payloadJSON = string(e.Payload)
+func (m *Manager) eventPersistenceState(runID string) *runnerEventPersistenceState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.eventPersistenceStates == nil {
+		m.eventPersistenceStates = map[string]*runnerEventPersistenceState{}
 	}
-	_ = m.DB.AppendRunnerRunEvent(context.Background(), db.RunnerRunEvent{
-		RunID:       run.ID,
-		JobID:       run.JobID,
+	state := m.eventPersistenceStates[runID]
+	if state == nil {
+		state = &runnerEventPersistenceState{}
+		m.eventPersistenceStates[runID] = state
+	}
+	return state
+}
+
+func (m *Manager) clearEventPersistenceState(runID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	delete(m.eventPersistenceStates, runID)
+	m.mu.Unlock()
+}
+
+func persistedOutputBudget(cfg config.RunnersConfig) int64 {
+	if cfg.MaxPersistedOutputBytes <= 0 {
+		return defaultMaxPersistedOutputBytes
+	}
+	return cfg.MaxPersistedOutputBytes
+}
+
+func isBudgetedRunnerEvent(eventType string) bool {
+	return eventType == "output" || eventType == "structured"
+}
+
+func truncationPayload(originalType string, droppedBytes int64) []byte {
+	payload, _ := json.Marshal(map[string]any{
+		"truncated":     true,
+		"original_type": originalType,
+		"dropped_bytes": droppedBytes,
+	})
+	return payload
+}
+
+// boundPersistedRunnerEvent keeps each durable row bounded and, for output
+// events, consumes the remaining per-run output budget. The live event is
+// still published by the caller with its original content.
+func boundPersistedRunnerEvent(e RunnerRunEvent, maxBytes, available int64) (db.RunnerRunEvent, int64, int64, bool, bool) {
+	persisted := db.RunnerRunEvent{
 		Seq:         e.Seq,
 		TS:          e.TS,
 		Type:        e.Type,
 		Stream:      e.Stream,
 		Chunk:       e.Chunk,
-		PayloadJSON: payloadJSON,
+		PayloadJSON: string(e.Payload),
+	}
+	rawBytes := int64(len(e.Chunk) + len(e.Payload))
+	budgeted := isBudgetedRunnerEvent(e.Type)
+	limit := maxBytes
+	if budgeted {
+		limit = available
+	}
+	if rawBytes == 0 || rawBytes <= limit {
+		if budgeted {
+			return persisted, rawBytes, 0, false, true
+		}
+		return persisted, 0, 0, false, true
+	}
+
+	marker := truncationPayload(e.Type, rawBytes)
+	if int64(len(marker)) > limit {
+		// A very small configured cap cannot fit the marker. Keep structural
+		// events (especially completion) with empty output fields; output
+		// events are omitted once their budget is exhausted.
+		if budgeted {
+			return db.RunnerRunEvent{}, 0, rawBytes, true, false
+		}
+		persisted.Chunk = ""
+		persisted.PayloadJSON = ""
+		return persisted, 0, rawBytes, true, true
+	}
+	for i := 0; i < 3; i++ {
+		chunkBudget := int(limit) - len(marker)
+		if chunkBudget < 0 {
+			chunkBudget = 0
+		}
+		chunk := truncateString(e.Chunk, chunkBudget)
+		storedBytes := int64(len(chunk) + len(marker))
+		droppedBytes := rawBytes - storedBytes
+		nextMarker := truncationPayload(e.Type, droppedBytes)
+		persisted.Chunk = chunk
+		persisted.PayloadJSON = string(nextMarker)
+		if len(nextMarker) == len(marker) || int64(len(nextMarker)) > limit {
+			marker = nextMarker
+			break
+		}
+		marker = nextMarker
+	}
+	if int64(len(persisted.PayloadJSON))+int64(len(persisted.Chunk)) > limit {
+		if budgeted {
+			return db.RunnerRunEvent{}, 0, rawBytes, true, false
+		}
+		persisted.Chunk = ""
+		persisted.PayloadJSON = ""
+		return persisted, 0, rawBytes, true, true
+	}
+	if budgeted {
+		persisted.Type = "output_truncated"
+		storedBytes := int64(len(persisted.Chunk) + len(persisted.PayloadJSON))
+		return persisted, storedBytes, rawBytes - storedBytes, true, true
+	}
+	return persisted, 0, rawBytes - int64(len(persisted.Chunk)+len(persisted.PayloadJSON)), true, true
+}
+
+// persistEvent records an event without allowing a slow or unavailable
+// database to stall the runner stream. Live JobRegistry publication still
+// proceeds at each call site. Durable output/structured rows consume the
+// configured per-run byte budget; once exhausted, only structural events are
+// retained and one live output_truncated marker is published.
+func (m *Manager) persistEvent(run db.RunnerRun, e RunnerRunEvent) bool {
+	if m == nil {
+		log.Printf("runner manager: persist event unavailable: run=%s job=%s seq=%d type=%s; replay may be incomplete", run.ID, run.JobID, e.Seq, e.Type)
+		return false
+	}
+	if _, degraded := m.eventPersistenceWarnings.Load(run.ID); degraded {
+		// Avoid adding a bounded database timeout to every subsequent live
+		// event after the store has already entered a degraded state.
+		return false
+	}
+	if m.DB == nil {
+		m.reportEventPersistenceFailure(run, e, "database unavailable")
+		return false
+	}
+	state := m.eventPersistenceState(run.ID)
+	maxBytes := persistedOutputBudget(m.configSnapshot())
+	state.mu.Lock()
+	persisted, usedBytes, droppedBytes, truncated, ok := boundPersistedRunnerEvent(e, maxBytes, maxBytes-state.used)
+	state.used += usedBytes
+	firstTruncation := truncated && !state.warned
+	if firstTruncation {
+		state.warned = true
+	}
+	state.mu.Unlock()
+	if firstTruncation && m.Jobs != nil {
+		m.Jobs.Publish(run.JobID, "output_truncated", map[string]any{
+			"code":          "runner_output_persisted_budget",
+			"run_id":        run.ID,
+			"dropped_bytes": droppedBytes,
+			"max_bytes":     maxBytes,
+			"message":       "durable runner output reached its configured storage budget; live output remains available",
+		})
+	}
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runnerEventPersistTimeout)
+	defer cancel()
+	err := m.DB.AppendRunnerRunEvent(ctx, db.RunnerRunEvent{
+		RunID:       run.ID,
+		JobID:       run.JobID,
+		Seq:         e.Seq,
+		TS:          e.TS,
+		Type:        persisted.Type,
+		Stream:      persisted.Stream,
+		Chunk:       persisted.Chunk,
+		PayloadJSON: persisted.PayloadJSON,
 	})
+	if err != nil {
+		m.reportEventPersistenceFailure(run, e, err.Error())
+		return false
+	}
+	return true
+}
+
+func (m *Manager) reportEventPersistenceFailure(run db.RunnerRun, e RunnerRunEvent, reason string) {
+	if _, warned := m.eventPersistenceWarnings.LoadOrStore(run.ID, struct{}{}); warned {
+		return
+	}
+	log.Printf("runner manager: persist event failed: run=%s job=%s seq=%d type=%s err=%s; replay may be incomplete", run.ID, run.JobID, e.Seq, e.Type, reason)
+	if m.Jobs != nil {
+		m.Jobs.Publish(run.JobID, "warning", runnerEventPersistenceWarning(run, e))
+	}
+}
+
+func runnerEventPersistenceWarning(run db.RunnerRun, e RunnerRunEvent) map[string]any {
+	return map[string]any{
+		"code":       "runner_event_persistence_degraded",
+		"run_id":     run.ID,
+		"seq":        e.Seq,
+		"event_type": e.Type,
+		"message":    "live runner output is available, but replay history may be incomplete",
+	}
 }
 
 func (m *Manager) reconcileInterruptedRun(run db.RunnerRun, reason string) {
@@ -852,6 +1218,8 @@ func (m *Manager) reconcileInterruptedRun(run db.RunnerRun, reason string) {
 		}
 		return
 	}
+	m.eventPersistenceWarnings.Delete(run.ID)
+	m.clearEventPersistenceState(run.ID)
 	if m.Jobs != nil {
 		m.Jobs.Publish(run.JobID, "completion", map[string]any{
 			"status":  db.RunnerRunStatusAborted,

@@ -52,8 +52,10 @@ The service matches this prefix literally, orders by `updated_at` descending,
 and rejects limits above 100.
 
 `client.listTurns(sessionId, { limit })` returns the newest bounded turn window
-in chronological order, so rehydration retains the current/active tail without
-reversing timeline rendering.
+in chronological order (default 50, maximum 100), so rehydration retains the
+current/active tail without reversing timeline rendering. Event pages default
+to 200 and accept at most 1000 events; the client rejects larger values before
+making a request.
 
 Runner-chat actions are fail-closed. Consumers should read the canonical
 `chat_capabilities.cancel`, `chat_capabilities.approvalDecisions`, and

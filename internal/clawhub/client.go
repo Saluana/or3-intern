@@ -166,9 +166,10 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchR
 
 // Inspect fetches metadata for slug and resolves the version that would be installed.
 func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return SkillInfo{}, fmt.Errorf("slug required")
+	var err error
+	slug, err = validateSlug(slug)
+	if err != nil {
+		return SkillInfo{}, err
 	}
 	var response struct {
 		Skill *struct {
@@ -210,9 +211,10 @@ func (c *Client) Inspect(ctx context.Context, slug, version string) (SkillInfo, 
 
 // Resolve matches fingerprint against known releases for slug.
 func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (ResolveResult, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return ResolveResult{}, fmt.Errorf("slug required")
+	var err error
+	slug, err = validateSlug(slug)
+	if err != nil {
+		return ResolveResult{}, err
 	}
 	url := c.apiURL(apiResolve)
 	url.RawQuery = queryString(map[string]string{
@@ -247,9 +249,10 @@ func (c *Client) Resolve(ctx context.Context, slug, fingerprint string) (Resolve
 
 // Download fetches the zipped skill bundle for slug and version.
 func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, error) {
-	slug = sanitizeSlug(slug)
-	if slug == "" {
-		return nil, fmt.Errorf("slug required")
+	var err error
+	slug, err = validateSlug(slug)
+	if err != nil {
+		return nil, err
 	}
 	url := c.apiURL(apiDownload)
 	url.RawQuery = queryString(map[string]string{
@@ -281,22 +284,26 @@ func (c *Client) Download(ctx context.Context, slug, version string) ([]byte, er
 
 // Install downloads, scans, and installs slug into destDir.
 func (c *Client) Install(ctx context.Context, slug, version, destDir string, opts InstallOptions) (InstallResult, error) {
-	info, err := c.Inspect(ctx, slug, version)
+	validatedSlug, err := validateSlug(slug)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	info, err := c.Inspect(ctx, validatedSlug, version)
 	if err != nil {
 		return InstallResult{}, err
 	}
 	if strings.TrimSpace(info.SelectedVersion) == "" {
 		return InstallResult{}, fmt.Errorf("could not resolve version for %s", slug)
 	}
-	zipBytes, err := c.Download(ctx, slug, info.SelectedVersion)
+	zipBytes, err := c.Download(ctx, validatedSlug, info.SelectedVersion)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	target := filepath.Join(destDir, sanitizeSlug(slug))
+	target := filepath.Join(destDir, validatedSlug)
 	if err := installZip(zipBytes, target, SkillOrigin{
 		Version:          2,
 		Registry:         c.RegistryURL,
-		Slug:             sanitizeSlug(slug),
+		Slug:             validatedSlug,
 		Owner:            info.Owner,
 		InstalledVersion: info.SelectedVersion,
 		InstalledAt:      time.Now().UnixMilli(),
@@ -752,9 +759,10 @@ func contentFindings(rel, content string) []ScanFinding {
 
 // RemoveSkill removes the named installed skill from root.
 func RemoveSkill(root, name string) error {
-	name = sanitizeSlug(name)
-	if name == "" {
-		return fmt.Errorf("skill name required")
+	var err error
+	name, err = validateSlug(name)
+	if err != nil {
+		return err
 	}
 	return os.RemoveAll(filepath.Join(root, name))
 }
@@ -787,12 +795,24 @@ func (c *Client) getJSON(ctx context.Context, rawURL string, dest any) error {
 	return json.NewDecoder(resp.Body).Decode(dest)
 }
 
-func sanitizeSlug(slug string) string {
-	slug = strings.TrimSpace(slug)
-	if slug == "" || strings.Contains(slug, "..") || strings.Contains(slug, "/") || strings.Contains(slug, "\\") {
-		return ""
+func validateSlug(raw string) (string, error) {
+	slug := strings.TrimSpace(raw)
+	if slug == "" {
+		return "", fmt.Errorf("slug required")
 	}
-	return slug
+	if slug == "." || slug == ".." ||
+		strings.ContainsAny(slug, `/\\`) ||
+		strings.IndexByte(slug, 0) >= 0 ||
+		filepath.IsAbs(slug) || filepath.VolumeName(slug) != "" ||
+		filepath.Clean(slug) != slug {
+		return "", fmt.Errorf("invalid skill slug")
+	}
+	return slug, nil
+}
+
+func sanitizeSlug(slug string) string {
+	validated, _ := validateSlug(slug)
+	return validated
 }
 
 func safeZipPath(path string) (string, bool) {

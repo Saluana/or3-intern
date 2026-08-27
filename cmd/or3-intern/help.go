@@ -152,11 +152,11 @@ var helpTopics = map[string]helpCommand{
 		Description: []string{
 			"Settings is the recommended entrypoint for configuration. Setup, init, configure, and doctor --fix stay available for first-run, compatibility, and repair workflows.",
 			"Shows a task-based settings home for AI Provider, Workspace Folder, Safety, Channels, Memory, and Advanced options.",
-			"Use --section to jump to a task, or --export to write the current advanced JSON config without making JSON editing the default path.",
+			"Use --section to jump to a task, or --export to write a redacted advanced JSON config template without making JSON editing the default path. Credential values are omitted; this is not a credentials backup.",
 		},
 		Flags: []helpItem{
 			{Name: "--section <name>", Description: "Open a task section: provider, workspace, safety, channels, memory, advanced"},
-			{Name: "--export <path|->", Description: "Export current config JSON to a file or stdout"},
+			{Name: "--export <path|->", Description: "Export redacted config template to a file or stdout"},
 			{Name: "--advanced", Description: "Show advanced settings actions on the home screen"},
 		},
 		Examples: []string{"or3-intern settings", "or3-intern settings --section safety", "or3-intern settings --export config.json"},

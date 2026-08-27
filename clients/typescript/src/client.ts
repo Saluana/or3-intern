@@ -448,7 +448,11 @@ export function createInternClient(
     ) =>
         transport.request(
             queryPath(`${sessionPath(sessionId)}/turns`, {
-                limit: positiveInteger(input.limit, 'Turn limit'),
+                limit: boundedPositiveInteger(
+                    input.limit,
+                    'Turn limit',
+                    100
+                ),
             }),
             {
                 ...callOptions,
@@ -492,7 +496,11 @@ export function createInternClient(
                     input.afterSeq,
                     'Event cursor'
                 ),
-                limit: positiveInteger(input.limit, 'Event limit'),
+                limit: boundedPositiveInteger(
+                    input.limit,
+                    'Event limit',
+                    1000
+                ),
             }),
             {
                 ...callOptions,

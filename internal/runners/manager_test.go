@@ -2,10 +2,12 @@ package runners
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,36 @@ type stubRunnerAdapter struct {
 	spec RunnerSpec
 	cmd  CommandSpec
 	err  error
+}
+
+type blockingNativeContinuationRuntime struct {
+	fakeRuntime
+	started    chan struct{}
+	startOnce  sync.Once
+	stopCalled chan struct{}
+}
+
+type approvalOnContextDoneRuntime struct {
+	fakeRuntime
+}
+
+func (r *approvalOnContextDoneRuntime) Execute(ctx context.Context, _ NativeRuntimeExecuteRequest) (ProcessOutput, error) {
+	<-ctx.Done()
+	return ProcessOutput{ExitCode: -1}, errNativeApprovalRequired
+}
+
+func (r *blockingNativeContinuationRuntime) ContinuePendingTurn(ctx context.Context, _ NativeRuntimeExecuteRequest) (ProcessOutput, error) {
+	r.startOnce.Do(func() { close(r.started) })
+	<-ctx.Done()
+	// A runtime may surface its pending request while cancellation is being
+	// delivered. The manager must still finalize the run instead of pausing it
+	// again after Stop/Abort.
+	return ProcessOutput{ExitCode: -1, StderrPreview: ctx.Err().Error()}, errNativeApprovalRequired
+}
+
+func (r *blockingNativeContinuationRuntime) Stop(context.Context) error {
+	r.stopCalled <- struct{}{}
+	return nil
 }
 
 func (a *stubRunnerAdapter) ID() RunnerID        { return a.id }
@@ -160,6 +192,70 @@ func TestManagerStartStopAndReconcile(t *testing.T) {
 	}
 }
 
+func TestApprovalRequiredRowsAreAbortedOnRestart(t *testing.T) {
+	database := openRunnerTestDB(t)
+	jobsRegistry := jobs.NewRegistry(0, 0)
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{
+		ID:       "acr-reconcile-approval",
+		JobID:    "job-reconcile-approval",
+		RunnerID: string(RunnerCodex),
+		Status:   db.RunnerRunStatusApprovalRequired,
+	})
+	jobsRegistry.RegisterWithID(run.JobID, "runner:codex")
+	sess, err := database.CreateOrGetRunnerChatSession(context.Background(), db.RunnerChatSession{
+		ID:               "rcs-reconcile-approval",
+		AppSessionKey:    "app-reconcile-approval",
+		RunnerID:         string(RunnerCodex),
+		ContinuationMode: string(ContinuationNative),
+	})
+	if err != nil {
+		t.Fatalf("CreateOrGetRunnerChatSession: %v", err)
+	}
+	turn, err := database.CreateRunnerChatTurn(context.Background(), db.RunnerChatTurn{
+		ID:               "rct-reconcile-approval",
+		SessionID:        sess.ID,
+		Status:           db.RunnerChatTurnStatusApprovalRequired,
+		UserMessage:      "waiting",
+		ContinuationMode: string(ContinuationNative),
+	})
+	if err != nil {
+		t.Fatalf("CreateRunnerChatTurn: %v", err)
+	}
+
+	manager := &Manager{
+		DB:   database,
+		Jobs: jobsRegistry,
+		Cfg: config.RunnersConfig{
+			DefaultMode:           string(RunnerModeSafeEdit),
+			DefaultIsolation:      string(IsolationHostWorkspaceWrite),
+			DefaultTimeoutSeconds: 60,
+			MaxTimeoutSeconds:     120,
+		},
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	finalRun := mustGetRunnerRun(t, database, run.ID)
+	if finalRun.Status != db.RunnerRunStatusAborted || finalRun.ErrorMessage != "aborted by service restart" {
+		t.Fatalf("runner approval row not reconciled: %#v", finalRun)
+	}
+
+	chatManager := &ChatManager{DB: database}
+	if err := chatManager.ReconcileOnStartup(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnStartup: %v", err)
+	}
+	finalTurn, err := database.GetRunnerChatTurn(context.Background(), turn.ID)
+	if err != nil {
+		t.Fatalf("GetRunnerChatTurn: %v", err)
+	}
+	if finalTurn.Status != db.RunnerChatTurnStatusAborted || finalTurn.ErrorMessage != "service restarted" {
+		t.Fatalf("chat approval row not reconciled: %#v", finalTurn)
+	}
+}
+
 func TestManagerRecoverRunPanicFinalizesRun(t *testing.T) {
 	manager, database, jobs := newTestManager(t)
 	run := mustInsertRunnerRun(t, database, db.RunnerRun{
@@ -202,6 +298,274 @@ func TestManagerStopTimeout(t *testing.T) {
 		t.Fatalf("expected context canceled, got %v", err)
 	}
 	close(unblock)
+}
+
+func TestManagerPauseApprovalMovesRunOutOfRunningAndAbortFinalizes(t *testing.T) {
+	manager, database, jobsRegistry := newTestManager(t)
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{
+		ID:     "acr-approval-pause",
+		JobID:  "job-approval-pause",
+		Status: db.RunnerRunStatusRunning,
+	})
+	jobsRegistry.RegisterWithID(run.JobID, "runner:codex")
+
+	manager.pauseRunForNativeApproval(run, ProcessOutput{ExitCode: -1, StderrPreview: "approval required"})
+	paused := mustGetRunnerRun(t, database, run.ID)
+	if paused.Status != db.RunnerRunStatusApprovalRequired {
+		t.Fatalf("expected approval_required run, got %q", paused.Status)
+	}
+	if err := manager.Abort(context.Background(), run.JobID); err != nil {
+		t.Fatalf("Abort paused run: %v", err)
+	}
+	final := mustGetRunnerRun(t, database, run.ID)
+	if final.Status != db.RunnerRunStatusAborted {
+		t.Fatalf("expected paused run aborted, got %q", final.Status)
+	}
+}
+
+func TestManagerStopCancelsTrackedApprovalContinuation(t *testing.T) {
+	manager, database, jobsRegistry := newTestManager(t)
+	runtime := &blockingNativeContinuationRuntime{
+		fakeRuntime: fakeRuntime{id: RunnerCodex},
+		started:     make(chan struct{}),
+		stopCalled:  make(chan struct{}, 1),
+	}
+	registry := &RunnerRuntimeRegistry{}
+	registry.Register(runtime)
+	manager.Runtimes = registry
+	metaJSON, err := json.Marshal(map[string]any{
+		"runner_chat_session_id":        "chat-session",
+		"runner_chat_turn_id":           "chat-turn",
+		"runner_chat_continuation_mode": string(ContinuationNative),
+		"runner_chat_user_message":      "continue",
+	})
+	if err != nil {
+		t.Fatalf("marshal run metadata: %v", err)
+	}
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{
+		ID:             "acr-approval-continuation",
+		JobID:          "job-approval-continuation",
+		RunnerID:       string(RunnerCodex),
+		Status:         db.RunnerRunStatusApprovalRequired,
+		MetaJSON:       string(metaJSON),
+		TimeoutSeconds: 0,
+	})
+	jobsRegistry.RegisterWithID(run.JobID, "runner:codex")
+
+	result := make(chan error, 1)
+	go func() { result <- manager.ResumeNativeRunAfterApproval(context.Background(), run) }()
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("native continuation did not start")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("native continuation did not exit after Stop")
+	}
+	select {
+	case <-runtime.stopCalled:
+	case <-time.After(time.Second):
+		t.Fatal("runtime Stop was not called")
+	}
+	final := mustGetRunnerRun(t, database, run.ID)
+	if final.Status != db.RunnerRunStatusAborted {
+		t.Fatalf("expected stopped continuation aborted, got %q", final.Status)
+	}
+	if snapshot, ok := jobsRegistry.Snapshot(run.JobID); !ok || snapshot.Status != "aborted" {
+		t.Fatalf("expected stopped continuation job aborted, ok=%v snapshot=%#v", ok, snapshot)
+	}
+}
+
+func TestManagerTimeoutWhileApprovalIsPendingFinalizesTimedOut(t *testing.T) {
+	manager, database, jobsRegistry := newTestManager(t)
+	runtime := &approvalOnContextDoneRuntime{fakeRuntime: fakeRuntime{id: RunnerCodex}}
+	registry := &RunnerRuntimeRegistry{}
+	registry.Register(runtime)
+	manager.Runtimes = registry
+	manager.Cfg.RuntimeMode = map[string]string{string(RunnerCodex): string(RuntimeModeNative)}
+	manager.ctx = context.Background()
+	metaJSON, err := json.Marshal(map[string]any{
+		"runner_chat_session_id":        "chat-session-timeout",
+		"runner_chat_turn_id":           "chat-turn-timeout",
+		"runner_chat_continuation_mode": string(ContinuationNative),
+		"runner_chat_user_message":      "continue",
+	})
+	if err != nil {
+		t.Fatalf("marshal run metadata: %v", err)
+	}
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{
+		ID:             "acr-approval-timeout",
+		JobID:          "job-approval-timeout",
+		RunnerID:       string(RunnerCodex),
+		Status:         db.RunnerRunStatusRunning,
+		MetaJSON:       string(metaJSON),
+		TimeoutSeconds: 1,
+	})
+	jobsRegistry.RegisterWithID(run.JobID, "runner:codex")
+	manager.executeRun(run)
+	final := mustGetRunnerRun(t, database, run.ID)
+	if final.Status != db.RunnerRunStatusTimedOut {
+		t.Fatalf("expected timed-out run, got %q", final.Status)
+	}
+}
+
+func TestManagerPersistEventReportsReplayDegradedWhenStoreFails(t *testing.T) {
+	manager, database, jobsRegistry := newTestManager(t)
+	run := db.RunnerRun{ID: "acr-persist-failure", JobID: "job-persist-failure"}
+	jobsRegistry.RegisterWithID(run.JobID, "runner:opencode")
+	_, events, unsubscribe, ok := jobsRegistry.Subscribe(run.JobID)
+	if !ok {
+		t.Fatal("expected job subscription")
+	}
+	defer unsubscribe()
+	if err := database.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	if manager.persistEvent(run, RunnerRunEvent{Type: "output", Seq: 4, Chunk: "live"}) {
+		t.Fatal("expected persistence failure")
+	}
+	select {
+	case event := <-events:
+		if event.Type != "warning" || event.Data["code"] != "runner_event_persistence_degraded" {
+			t.Fatalf("expected replay degradation warning, got %#v", event)
+		}
+		if event.Data["message"] == "" {
+			t.Fatalf("expected user-safe degradation message, got %#v", event.Data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected persistence warning event")
+	}
+	if manager.persistEvent(run, RunnerRunEvent{Type: "output", Seq: 5, Chunk: "still live"}) {
+		t.Fatal("expected degraded persistence to remain disabled for this run")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("did not expect repeated persistence warning, got %#v", event)
+	default:
+	}
+}
+
+func TestManagerPersistEventBoundsOversizedOutputAndWarnsOnce(t *testing.T) {
+	manager, database, jobsRegistry := newTestManager(t)
+	manager.Cfg.MaxPersistedOutputBytes = 128
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{ID: "acr-budget-single", JobID: "job-budget-single", Status: db.RunnerRunStatusRunning})
+	jobsRegistry.RegisterWithID(run.JobID, "runner:test")
+	_, events, unsubscribe, ok := jobsRegistry.Subscribe(run.JobID)
+	if !ok {
+		t.Fatal("expected job subscription")
+	}
+	defer unsubscribe()
+
+	if !manager.persistEvent(run, RunnerRunEvent{Type: "output", Seq: 1, Stream: "stdout", Chunk: strings.Repeat("x", 512)}) {
+		t.Fatal("expected bounded oversized event to retain a durable marker")
+	}
+	stored, err := database.ListRunnerRunEvents(context.Background(), run.JobID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListRunnerRunEvents: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Type != "output_truncated" {
+		t.Fatalf("expected output_truncated event, got %#v", stored)
+	}
+	if got := len(stored[0].Chunk) + len(stored[0].PayloadJSON); got > 128 {
+		t.Fatalf("persisted event used %d bytes, cap is 128", got)
+	}
+	var marker map[string]any
+	if err := json.Unmarshal([]byte(stored[0].PayloadJSON), &marker); err != nil || marker["truncated"] != true {
+		t.Fatalf("invalid truncation marker: payload=%q err=%v", stored[0].PayloadJSON, err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != "output_truncated" {
+			t.Fatalf("expected output_truncated warning, got %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected truncation warning")
+	}
+	manager.persistEvent(run, RunnerRunEvent{Type: "output", Seq: 2, Stream: "stdout", Chunk: strings.Repeat("y", 512)})
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected repeated truncation warning: %#v", event)
+	default:
+	}
+}
+
+func TestManagerPersistEventAggregateBudgetPreservesCompletion(t *testing.T) {
+	manager, database, jobsRegistry := newTestManager(t)
+	manager.Cfg.MaxPersistedOutputBytes = 64
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{ID: "acr-budget-aggregate", JobID: "job-budget-aggregate", Status: db.RunnerRunStatusRunning})
+	jobsRegistry.RegisterWithID(run.JobID, "runner:test")
+	manager.persistEvent(run, RunnerRunEvent{Type: "output", Seq: 1, Stream: "stdout", Chunk: strings.Repeat("a", 48)})
+	manager.persistEvent(run, RunnerRunEvent{Type: "structured", Seq: 2, Payload: json.RawMessage(strings.Repeat("{", 100))})
+	if !manager.persistEvent(run, RunnerRunEvent{Type: "completion", Seq: 3, Status: db.RunnerRunStatusSucceeded, Payload: json.RawMessage(`{"exit_code":0}`)}) {
+		t.Fatal("completion should remain durable after output budget exhaustion")
+	}
+	stored, err := database.ListRunnerRunEvents(context.Background(), run.JobID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListRunnerRunEvents: %v", err)
+	}
+	var total int
+	var completion bool
+	for _, event := range stored {
+		total += len(event.Chunk) + len(event.PayloadJSON)
+		if event.Type == "completion" {
+			completion = true
+		}
+	}
+	if total > 64 {
+		t.Fatalf("budgeted durable bytes=%d, cap is 64", total)
+	}
+	if !completion {
+		t.Fatalf("completion event missing from durable history: %#v", stored)
+	}
+}
+
+func TestManagerPersistEventBudgetStateCleansUpAtFinalization(t *testing.T) {
+	manager, database, _ := newTestManager(t)
+	manager.Cfg.MaxPersistedOutputBytes = 64
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{ID: "acr-budget-cleanup", JobID: "job-budget-cleanup", Status: db.RunnerRunStatusRunning})
+	manager.persistEvent(run, RunnerRunEvent{Type: "output", Seq: 1, Chunk: strings.Repeat("z", 48)})
+	manager.mu.Lock()
+	if len(manager.eventPersistenceStates) != 1 {
+		manager.mu.Unlock()
+		t.Fatalf("expected one active budget state, got %d", len(manager.eventPersistenceStates))
+	}
+	manager.mu.Unlock()
+	manager.finalizeRun(context.Background(), run, db.RunnerRunStatusSucceeded, "", ProcessOutput{ExitCode: 0})
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.eventPersistenceStates) != 0 {
+		t.Fatalf("budget state leaked after finalization: %d", len(manager.eventPersistenceStates))
+	}
+}
+
+func TestManagerReconcileInterruptedRunCleansApprovalPersistenceState(t *testing.T) {
+	manager, database, _ := newTestManager(t)
+	run := mustInsertRunnerRun(t, database, db.RunnerRun{
+		ID:     "acr-budget-reconcile-cleanup",
+		JobID:  "job-budget-reconcile-cleanup",
+		Status: db.RunnerRunStatusApprovalRequired,
+	})
+	manager.eventPersistenceState(run.ID)
+	manager.eventPersistenceWarnings.Store(run.ID, struct{}{})
+
+	manager.reconcileInterruptedRun(run, "aborted by service restart")
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.eventPersistenceStates) != 0 {
+		t.Fatalf("budget state leaked after restart reconciliation: %d", len(manager.eventPersistenceStates))
+	}
+	if _, warned := manager.eventPersistenceWarnings.Load(run.ID); warned {
+		t.Fatal("persistence warning state leaked after restart reconciliation")
+	}
 }
 
 func TestManagerEnqueueRejectsInvalidRequests(t *testing.T) {

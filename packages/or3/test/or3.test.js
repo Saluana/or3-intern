@@ -58,6 +58,7 @@ test('routes explicitly configured external runtime commands through connect', a
     await writeFile(cloudflared, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(cloudflared, 0o755);
     await writeFile(`${cloudflared}.version`, `${CLOUDFLARED_VERSION}\n`, { mode: 0o600 });
+    await writeCacheMetadata(cloudflared, CLOUDFLARED_VERSION);
     const previousIntern = process.env.OR3_INTERN_BIN;
     process.env.OR3_INTERN_BIN = binary;
     t.after(() => {
@@ -141,10 +142,12 @@ test('all cached management commands start offline without a shell PATH install'
     await writeFile(binary, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(binary, 0o755);
     await writeFile(`${binary}.version`, 'v0.1.3\n', { mode: 0o600 });
+    await writeCacheMetadata(binary, 'v0.1.3');
     const cloudflared = join(installDir, 'cloudflared');
     await writeFile(cloudflared, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(cloudflared, 0o755);
     await writeFile(`${cloudflared}.version`, `${CLOUDFLARED_VERSION}\n`, { mode: 0o600 });
+    await writeCacheMetadata(cloudflared, CLOUDFLARED_VERSION);
 
     let fetches = 0;
     const invocations = [];
@@ -184,15 +187,35 @@ test('all cached management commands start offline without a shell PATH install'
     }
 });
 
-test('cache validation uses file fingerprints and accepts a legacy version cache', async (t) => {
+test('cache validation requires metadata and verifies the executable digest', async (t) => {
     const directory = await makeTestDirectory(t);
     const binary = join(directory, 'or3-intern');
     const versionFile = `${binary}.version`;
-    await writeFile(binary, Buffer.alloc(4 * 1024 * 1024, 7), { mode: 0o711 });
+    const originalBody = Buffer.alloc(4 * 1024 * 1024, 7);
+    await writeFile(binary, originalBody, { mode: 0o711 });
     await chmod(binary, 0o711);
     await writeFile(versionFile, 'v-test\n', { mode: 0o600 });
 
+    assert.equal(await cachedVersionMatches(versionFile, 'v-test', binary), false);
+    await writeCacheMetadata(binary, 'v-test');
     assert.equal(await cachedVersionMatches(versionFile, 'v-test', binary), true);
+
+    const tamperedBody = Buffer.alloc(originalBody.length, 8);
+    await writeFile(binary, tamperedBody, { mode: 0o711 });
+    await chmod(binary, 0o711);
+    // Keep the current file fingerprints but retain the original digest to
+    // prove cache validation cannot trust metadata without hashing the file.
+    const tamperedInfo = await stat(binary);
+    const originalDigest = createHash('sha256').update(originalBody).digest('hex');
+    await writeFile(`${binary}.metadata.json`, `${JSON.stringify({
+        version: 'v-test',
+        size: tamperedInfo.size,
+        mtimeMs: tamperedInfo.mtimeMs,
+        ctimeMs: tamperedInfo.ctimeMs,
+        sha256: originalDigest,
+    })}\n`, { mode: 0o600 });
+    assert.equal(await cachedVersionMatches(versionFile, 'v-test', binary), false);
+
     assert.equal(await cachedVersionMatches(versionFile, 'v-other', binary), false);
 });
 
@@ -426,4 +449,16 @@ async function makeTestDirectory(t) {
 
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function writeCacheMetadata(binary, version) {
+    const info = await stat(binary);
+    const digest = createHash('sha256').update(await readFile(binary)).digest('hex');
+    await writeFile(`${binary}.metadata.json`, `${JSON.stringify({
+        version,
+        size: info.size,
+        mtimeMs: info.mtimeMs,
+        ctimeMs: info.ctimeMs,
+        sha256: digest,
+    })}\n`, { mode: 0o600 });
 }

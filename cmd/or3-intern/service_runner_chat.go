@@ -306,11 +306,12 @@ func (s *serviceServer) handleRunnerChatSessionRead(w http.ResponseWriter, r *ht
 }
 
 func (s *serviceServer) handleRunnerChatTurnsList(w http.ResponseWriter, r *http.Request, store *db.DB, sessionID string) {
-	limit := 0
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+	limit := db.DefaultRunnerChatTurnListLimit
+	if values, present := r.URL.Query()["limit"]; present {
+		raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit"})
+		if len(values) != 1 || raw == "" || err != nil || n <= 0 || n > db.MaxRunnerChatTurnListLimit {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit", "code": "validation_failed"})
 			return
 		}
 		limit = n
@@ -520,11 +521,12 @@ func (s *serviceServer) handleRunnerChatTurnEvents(w http.ResponseWriter, r *htt
 		}
 		afterSeq = n
 	}
-	limit := 200
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+	limit := db.DefaultRunnerChatEventListLimit
+	if values, present := r.URL.Query()["limit"]; present {
+		raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit"})
+		if len(values) != 1 || raw == "" || err != nil || n <= 0 || n > db.MaxRunnerChatEventListLimit {
+			writeServiceJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid limit", "code": "validation_failed"})
 			return
 		}
 		limit = n
@@ -613,7 +615,7 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 	}
 	// Initial flush of all persisted history. A reconnect to a completed turn
 	// must not silently stop after the first page of tool/content events.
-	if !flushPending(1000) {
+	if !flushPending(db.MaxRunnerChatEventListLimit) {
 		return
 	}
 	if isTerminalRunnerChatStatus(turn.Status) {
@@ -630,7 +632,7 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 			return
 		case <-ticker.C:
 			beforeSeq := afterSeq
-			if !flushPending(200) {
+			if !flushPending(db.DefaultRunnerChatEventListLimit) {
 				_ = writeSSEEvent(w, "error", map[string]any{"error": "runner chat events unavailable"})
 				return
 			}
@@ -640,7 +642,7 @@ func (s *serviceServer) handleRunnerChatTurnStream(w http.ResponseWriter, r *htt
 			cur, err := store.GetRunnerChatTurn(r.Context(), turnID)
 			if err == nil && isTerminalRunnerChatStatus(cur.Status) {
 				// Drain any final events recorded after the last poll.
-				_ = flushPending(200)
+				_ = flushPending(db.DefaultRunnerChatEventListLimit)
 				_ = writeSSEEvent(w, "done", map[string]any{
 					"status":               cur.Status,
 					"final_text":           cur.FinalText,

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-intern/internal/approval"
 	"or3-intern/internal/config"
 	"or3-intern/internal/db"
 	"or3-intern/internal/jobs"
@@ -42,6 +43,10 @@ type runnerChatServiceFixture struct {
 func newRunnerChatServiceFixture(t *testing.T, cfg config.Config, database *db.DB, agentManager *runners.Manager, chatManager *runners.ChatManager) *runnerChatServiceFixture {
 	t.Helper()
 	secret := strings.Repeat("r", 32)
+	// Runner-chat tests exercise the operator surface explicitly. The
+	// production default is the read-only service-client role, so do not let
+	// this fixture inherit it accidentally.
+	cfg.Service.SharedSecretRole = approval.RoleOperator
 	server := &serviceServer{
 		config:        cfg,
 		database:      database,
@@ -794,6 +799,10 @@ func TestServiceRunnerChat_ListSessionsOrderingFilterAndValidation(t *testing.T)
 		"/internal/v1/runner-chat/sessions?app_session_key_prefix=",
 		"/internal/v1/runner-chat/sessions?app_session_key_prefix=one&app_session_key_prefix=two",
 		"/internal/v1/runner-chat/sessions?app_session_key_prefix=" + url.QueryEscape(strings.Repeat("x", serviceRunnerChatAppSessionKeyPrefixMaxBytes+1)),
+		fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns?limit=%d", "rcs-list-new", db.MaxRunnerChatTurnListLimit+1),
+		fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns?limit=1&limit=2", "rcs-list-new"),
+		fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/events?limit=%d", "rcs-list-new", "rct-list-window-5", db.MaxRunnerChatEventListLimit+1),
+		fmt.Sprintf("/internal/v1/runner-chat/sessions/%s/turns/%s/events?limit=1&limit=2", "rcs-list-new", "rct-list-window-5"),
 	} {
 		rec, payload := doGet(path)
 		if rec.Code != http.StatusBadRequest || payload["code"] != "validation_failed" {

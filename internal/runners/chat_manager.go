@@ -361,7 +361,7 @@ func (cm *ChatManager) AbortTurn(ctx context.Context, turnID string) error {
 		return err
 	}
 	switch turn.Status {
-	case db.RunnerChatTurnStatusQueued, db.RunnerChatTurnStatusRunning:
+	case db.RunnerChatTurnStatusQueued, db.RunnerChatTurnStatusRunning, db.RunnerChatTurnStatusApprovalRequired:
 	default:
 		return nil
 	}
@@ -447,6 +447,11 @@ func (cm *ChatManager) RespondToTurnApproval(ctx context.Context, turnID string,
 		} else {
 			if err := cm.Broker.DenyRequest(ctx, approvalID, actor, note); err != nil {
 				return RespondToTurnApprovalResult{}, err
+			}
+		}
+		if cm.Manager != nil && strings.TrimSpace(turn.RunnerJobID) != "" {
+			if err := cm.Manager.Abort(ctx, turn.RunnerJobID); err != nil {
+				log.Printf("chat manager: abort rejected approval run failed: turn=%s job=%s err=%v", turn.ID, turn.RunnerJobID, err)
 			}
 		}
 		cm.appendApprovalResponseEvent(ctx, turn, sess, decision, RespondToTurnApprovalResult{Route: "broker", ApprovalID: approvalID, NativeContinued: false})
@@ -611,7 +616,7 @@ func (cm *ChatManager) resumeTurnAfterNativeApproval(sess db.RunnerChatSession, 
 			log.Printf("chat manager: resume after approval load run failed: turn=%s err=%v ok=%v", turn.ID, err, ok)
 			return
 		}
-		if run.Status != db.RunnerRunStatusRunning {
+		if run.Status != db.RunnerRunStatusRunning && run.Status != db.RunnerRunStatusApprovalRequired {
 			log.Printf("chat manager: resume after approval skipped: turn=%s run_status=%s", turn.ID, run.Status)
 			return
 		}
@@ -648,6 +653,11 @@ func (cm *ChatManager) resumeTurnAfterNativeApproval(sess db.RunnerChatSession, 
 		go cm.mirrorJobEventsAfter(latestSess, latestTurn, turn.RunnerJobID, resumeAfterSeq)
 		if err := cm.Manager.ResumeNativeRunAfterApproval(ctx, run); err != nil {
 			log.Printf("chat manager: resume after approval failed: turn=%s err=%v", turn.ID, err)
+			if cm.Manager != nil && strings.TrimSpace(run.JobID) != "" {
+				if abortErr := cm.Manager.Abort(context.Background(), run.JobID); abortErr != nil {
+					log.Printf("chat manager: abort failed continuation: turn=%s job=%s err=%v", turn.ID, run.JobID, abortErr)
+				}
+			}
 		}
 	}()
 }

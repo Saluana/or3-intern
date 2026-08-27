@@ -107,7 +107,7 @@ Inside chat, `/new` archives the current conversation into long-term memory befo
 or3-intern settings
 ```
 
-`settings` opens a task-based home with AI Provider, Workspace Folder, Safety, Channels, Memory, and Advanced options. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export the raw config for advanced review. Runner-specific context and tool permissions are managed by the selected runner; use `or3-intern capabilities` to inspect the effective posture.
+`settings` opens a task-based home with AI Provider, Workspace Folder, Safety, Channels, Memory, and Advanced options. Use `or3-intern settings --section safety` to change safety mode, `or3-intern settings --section workspace` to change the folder boundary, or `or3-intern settings --export config.json` to export a redacted config template for advanced review. Credential values are omitted, so this is not a credentials backup; file exports are owner-readable only. Runner-specific context and tool permissions are managed by the selected runner; use `or3-intern capabilities` to inspect the effective posture.
 
 ### 5. Connect another device
 

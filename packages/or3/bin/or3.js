@@ -327,9 +327,10 @@ export async function downloadVerifiedToFile(asset, destination, options = {}) {
 
 export async function cachedVersionMatches(versionFile, version, binary, metadataFile = `${binary}.metadata.json`) {
     try {
-        const [savedVersion, binaryInfo] = await Promise.all([
+        const [savedVersion, binaryInfo, metadataText] = await Promise.all([
             readSmallText(versionFile, 256),
             lstat(binary),
+            readSmallText(metadataFile, MAX_METADATA_BYTES),
         ]);
         if (
             savedVersion.trim() !== version ||
@@ -339,22 +340,32 @@ export async function cachedVersionMatches(versionFile, version, binary, metadat
         ) {
             return false;
         }
-        try {
-            const metadata = JSON.parse(await readSmallText(metadataFile, MAX_METADATA_BYTES));
-            return metadata.version === version &&
-                metadata.size === binaryInfo.size &&
-                metadata.mtimeMs === binaryInfo.mtimeMs &&
-                metadata.ctimeMs === binaryInfo.ctimeMs &&
-                typeof metadata.sha256 === 'string' &&
-                /^[a-f0-9]{64}$/.test(metadata.sha256);
-        } catch (error) {
-            if (error?.code === 'ENOENT') {
-                // Accept caches created by older versions. New installs always
-                // write fingerprint and digest metadata.
-                return true;
-            }
+        const metadata = JSON.parse(metadataText);
+        if (
+            metadata.version !== version ||
+            metadata.size !== binaryInfo.size ||
+            metadata.mtimeMs !== binaryInfo.mtimeMs ||
+            metadata.ctimeMs !== binaryInfo.ctimeMs ||
+            typeof metadata.sha256 !== 'string' ||
+            !/^[a-f0-9]{64}$/.test(metadata.sha256)
+        ) {
             return false;
         }
+
+        // Fingerprints let us reject most stale files before doing I/O, but a
+        // cache is only trusted after hashing the executable itself. Re-stat
+        // after the read so a concurrent replacement cannot be accepted as a
+        // valid cache entry.
+        const digest = await sha256File(binary);
+        const currentInfo = await lstat(binary);
+        return currentInfo.isFile() &&
+            !currentInfo.isSymbolicLink() &&
+            (currentInfo.mode & 0o111) !== 0 &&
+            currentInfo.size === binaryInfo.size &&
+            currentInfo.mtimeMs === binaryInfo.mtimeMs &&
+            currentInfo.ctimeMs === binaryInfo.ctimeMs &&
+            digest.size === binaryInfo.size &&
+            digest.sha256 === metadata.sha256;
     } catch {
         return false;
     }
@@ -592,6 +603,16 @@ async function syncDirectory(path) {
     } finally {
         await handle?.close().catch(() => {});
     }
+}
+
+async function sha256File(path) {
+    const hash = createHash('sha256');
+    let size = 0;
+    for await (const chunk of createReadStream(path)) {
+        size += chunk.length;
+        hash.update(chunk);
+    }
+    return { size, sha256: hash.digest('hex') };
 }
 
 async function readSmallText(path, maxBytes) {

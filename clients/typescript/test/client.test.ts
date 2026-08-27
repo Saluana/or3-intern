@@ -365,6 +365,12 @@ describe('@or3/intern-client high-level routes', () => {
             client.listTurns('session', { limit: 0 })
         ).rejects.toMatchObject({ code: 'validation_failed' });
         await expect(
+            client.listTurns('session', { limit: 101 })
+        ).rejects.toMatchObject({ code: 'validation_failed' });
+        await expect(
+            client.listTurnEvents('session', 'turn', { limit: 1001 })
+        ).rejects.toMatchObject({ code: 'validation_failed' });
+        await expect(
             client.listSessions({ limit: 101 })
         ).rejects.toMatchObject({ code: 'validation_failed' });
         await expect(

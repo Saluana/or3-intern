@@ -88,6 +88,12 @@ func newTestManager(t *testing.T) (*Manager, *db.DB, *jobs.Registry) {
 		},
 		MaxQueued: 16,
 	}
+	// Manager tests exercise admission and lifecycle behavior with ready runners.
+	// Do not let asynchronous detection of the host's installed CLIs change the
+	// result between requests; readiness rejection cases override this fixture.
+	for _, spec := range AllRunners() {
+		manager.Registry.storeDetectResults([]RunnerInfo{{ID: string(spec.ID), Status: RunnerStatusAvailable}})
+	}
 	return manager, database, jobs
 }
 

@@ -792,6 +792,15 @@ func (s *serviceServer) terminalWriteInput(sessionID string, input string) error
 		return errTerminalSessionNotWritable
 	}
 	if _, err := io.WriteString(stdin, input); err != nil {
+		// The output collector or process waiter can close the PTY after the
+		// writable-state snapshot above. Treat that lifecycle race like input
+		// submitted after the final status has already been published.
+		session.mu.Lock()
+		running := session.Status == "running"
+		session.mu.Unlock()
+		if !running || errors.Is(err, os.ErrClosed) {
+			return errTerminalSessionNotWritable
+		}
 		return fmt.Errorf("failed to write terminal input: %w", err)
 	}
 	session.appendEvent("input", map[string]any{"size": len(input)})

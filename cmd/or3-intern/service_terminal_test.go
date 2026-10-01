@@ -441,6 +441,29 @@ func TestWriteTerminalInputAcceptsNewlineOnlyInput(t *testing.T) {
 	}
 }
 
+func TestWriteTerminalInputAfterPTYClose(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("Open PTY: %v", err)
+	}
+	defer slave.Close()
+	// Output collection can close the PTY before the process waiter publishes
+	// the final session status.
+	if err := master.Close(); err != nil {
+		t.Fatalf("Close PTY: %v", err)
+	}
+	session := &serviceTerminalSession{ID: "term-closed-pty", Status: "running", ExpiresAt: time.Now().Add(time.Minute), stdin: master, ptyFile: master}
+	server := &serviceServer{terminalManager: &serviceTerminalManager{sessions: map[string]*serviceTerminalSession{session.ID: session}}}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/terminal/sessions/"+session.ID+"/input", strings.NewReader(`{"input":"\n"}`))
+	rec := httptest.NewRecorder()
+
+	server.writeTerminalInput(rec, req, session.ID)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for closed PTY, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWriteTerminalInputRefreshesSessionExpiry(t *testing.T) {
 	writer := &serviceTerminalTestWriteCloser{}
 	oldExpiry := time.Now().Add(2 * time.Second).UTC()

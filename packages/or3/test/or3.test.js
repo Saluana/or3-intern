@@ -141,8 +141,9 @@ test('all cached management commands start offline without a shell PATH install'
     const binary = join(installDir, 'or3-intern');
     await writeFile(binary, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(binary, 0o755);
-    await writeFile(`${binary}.version`, 'v0.1.3\n', { mode: 0o600 });
-    await writeCacheMetadata(binary, 'v0.1.3');
+    const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    await writeFile(`${binary}.version`, `v${version}\n`, { mode: 0o600 });
+    await writeCacheMetadata(binary, `v${version}`);
     const cloudflared = join(installDir, 'cloudflared');
     await writeFile(cloudflared, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     await chmod(cloudflared, 0o755);

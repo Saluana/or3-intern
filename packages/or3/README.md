@@ -10,7 +10,7 @@ Start local OR3 Intern without Go or a PATH edit with the coordinated immutable
 package and binary release:
 
 ```sh
-npx @or3/connect@0.1.3 intern
+npx @or3/connect@0.1.4 intern
 ```
 
 For a source checkout, you can install the same CLI directly:
